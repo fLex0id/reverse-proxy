@@ -198,12 +198,14 @@ selinux_fix() { command -v restorecon >/dev/null && restorecon -R "$ETC" "$LIB" 
 pkg_install() {
   local p; for p in "$@"; do rpm -q "$p" >/dev/null 2>&1 || dnf -y install "$p" || return 1; done
 }
-pkg_epel() { rpm -q epel-release >/dev/null 2>&1 || dnf -y install epel-release; }
+# dnf с короткими таймаутами: медленное зеркало не должно подвешивать скрипт
+dnf_q() { timeout "${DNF_TIMEOUT:-240}" dnf -y --setopt=timeout=15 --setopt=retries=2 "$@"; }
+pkg_epel() { rpm -q epel-release >/dev/null 2>&1 || dnf_q install epel-release; }
 # QR-коды клиентов: qrencode — в EPEL (Rocky 9) или в основном репозитории (10); ставим при установке
-pkg_qr() { command -v qrencode >/dev/null 2>&1 && return 0; dnf -y install qrencode || { pkg_epel && dnf -y install qrencode; }; }
+pkg_qr() { command -v qrencode >/dev/null 2>&1 && return 0; dnf_q install qrencode || { pkg_epel && dnf_q install qrencode; }; }
 pkg_wg() { # wireguard-tools: в Rocky 9 — EPEL, в 10 — может быть в основном репозитории
   rpm -q wireguard-tools >/dev/null 2>&1 && return 0
-  dnf -y install wireguard-tools || { dnf -y install epel-release && dnf -y install wireguard-tools; }
+  dnf_q install wireguard-tools || { pkg_epel && dnf_q install wireguard-tools; }
 }
 public_ip() {
   local ip u; for u in https://api.ipify.org https://ifconfig.me https://icanhazip.com; do
@@ -1194,7 +1196,7 @@ cmd_migrate() {
   mkdir -p "$STATE"; chmod 755 "$STATE"
   cp -p "$CONF" "$BK_DIR/rp.conf.v1.$(date +%s)" 2>/dev/null || { mkdir -p "$BK_DIR"; cp -p "$CONF" "$BK_DIR/rp.conf.v1.$(date +%s)"; }
   self_install; py_install
-  run "QR-коды (qrencode)" pkg_qr || warn "qrencode не поставился: конфиги клиентов останутся текстом"
+  if ((${RP_SKIP_QR:-0})); then note "qrencode пропущен (RP_SKIP_QR=1)"; else run "QR-коды (qrencode, до 4 минут)" pkg_qr || warn "qrencode не поставился: конфиги клиентов останутся текстом (потом: rp client show)"; fi
   conf_migrate
   units_vps1
   systemctl restart rp-net >/dev/null 2>&1
