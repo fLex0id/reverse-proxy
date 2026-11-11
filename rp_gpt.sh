@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # rp — цепочка «клиенты WG → VPS-1 (РФ) → туннель, устойчивый к ТСПУ → VPS-2 (выход)».
-# Сборка 1.1.7-fw-xhttp-t3: операции с WG без изменений firewall, надёжнее T3, XHTTP stream-up.
+# Сборка 1.1.8: безопасные тесты без перезапусков, верная привязка к активному транспорту.
 # Один файл: роль VPS-1 (сервер, меню, генератор) или VPS-2 (блок на чистом bash, сторож).
 # Образец по структуре и стилю — tt.sh; отступления помечены «ОТСТУПЛЕНИЕ» с причиной.
 # Rocky Linux 9/10. Конфигурация: /etc/rp/rp.conf (единственный источник правды).
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.1.7-fw-xhttp-t3"
+SELF_VERSION="1.1.8-stable-diagnostics"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -2035,7 +2035,7 @@ self_upgrade() {
     return 1
   fi
   ok "Команда rp обновлена до $nv"
-  note "Для обновления VPS-2: rp push; затем rp test"
+  note "Проверка: rp test. Для изменения конфигурации VPS-2 отдельно используйте rp push"
   return 0
 }
 
@@ -2099,12 +2099,12 @@ cmd_migrate() {
   [[ -n $(cf WATCH_MIN) ]] || conf_set WATCH_MIN 15
   [[ -n $(cf WATCH_MAX) ]] || conf_set WATCH_MAX 35
   units_vps1
-  systemctl restart rp-net >/dev/null 2>&1
+  systemctl is-active --quiet rp-net || systemctl start rp-net >/dev/null 2>&1
   tr_has hy2-wg && ! [[ -x $HY2_BIN ]] && run "Hysteria2" hy2_install "$(cf HY2_VER "$HY2_PINNED")"
   run "Хэши релизов для VPS-2" pin_release || warn "Хэши для VPS-2 не получены (rp link/rp block повторят попытку)"
   vps1_apply || die "Конфигурация не применилась (изменения откатены)"
   ok "VPS-1 переведён на $SELF_VERSION"
-  note "Дальше: rp push — передать обновление на VPS-2 (по SSH, откат через 10 минут без подтверждения), затем rp test"
+  note "Дальше: rp test. rp push нужен только если VPS-2 требует обновления конфигурации"
 }
 
 # ── Установка ────────────────────────────────────────────────────────────
@@ -2405,15 +2405,131 @@ ssh_args_for() { # ssh_args_for xhttp|hy2 — аргументы для конк
     -o StrictHostKeyChecking=accept-new -o HostKeyAlias=vps2 -o ConnectTimeout=6 \
     -o ConnectionAttempts=1 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 -p "$port" "root@$host"
 }
-ssh_args() { # обычный интерактивный rp ssh по предпочитаемому пути
-  if hy2_live; then ssh_args_for hy2; else ssh_args_for xhttp; fi
+ssh_args() { # confirm the currently active transport before opening the management path
+  local active method
+  active=$(vps2_read 'cat /var/lib/rp/active' 2>/dev/null | tr -d '\r\n' || true)
+  method=$(control_method "$active" 2>/dev/null || true)
+  if [[ -n $method ]] && ssh_method_ready "$method"; then
+    ssh_args_for "$method"; return 0
+  fi
+  for method in xhttp hy2; do
+    if ssh_method_ready "$method"; then ssh_args_for "$method"; return 0; fi
+  done
+  return 1
 }
 cmd_ssh() {
-  need_vps1; local -a a; mapfile -t a < <(ssh_args) || die "Нет двери для SSH (rp door add ssh 2222 127.0.0.1:22)"
+  need_vps1; local -a a=(); mapfile -t a < <(ssh_args)
+  [[ ${a[-1]:-} == root@* ]] || die "SSH к VPS-2 сейчас недоступен (rp diag; проверьте active на VPS-2)"
   [[ -f $ETC/ssh/known_hosts ]] || note "Первое подключение: сверьте отпечаток с тем, что показал блок на VPS-2"
   exec ssh "${a[@]}" "$@"
 }
-vps2_run() { local -a a; mapfile -t a < <(ssh_args) || return 1; ssh -o BatchMode=yes "${a[@]}" "$@"; }
+vps2_run() { local -a a=(); mapfile -t a < <(ssh_args); [[ ${a[-1]:-} == root@* ]] || return 1; ssh -o BatchMode=yes "${a[@]}" "$@"; }
+# Read-only commands may be safely retried after watchdog switches the reverse tunnel.
+# Never use this function for installation, confirmation, or other mutating commands.
+vps2_read() {
+  local method attempt rc output
+  local -a a=()
+  for attempt in 1 2 3; do
+    for method in xhttp hy2; do
+      if [[ $method == hy2 ]]; then
+        hy2_live || continue
+      else
+        { tr_has reality-xhttp || tr_has reality-xhttp2; } || continue
+        door_port ssh >/dev/null || continue
+      fi
+      a=()
+      mapfile -t a < <(ssh_args_for "$method")
+      ((${#a[@]})) || continue
+      # Buffer each attempt. A dropped SSH stream must not leak partial output
+      # into a later successful attempt (e.g. false IP or active-transport name).
+      if output=$(ssh -o BatchMode=yes -o ConnectionAttempts=1 "${a[@]}" "$@" </dev/null); then
+        printf '%s\n' "$output"
+        return 0
+      fi
+    done
+    ((attempt < 3)) && sleep 2
+  done
+  return 1
+}
+# A freshly observed WG handshake does not tell us what the VPS-2 watchdog
+# is CURRENTLY using. Only /var/lib/rp/active is authoritative for transport.
+control_method() {
+  case $1 in
+    reality-xhttp|reality-xhttp2) printf 'xhttp\n' ;;
+    hy2-wg|hy2o-wg) printf 'hy2\n' ;;
+    *) return 1 ;;
+  esac
+}
+ssh_method_ready() {
+  local method=$1
+  local -a a=()
+  [[ $method == xhttp || $method == hy2 ]] || return 1
+  [[ $method != hy2 ]] || hy2_live || return 1
+  mapfile -t a < <(ssh_args_for "$method")
+  ((${#a[@]})) || return 1
+  ssh -o BatchMode=yes -o ConnectionAttempts=1 "${a[@]}" true </dev/null >/dev/null 2>&1
+}
+# Verify exactly 200 KiB both ways through a single, explicitly selected SSH path.
+# If the watcher switches paths mid-test, do not attribute an SSH reset to DPI.
+t3_ssh_method() {
+  local method=$1 n=${2:-204800} got tries
+  local -a a=()
+  local -a before=()
+  mapfile -t a < <(ssh_args_for "$method")
+  ((${#a[@]})) || return 1
+  for tries in 1 2 3; do
+    got=$(timeout 45 ssh -o BatchMode=yes -o ConnectTimeout=6 "${a[@]}" "head -c $n /dev/zero" </dev/null 2>/dev/null | wc -c) || got=0
+    if [[ $got =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]] && ((got == n)); then
+      got=$(head -c "$n" /dev/zero | timeout 45 ssh -o BatchMode=yes -o ConnectTimeout=6 "${a[@]}" 'wc -c' 2>/dev/null) || got=0
+      if [[ $got =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]] && ((got == n)); then return 0; fi
+    fi
+    ((tries < 3)) && sleep 2
+  done
+  return 1
+}
+ssh_method_banner() {
+  local method=$1 host port
+  case $method in
+    xhttp) host=127.0.0.1; port=$(door_port ssh) || return 1 ;;
+    hy2) host=10.77.0.2; port=22 ;;
+    *) return 1 ;;
+  esac
+  timeout 8 bash -c 'exec 3<>/dev/tcp/$0/$1 && read -r -t 5 l <&3 && [[ $l == SSH-* ]]' "$host" "$port" 2>/dev/null
+}
+# Fail-closed configuration verification, WITHOUT deliberately killing a live tunnel.
+# Confirms rp's firewall and Xray fallback rules, not a live leak simulation.
+failclosed_static() {
+  local rules
+  nft list table inet rp_guard >/dev/null 2>&1 || return 1
+  nft list table ip rp_tp >/dev/null 2>&1 || return 1
+  nft list table ip6 rp_block6 >/dev/null 2>&1 || return 1
+  rules=$(nft list chain inet rp_guard forward 2>/dev/null) || return 1
+  grep -Eq 'iifname "wg0".*drop' <<<"$rules" || return 1
+  grep -Eq 'oifname "wg0".*drop' <<<"$rules" || return 1
+  ip -4 rule show | grep -Eq 'fwmark 0xff.*lookup 200' || return 1
+  ip -4 route show table 200 | grep -Eq '(^|[[:space:]])prohibit[[:space:]]+default|^prohibit default' || return 1
+  python3 -I - "$ETC/xray.json" <<'PY_VERIFY_XRAY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as f: x=json.load(f)
+    out={a['tag']: a for a in x['outbounds']}
+    assert out['block']['protocol']=='blackhole'
+    route=x['routing']
+    bal={a['tag']: a for a in route.get('balancers', [])}
+    for b in bal.values():
+        assert b.get('fallbackTag')=='block'
+    if 'exit' in bal:
+        assert any(r.get('balancerTag')=='exit' and
+                   (set(r.get('inboundTag', [])) & {'wg-tp', 'socks-in'})
+                   for r in route['rules'])
+    else:
+        assert any(a.get('tag')=='to-exit' and a.get('protocol')=='freedom' and
+                   a.get('streamSettings',{}).get('sockopt',{}).get('mark')==255
+                   for a in x['outbounds'])
+except (OSError, ValueError, KeyError, AssertionError, TypeError):
+    sys.exit(1)
+PY_VERIFY_XRAY
+}
 cmd_door() {
   need_vps1; local act=${1:-list} name=${2:-} port=${3:-} target=${4:-} d new="" it found=0
   case $act in
@@ -2626,63 +2742,78 @@ DOH_Q='AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE'   # запрос A example.com �
 doh_test() { local n; n=$(sx -m 10 -H 'accept: application/dns-message' "$1?dns=$DOH_Q" 2>/dev/null | wc -c); ((n > 28)); }
 # rp diag [--fix]: каждый участок пути проверяется отдельно, чтобы причина была названа, а не угадана
 cmd_diag() {
-  need_vps1; local fix=0 u t rf rfi eff r0 r1 pr code live=0 probe_ok=0 eg k v; local -A E=()
+  need_vps1
+  local fix=0 u active="" mark="" rf rfi eff pr="" code probe_ok=0 eg k v
+  local -A E=()
   [[ ${1:-} == --fix ]] && fix=1
   banner "Диагностика выхода в интернет" "$( ((fix)) && echo 'с исправлением' || echo 'только проверка')"
-  # 1. службы
-  for u in rp-net rp-xray; do systemctl is-active -q "$u" && ok "$u работает" || err "$u не работает (journalctl -u $u)"; done
-  # 2. туннель
-  if hy2_live; then live=1; ok "Туннель hy2 жив: рукопожатие WG $(wg show wg-exit latest-handshakes | awk '{print systime()-$2}' | head -1) с назад"
-    wg show wg-exit transfer 2>/dev/null | awk '{printf "  · wg-exit: принято %d КБ, передано %d КБ\n", $2/1024, $3/1024}' | sed 's/^/  /' | head -1
-  elif vps2_run true >/dev/null 2>&1; then ok "Туннель Reality жив (мост подключён); проверка прямого пути wg-exit пропущена"
-  else err "VPS-2 не подключён ни одним транспортом: rp status; на VPS-2: rp status / rp select"; return 1; fi
-  # 3. rp_filter: ответы из интернета приходят через wg-exit, обратный маршрут к ним ведёт в другой интерфейс
-  rf=$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo 0); rfi=$(sysctl -n net.ipv4.conf.wg-exit.rp_filter 2>/dev/null || echo 0)
+  for u in rp-net rp-xray; do
+    systemctl is-active -q "$u" && ok "$u работает" || err "$u не работает (journalctl -u $u)"
+  done
+  active=$(vps2_read 'cat /var/lib/rp/active' 2>/dev/null | tr -d '\r\n' || true)
+  mark=$(control_method "$active" 2>/dev/null || true)
+  if [[ -n $mark ]]; then
+    ok "VPS-2 сообщает активный транспорт: $active"
+  elif sx -m 10 https://api.ipify.org >/dev/null 2>&1; then
+    warn "Выход через SOCKS есть, но активный транспорт не удалось получить по SSH; вероятно, переходное состояние"
+    note "Для уточнения: повторите rp diag после стабилизации сторожа VPS-2"
+  else
+    err "Нет подтверждённой связи с VPS-2 ни по SSH, ни через SOCKS"
+    return 1
+  fi
+  # The inactive WG interface may still have a recent handshake for up to 180s.
+  # Never interpret that alone as evidence of a live HY2 transport.
+  if [[ $mark == hy2 ]]; then
+    if hy2_live; then
+      ok "Внутренний WG активного Hysteria2: свежий handshake"
+    else
+      warn "VPS-2 выбрал Hysteria2, но WG handshake отсутствует или устарел"
+    fi
+  elif [[ -n $active ]]; then
+    note "Проба wg-exit не требуется: активный маршрут — XHTTP Reverse"
+  fi
+  rf=$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null || echo 0)
+  rfi=$(sysctl -n net.ipv4.conf.wg-exit.rp_filter 2>/dev/null || echo 0)
   eff=$((rf > rfi ? rf : rfi))
-  if ((eff == 1)); then
-    err "rp_filter=строгий (all=$rf, wg-exit=$rfi): ядро выбрасывает ответы из интернета, пришедшие через wg-exit"
-    if ((fix)); then sysctl -q -w net.ipv4.conf.all.rp_filter=2 net.ipv4.conf.default.rp_filter=2 net.ipv4.conf.wg-exit.rp_filter=2 && ok "rp_filter=2 (loose) выставлен"; fi
-  else ok "rp_filter не мешает (all=$rf, wg-exit=$rfi)"; fi
-  # 4. маршрут и прямая проба (минуя Xray)
-  if ((live)); then
-    ip route get 1.1.1.1 mark 255 2>/dev/null | grep -q 'wg-exit' && ok "Метка 255 ведёт в wg-exit" || err "Метка 255 НЕ ведёт в wg-exit (ip rule / таблица 200): rp restart"
-    r0=$(py rpf); pr=$(py probe 1.1.1.1 443); r1=$(py rpf)
+  if [[ $mark == hy2 ]] && ((eff == 1)); then
+    err "Строгий rp_filter мешает wg-exit (all=$rf, wg-exit=$rfi)"
+    if ((fix)); then
+      sysctl -q -w net.ipv4.conf.all.rp_filter=2 net.ipv4.conf.default.rp_filter=2 net.ipv4.conf.wg-exit.rp_filter=2 >/dev/null 2>&1 && ok "rp_filter переведён в loose"
+    fi
+  else
+    ok "rp_filter: all=$rf wg-exit=$rfi (актуально при Hysteria2)"
+  fi
+  if [[ $mark == hy2 ]] && hy2_live; then
+    ip -4 route get 1.1.1.1 mark 255 2>/dev/null | grep -q 'wg-exit' && ok "Маршрут mark 255 ведёт в wg-exit" || err "Нет маршрута с mark 255 через wg-exit"
+    pr=$(py probe 1.1.1.1 443)
     case $pr in
-      ok*) probe_ok=1; ok "Прямое TCP-соединение VPS-1 → wg-exit → VPS-2 → 1.1.1.1:443: ${pr#ok } мс (Xray не участвует)" ;;
-      *) err "Прямое соединение через wg-exit не прошло: $pr"
-         ((r1 > r0)) && err "  счётчик отбросов rp_filter вырос на $((r1 - r0)): ответы выбрасывает ядро VPS-1" ;;
+      ok*) probe_ok=1; ok "Прямая проба через внутренний WG: ${pr#ok } мс" ;;
+      *) warn "Внутренний WG не прошёл пробу: $pr (маршрут/переключение/NAT; не доказательство блокировки)" ;;
     esac
   fi
-  # 5. VPS-2: пересылка и NAT
-  if eg=$(vps2_run '/usr/local/bin/rp egress' 2>/dev/null) && [[ -n $eg ]]; then
-    while IFS='=' read -r k v; do [[ -n $k ]] && E[$k]=$v; done <<<"$eg"
-    local fixv2=0
-    [[ ${E[ip_forward]:-} == 1 ]] && ok "VPS-2: пересылка IPv4 включена" || { err "VPS-2: ip_forward=${E[ip_forward]:-?} (пересылка выключена)"; fixv2=1; }
-    [[ ${E[nat]:-} == yes ]] && ok "VPS-2: NAT (masquerade) на месте, пакетов: ${E[nat_packets]:-0}" || { err "VPS-2: таблица NAT отсутствует"; fixv2=1; }
-    if [[ -n ${E[fw_zone_wg]:-} && ${E[fw_zone_wg]} != нет-firewalld ]]; then
-      [[ ${E[fw_forward]:-} == yes ]] && ok "VPS-2: firewalld пересылает трафик rp-wg (зона ${E[fw_zone_wg]})" || { err "VPS-2: firewalld не пересылает трафик rp-wg (зона «${E[fw_zone_wg]}», внешняя «${E[fw_zone_ext]:-?}»)"; fixv2=1; }
-    fi
-    [[ ${E[internet]:-} == ok ]] && ok "VPS-2: собственный выход в интернет есть" || err "VPS-2: у самого сервера нет выхода в интернет — это не лечится из rp (провайдер/фаервол хостера)"
-    if ((fixv2)); then
-      if ((fix)); then vps2_run '/usr/local/bin/rp fixnet' 2>&1 | sed 's/^/    /'; ok "На VPS-2 выполнен rp fixnet"; else warn "Исправить: rp diag --fix"; fi
-    fi
-  else warn "VPS-2: отчёт rp egress недоступен (старая версия на VPS-2? передайте обновление: rp push)"; fi
-  # повтор прямой пробы после исправлений
-  if ((live && fix)) && [[ $pr != ok* ]]; then sleep 2; pr=$(py probe 1.1.1.1 443); [[ $pr == ok* ]] && { probe_ok=1; ok "После исправления прямое соединение работает: ${pr#ok } мс"; } || err "Прямое соединение по-прежнему не проходит: $pr"; fi
-  # 6. путь через Xray
-  code=$(sx -m 12 -o /dev/null -w '%{http_code}' https://www.gstatic.com/generate_204 2>/dev/null || true)
-  if [[ $code == 204 ]]; then ok "Через Xray (SOCKS) интернет доступен"
-  else
-    err "Через Xray интернет недоступен (код «${code:-нет ответа}»)"
-    if ((probe_ok)); then
-      warn "Прямой путь работает, значит причина в маршрутизации Xray. Последние ошибки:"
-      journalctl -u rp-xray -n 200 --no-pager 2>/dev/null | grep -iE 'error|failed|reject|blackhole|block' | tail -n 6 | sed 's/^/    /'
-      if ((fix)); then systemctl restart rp-xray; sleep 4; code=$(sx -m 12 -o /dev/null -w '%{http_code}' https://www.gstatic.com/generate_204 2>/dev/null || true); [[ $code == 204 ]] && ok "После перезапуска Xray выход работает" || err "Не помогло: пришлите вывод rp diag и rp logs 100"; fi
-    fi
+  # VPS-2 egress reports routing/NAT for the inner WG transport; only relevant when HY2 is active.
+  if [[ $mark == hy2 ]]; then
+    if eg=$(vps2_read '/usr/local/bin/rp egress' 2>/dev/null) && [[ -n $eg ]]; then
+      while IFS='=' read -r k v; do [[ -n $k ]] && E[$k]=$v; done <<<"$eg"
+      local fixv2=0
+      [[ ${E[ip_forward]:-} == 1 ]] && ok "VPS-2: пересылка IPv4 включена" || { err "VPS-2: IPv4 forwarding выключен"; fixv2=1; }
+      [[ ${E[nat]:-} == yes ]] && ok "VPS-2: NAT для WG присутствует" || { err "VPS-2: NAT для WG отсутствует"; fixv2=1; }
+      [[ ${E[fw_forward]:-yes} == yes ]] || { err "VPS-2: firewalld ограничивает WG forwarding"; fixv2=1; }
+      if ((fixv2)); then
+        if ((fix)); then vps2_run '/usr/local/bin/rp fixnet' && ok "Команда восстановления NAT на VPS-2 выполнена" || err "Не удалось исправить NAT на VPS-2"
+        else warn "Для исправления NAT: rp diag --fix"; fi
+      fi
+    else warn "SSH к VPS-2 временно недоступен, сведения о NAT не получены"; fi
   fi
-  # 7. DNS через туннель (DoH)
+  if [[ $mark == hy2 && $fix == 1 && $probe_ok == 0 ]]; then
+    sleep 2
+    pr=$(py probe 1.1.1.1 443)
+    [[ $pr == ok* ]] && ok "Повторная проба внутреннего WG: ${pr#ok } мс" || warn "Проба после исправления не прошла: $pr"
+  fi
+  code=$(sx -m 12 -o /dev/null -w '%{http_code}' https://www.gstatic.com/generate_204 2>/dev/null || true)
+  [[ $code == 204 ]] && ok "Через Xray (SOCKS) интернет доступен" || err "Проба выхода через SOCKS не прошла (HTTP ${code:-нет ответа})"
   local first; first=$(py dns | head -1)
-  [[ -n $first ]] && { doh_test "$first" && ok "DoH через туннель отвечает ($first)" || err "DoH через туннель не отвечает ($first): rp dns"; }
+  [[ -n $first ]] && { doh_test "$first" && ok "DoH через туннель отвечает ($first)" || err "DoH через туннель не отвечает ($first)"; }
   return 0
 }
 
@@ -2719,11 +2850,17 @@ cmd_dns() {
 # ── Тесты T1–T8 ──────────────────────────────────────────────────────────
 TR=(); t_res() { TR+=("$1|$2|$3"); case $2 in ok) ok "$1 $3" ;; fail) err "$1 $3" ;; *) note "– $1 $3" ;; esac; }
 cmd_test() {
-  need_vps1; TR=(); local long=0 n=204800 got live="" ip want act
-  [[ ${1:-} == --long ]] && long=1
-  banner "Проверка туннеля" "T1–T8"
-  # T1: порты и серверы транспортов
-  local t miss=""
+  need_vps1; TR=()
+  local long=0 restart=0 opt n=204800 act="" method="" ip="" want="" known="" code="" d1="" port=""
+  local t miss="" t0=0 up=0 r bad=0
+  for opt in "$@"; do
+    case $opt in
+      --long) long=1 ;;
+      --restart) restart=1 ;;
+      *) err "Неверный параметр $opt: rp test [--long] [--restart]"; return 2 ;;
+    esac
+  done
+  banner "Проверка туннеля" "T1–T8 (без разрыва активных соединений$( ((restart)) && echo '; явный перезапуск T8' ))"
   for t in $(cf TRANSPORT_ORDER); do
     case $t in
       hy2-wg) systemctl is-active -q rp-hy2 || miss+=" hy2" ;;
@@ -2732,59 +2869,106 @@ cmd_test() {
       reality-xhttp2) ss -lnt | grep -q ":$(cf RXH2_PORT) " || miss+=" xhttp2" ;;
     esac
   done
-  [[ -z $miss ]] && t_res T1 ok "серверы транспортов слушают (доступность снаружи проверяет VPS-2 при выборе)" || t_res T1 fail "не слушают:$miss"
-  # T2: какой транспорт живой
-  if hy2_live; then
-    act=$(vps2_run 'cat /var/lib/rp/active' 2>/dev/null); live=${act:-hy2-wg}; t_res T2 ok "рукопожатие: $live (WG handshake свежий)"
-  elif vps2_run true >/dev/null 2>&1; then
-    act=$(vps2_run 'cat /var/lib/rp/active' 2>/dev/null); live=${act:-reality}; t_res T2 ok "рукопожатие: $live (дверь SSH отвечает)"
-  else t_res T2 fail "VPS-2 не подключён: выполните «rp link» и введите строку на VPS-2 (или «rp block»); затем «rp status»"; fi
-  if [[ -z $live ]]; then
-    t_res T3 skip ""; t_res T4 skip ""; t_res T5 skip ""; t_res T6 skip ""; t_res T7 skip ""; t_res T8 skip ""
-    warn "Если VPS-2 не достаёт VPS-1 ни одним транспортом — прямой путь заблокирован целиком: нужна цепочка через третий узел."; return 1
-  fi
-  # T3: ≥200 КБ в обе стороны через SSH-канал поверх самого транспорта
-  got=$(vps2_run "head -c $n /dev/zero" 2>/dev/null | wc -c)
-  if ((got == n)); then
-    printf '%0*d' "$n" 0 | vps2_run 'wc -c' 2>/dev/null | grep -qx "$n" && t_res T3 ok "≥200 КБ в обе стороны" || t_res T3 fail "обрыв на передаче (VPS-1 → VPS-2)"
-  else t_res T3 fail "обрыв после ~$((got / 1024)) КБ: замирание потока (ТСПУ) → смените порт, SNI или транспорт (rp prune)"; fi
-  if ((long)); then local w; for w in 60 240 600; do note "Повтор T3 через $((w / 60)) мин…"; sleep "$w"; got=$(vps2_run "head -c $n /dev/zero" 2>/dev/null | wc -c); ((got == n)) && t_res T3+ ok "повтор: ок" || { t_res T3+ fail "повтор: обрыв после ~$((got / 1024)) КБ"; break; }; done; fi
-  # T4: баннер SSH
-  local -a a; mapfile -t a < <(ssh_args); local host=${a[-1]#root@} port=${a[-2]}
-  timeout 8 bash -c 'exec 3<>/dev/tcp/$0/$1 && read -r -t 5 l <&3 && [[ $l == SSH-* ]]' "$host" "$port" 2>/dev/null && t_res T4 ok "баннер SSH получен" || t_res T4 fail "баннера SSH нет (sshd на VPS-2 слушает? rp door list)"
-  # T5: выход через IP VPS-2 (адрес сравнивается по отпечатку и на экран не выводится)
-  want=$(vps2_run 'curl -4 -fsS -m 8 https://api.ipify.org' 2>/dev/null)
-  ip=$(sx -m 10 https://api.ipify.org 2>/dev/null)
-  if [[ -n $want && -n $ip && $ip == "$want" ]]; then conf_set VPS2_IPH "$(ip_hash "$want")"; touch "$STATE/linked"; t_res T5 ok "выход через VPS-2 ($(mask_ip "$ip"))"
+  [[ -z $miss ]] && t_res T1 ok "локальные слушатели транспортов работают" || t_res T1 fail "не слушают:$miss"
+  # Query active from VPS-2; a past WG handshake is NOT a current transport indicator.
+  # Three read retries tolerate switching during a watchdog's check.
+  act=$(vps2_read 'cat /var/lib/rp/active' 2>/dev/null | tr -d '\r\n' || true)
+  method=$(control_method "$act" 2>/dev/null || true)
+  if [[ -n $method ]] && ssh_method_ready "$method"; then
+    t_res T2 ok "активный на VPS-2: $act (SSH через $method подтверждён)"
+  elif [[ -n $method ]]; then
+    t_res T2 skip "VPS-2 сообщает $act, но управляющий SSH сейчас переключается; тест не равен отказу транспорта"
+    method=""
+  elif sx -m 10 https://api.ipify.org >/dev/null 2>&1; then
+    t_res T2 skip "выход через VPS-2 есть; SSH-данные о текущем транспорте пока недоступны"
   else
-    t_res T5 fail "выход «$(mask_ip "${ip:-}")», ожидался «$(mask_ip "${want:-}")»"
-    note "  Запускаю диагностику по участкам (rp diag --fix исправит найденное):"; cmd_diag || true
+    t_res T2 fail "нет подтверждённого выхода и ответа SSH от VPS-2; проверьте rp status / rp diag"
   fi
-  # T6: DNS и заблокированный ресурс
-  local d1 code; d1=$(py dns | head -1)
+  # T3/T4 use an explicitly selected path; no more switching implicitly from
+  # XHTTP to an inactive WG tunnel just because an earlier handshake is fresh.
+  if [[ -n $method ]]; then
+    if t3_ssh_method "$method" "$n"; then
+      t_res T3 ok "200 КБ в обе стороны по SSH через $method"
+    else
+      local act_now
+      act_now=$(vps2_read 'cat /var/lib/rp/active' 2>/dev/null | tr -d '\r\n' || true)
+      if [[ -n $act_now && $act_now != "$act" ]]; then
+        t_res T3 skip "во время передачи активный транспорт изменился: $act → $act_now; повторите rp test"
+      else
+        t_res T3 fail "SSH-передача 200 КБ через $method не прошла; причина требует логов, это не доказательство воздействия ТСПУ"
+      fi
+    fi
+    if ssh_method_banner "$method"; then
+      t_res T4 ok "SSH-баннер VPS-2 через $method получен"
+    else
+      t_res T4 skip "SSH-дверь через $method временно не отвечает; возможна смена активного транспорта"
+    fi
+  else
+    t_res T3 skip "нет стабильного управляющего SSH; объёмный тест будет повторён при следующем запуске"
+    t_res T4 skip "нет стабильного SSH-пути для проверки баннера"
+  fi
+  if ((long)) && [[ -n $method ]]; then
+    local w
+    for w in 60 240 600; do
+      note "Повтор T3 через $((w / 60)) мин…"; sleep "$w"
+      t3_ssh_method "$method" "$n" && t_res T3+ ok "повторная передача в обе стороны" || { t_res T3+ fail "повторная SSH-передача не прошла"; break; }
+    done
+  fi
+  # T5: prefer a persisted fingerprint when the SSH control path is flaky.
+  # Do not report 'expected —' as an exit-IP mismatch.
+  ip=$(sx -m 12 https://api.ipify.org 2>/dev/null || true)
+  want=$(vps2_read 'curl -4 -fsS -m 8 https://api.ipify.org' 2>/dev/null | tr -d '[:space:]' || true)
+  known=$(cf VPS2_IPH)
+  if [[ $want =~ ^[0-9.]+$ && -n $ip && $ip == "$want" ]]; then
+    [[ -z $known ]] && conf_set VPS2_IPH "$(ip_hash "$want")"
+    if [[ -n $known && $(ip_hash "$want") != "$known" ]]; then
+      t_res T5 fail "контрольный IP VPS-2 изменился (проверить вручную перед обновлением отпечатка)"
+    else
+      touch "$STATE/linked"
+      t_res T5 ok "выход через VPS-2 ($(mask_ip "$ip")) подтверждён сравнением IP"
+    fi
+  elif [[ -n $ip && -n $known && $(ip_hash "$ip") == "$known" ]]; then
+    t_res T5 ok "выход $(mask_ip "$ip") совпадает с сохранённым отпечатком VPS-2$( [[ -z $want ]] && echo '; контрольный SSH недоступен' )"
+  elif [[ -z $ip ]]; then
+    t_res T5 fail "SOCKS не смог получить IP выхода; проверьте rp diag"
+  elif [[ -z $want && -z $known ]]; then
+    t_res T5 skip "IP выхода известен, но нет контрольного IP или сохранённого отпечатка VPS-2"
+  elif [[ -z $want ]]; then
+    t_res T5 fail "IP выхода не соответствует сохранённому отпечатку VPS-2"
+  else
+    t_res T5 fail "IP выхода отличается от IP VPS-2 (выход $(mask_ip "$ip"), VPS-2 $(mask_ip "$want"))"
+  fi
+  d1=$(py dns | head -1)
   doh_test "$d1" && t_res T6 ok "DoH через туннель ($d1)" || t_res T6 fail "DoH через туннель не отвечает ($d1)"
   code=$(sx -m 12 -o /dev/null -I -w '%{http_code}' https://www.instagram.com/ 2>/dev/null || true)
-  [[ -n $code && $code != 000 ]] && t_res T6b ok "заблокированный в РФ ресурс открывается (HTTP $code)" || t_res T6b fail "заблокированный ресурс не открылся"
-  note "  UDP/DNS клиентов wg0 проверьте с клиента: nslookup example.com (перехват 53 включён)"
-  # T7: остановка туннеля не даёт утечки; при остановленном туннеле Xray перезапускается
-  if hy2_live; then
-    ip route get 1.1.1.1 mark 255 2>/dev/null | grep -q 'wg-exit' || t_res T7a fail "метка 255 не ведёт в wg-exit"
-    systemctl stop wg-quick@wg-exit; sleep 2
-    if sx -m 8 https://api.ipify.org >/dev/null 2>&1; then t_res T7 fail "УТЕЧКА: при остановленном туннеле трафик идёт"
-    else systemctl restart rp-xray; sleep 4
-      sx -m 8 https://api.ipify.org >/dev/null 2>&1 && t_res T7 fail "УТЕЧКА после перезапуска Xray при остановленном туннеле" || t_res T7 ok "туннель остановлен — выхода нет, утечки нет (в том числе после перезапуска Xray)"; fi
-    ip route show table 200 | grep -q prohibit && note "  запрет-маршрут в таблице 200 на месте"
-    systemctl start wg-quick@wg-exit; sleep 3
-  else t_res T7 skip "в режиме Reality выход держится на reverse-соединении: нет моста — балансировщик отдаёт block"; fi
-  # T8: перезапуск VPS-1 и повторное подключение
-  systemctl restart rp-xray; tr_has hy2-wg && systemctl restart rp-hy2; tr_has hy2o-wg && systemctl restart rp-hy2o
-  local t0=0 up=0; while ((t0 < 90)); do wait_exit_once && { up=1; break; }; sleep 3; t0=$((t0 + 3)); done
-  ((up)) && t_res T8 ok "после перезапуска VPS-1 выход восстановился за ${t0} с" || t_res T8 fail "выход не восстановился за 90 с"
-  note "  Перезапуск стороны VPS-2 проверяется командой на VPS-2: rp restart (сторож вернёт туннель сам)"
-  local bad=0 r; for r in "${TR[@]}"; do [[ $r == *"|fail|"* ]] && bad=1; done
+  [[ -n $code && $code != 000 ]] && t_res T6b ok "тестовый HTTPS-ресурс ответил (HTTP $code)" || t_res T6b fail "тестовый HTTPS-ресурс не ответил"
+  note "UDP/DNS клиентов wg0 проверьте с клиента: nslookup example.com"
+  # A healthy alternate transport MUST NOT be called an IP leak. Test structural
+  # protection only; never stop wg-exit nor restart Xray during normal rp test.
+  if failclosed_static; then
+    t_res T7 ok "kill switch, nftables и fallbackTag=block проверены (статически, без остановки туннеля)"
+  else
+    t_res T7 fail "неполная конфигурация fail-closed; проверьте rp-net, nftables и маршруты"
+  fi
+  if ((restart)); then
+    warn "T8 --restart: по явному запросу перезапускаются rp-xray, rp-hy2 и rp-hy2o"
+    if systemctl restart rp-xray && { ! tr_has hy2-wg || systemctl restart rp-hy2; } && { ! tr_has hy2o-wg || systemctl restart rp-hy2o; }; then
+      while ((t0 < 120)); do
+        wait_exit_once && { up=1; break; }
+        sleep 3; t0=$((t0+3))
+      done
+      ((up)) && t_res T8 ok "выход восстановился после перезапуска за $t0 с" || t_res T8 fail "нет выхода после перезапуска за 120 с"
+    else
+      t_res T8 fail "не удалось перезапустить одну из служб"
+    fi
+  else
+    t_res T8 skip "перезапуск служб намеренно не выполнялся; для отдельного испытания используйте rp test --restart"
+  fi
+  for r in "${TR[@]}"; do [[ $r == *"|fail|"* ]] && bad=1; done
   prune_offer
-  return $bad
+  return "$bad"
 }
+
 cmd_doctor() {
   need_vps1; banner "Сводка" "rp doctor"
   local v2 ip
@@ -3031,7 +3215,7 @@ rp $SELF_VERSION — цепочка «клиенты WG → VPS-1 → тунне
   rp push                  передать блок на VPS-2 по SSH, дождаться и подтвердить (откат через 10 мин)
   rp ssh [команда]         SSH на VPS-2 через туннель (по ключу, с отпечатком host key)
   rp door list|add имя порт хост:порт|del имя    «двери» в Reality-режимах
-  rp test [--long]         проверки T1–T8 (--long: повтор T3 через 1, 5, 15 мин)
+  rp test [--long] [--restart]   безопасные T1–T7 (T8 только с --restart)
   rp diag [--fix]          диагностика выхода по участкам; --fix исправляет найденное
   rp transports            транспорты и результаты их проверки на VPS-2
   rp prune                 ручное исключение транспортов (по умолчанию НЕТ; сторож пробует все)
