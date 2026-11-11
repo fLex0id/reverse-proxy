@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # rp — клиенты WG → VPS-1 (РФ) → туннель (XHTTP/HY2) → VPS-2 (выход).
-# 1.2.4: reliable self-update/save validator and actionable download diagnostics.
+# 1.2.5: bounded SNI probing, fast VPS-2 update, single-pass transport tests, safe reprovision.
 # 1.2.3: DNS routing consistency, fail-closed name resolution and verified geosite updates.
 # Сборка 1.2.1: согласование обоих Xray-балансировщиков, журнал переключений, восстановление управления.
 # Один файл: роль VPS-1 (сервер, меню, генератор) или VPS-2 (блок на чистом bash, сторож).
@@ -9,7 +9,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.4-self-update-fix"
+SELF_VERSION="1.2.5-scan-recovery"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -526,29 +526,49 @@ sni_check() {
   [[ $h =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || {
     printf 'TLS1.3 -  h2 -  X25519 -  h3 ?'; return 1;
   }
-  v=$(printf '\n' | timeout 9 openssl s_client -brief -connect "$h:443" \
-      -servername "$h" -tls1_3 -groups X25519 -alpn 'h2,http/1.1' 2>&1) || true
+  # Some OpenSSL builds print NUL bytes (or binary TLS data) on stdout.
+  # Remove them BEFORE Bash command substitution to avoid noisy warnings.
+  v=$(printf '\n' | timeout 6 openssl s_client -brief -connect "$h:443" \
+      -servername "$h" -tls1_3 -groups X25519 -alpn 'h2,http/1.1' 2>&1 | LC_ALL=C tr -d '\000') || true
   printf '%s\n' "$v" | grep -qiE 'Protocol( version)?[[:space:]]*:[[:space:]]*TLSv1\.3|New, TLSv1\.3' && t13=+
   printf '%s\n' "$v" | grep -qiE '(Peer |Server )?Temp Key:[[:space:]]*X25519' && x=+
   printf '%s\n' "$v" | grep -qiE 'ALPN protocol:[[:space:]]*h2' && h2=+
   # В старых openssl ALPN печатался иначе; дополнительная проверка — только
   # если curl действительно собран с HTTP/2. Это не обязательный критерий.
-  if [[ $t13 == + && $h2 == - ]] && curl -V 2>/dev/null | grep -qi 'HTTP2'; then
+  if [[ ${2:-full} == full && $t13 == + && $h2 == - ]] && curl -V 2>/dev/null | grep -qi 'HTTP2'; then
     [[ $(curl -sS -o /dev/null -m 6 --http2 -w '%{http_version}' "https://$h/" 2>/dev/null) == 2 ]] && h2=+
   fi
-  hdr=$(curl -fsSI -m 6 "https://$h/" 2>/dev/null | tr 'A-Z' 'a-z' | grep '^alt-svc:' | head -1 || true)
-  [[ $hdr == *h3* ]] && h3=+
+  if [[ ${2:-full} == full ]]; then
+    hdr=$(curl -fsSI -m 5 "https://$h/" 2>/dev/null | tr 'A-Z' 'a-z' | grep '^alt-svc:' | head -1 || true)
+    [[ $hdr == *h3* ]] && h3=+
+  fi
   printf 'TLS1.3 %s  h2 %s  X25519 %s  h3 %s' "$t13" "$h2" "$x" "$h3"
 }
-# sni_scan → строки «хост|результат|RU/—» во временном файле; проверки идут параллельно
+# A full 38-host scan at installation is slow and unnecessary. The installer
+# tests a curated shortlist, and 'rp sni HOST' supports an explicit deep check.
+SNI_QUICK_RU=(www.rzd.ru www.mos.ru www.ozon.ru www.vtb.ru www.dns-shop.ru)
+SNI_QUICK_WORLD=(www.asus.com www.microsoft.com www.msi.com www.cisco.com www.lenovo.com)
+# sni_scan OUT [quick|all] → h|result|RU/—, bounded concurrency, stable order
 sni_scan() {
-  local out=$1 tmp h i=0 n=0; tmp=$(mktemp -d "$STATE/sni.XXXXXX")
-  for h in "${SNI_RU[@]}" "${SNI_WORLD[@]}"; do
+  local out=$1 scope=${2:-quick} tmp h i=0 n=0 ru
+  local -a hosts=()
+  tmp=$(mktemp -d "$STATE/sni.XXXXXX") || return 1
+  case $scope in
+    quick) hosts=("${SNI_QUICK_RU[@]}" "${SNI_QUICK_WORLD[@]}") ;;
+    all) hosts=("${SNI_RU[@]}" "${SNI_WORLD[@]}") ;;
+    *) rm -rf "$tmp"; return 2 ;;
+  esac
+  for h in "${hosts[@]}"; do
     i=$((i + 1))
-    ( printf '%s|%s|%s\n' "$h" "$(sni_check "$h")" "$([[ " ${SNI_RU[*]} " == *" $h "* ]] && echo RU || echo —)" >"$tmp/$i" ) &
-    n=$((n + 1)); ((n % 12 == 0)) && wait
+    ru=—; [[ " ${SNI_RU[*]} " == *" $h "* ]] && ru=RU
+    ( printf '%s|%s|%s\n' "$h" "$(sni_check "$h" quick)" "$ru" >"$tmp/$(printf '%03d' "$i")" ) &
+    n=$((n + 1)); ((n % 5 == 0)) && wait
   done
-  wait; cat "$tmp"/* >"$out" 2>/dev/null; rm -rf "${tmp:?}"
+  wait
+  cat "$tmp"/* >"$out" 2>/dev/null
+  local rc=$?
+  rm -rf "$tmp"
+  return "$rc"
 }
 SNI_CACHE=""
 sni_choose() { # sni_choose ПЕРЕМЕННАЯ «Заголовок» reality|masq [исключить-хост]
@@ -556,8 +576,8 @@ sni_choose() { # sni_choose ПЕРЕМЕННАЯ «Заголовок» reality|
   [[ -n "${!var:-}" ]] && return 0
   if [[ -z $SNI_CACHE || ! -s $SNI_CACHE ]]; then
     SNI_CACHE=$(mktemp "$STATE/snicache.XXXXXX")
-    note "Проверяю ${#SNI_RU[@]}+${#SNI_WORLD[@]} кандидатов с этого сервера…"
-    sni_scan "$SNI_CACHE"
+    note "Быстрая проверка 10 SNI-кандидатов (полный пул: rp sni)…"
+    sni_scan "$SNI_CACHE" quick || { warn "Сканирование SNI не удалось; доступен ручной ввод"; : >"$SNI_CACHE"; }
   fi
   local -a items=() good=() unchecked=()
   while IFS= read -r line; do
@@ -1398,39 +1418,33 @@ t1_check() { # T1: доступность порта / UDP-сессии
   esac
   timeout 8 bash -c '</dev/tcp/$0/$1' "$PUBLIC_IP" "$port" 2>/dev/null
 }
-t2_check() { # T2: initiate WG handshake (hy2) or verify Reality path
-  local t=$1 i
-  for ((i=1; i<=20; i++)); do
+t2_check() { # T2: a short functional handshake, with a bounded warmup window.
+  local t=$1 i h p sz=1024 deadline
+  read -r h p < <(tr_probe_addr "$t")
+  if [[ $t == hy2* ]]; then deadline=$((SECONDS + 18)); else deadline=$((SECONDS + 25)); fi
+  for ((i=1; i<=8 && SECONDS<deadline; i++)); do
     if [[ $t == hy2* ]]; then
-      # Explicitly initiate handshake rather than relying solely on 28s keepalive.
       wg_kick && wg_handshake_fresh && return 0
-    else
-      func_ok "$t" && return 0
+    elif [[ $(xfer_down "$h" "$p" "$sz" 4) -eq "$sz" ]] && xfer_up "$h" "$p" "$sz" 5 4; then
+      return 0
     fi
-    sleep 2
+    sleep 1
   done
   return 1
 }
-t3_check() { # Двусторонние 200 КБ; один кратковременный сбой не означает блокировку.
-  local t=$1 h p got attempt last="нет ответа" up_rc
+t3_check() { # One bounded two-way 200 KB test; caller decides on ONE warmup retry.
+  local t=$1 h p got up_rc
   read -r h p < <(tr_probe_addr "$t")
-  for attempt in 1 2; do
-    got=$(xfer_down "$h" "$p" "$N" 50)
-    if ((got == N)); then
-      if xfer_up "$h" "$p" "$N" 50 40; then
-        ((attempt > 1)) && logger -t rp "T3: $t succeeded on retry (transient transfer issue)" || true
-        return 0
-      else
-        up_rc=$?
-        last="приём $N/$N байт, передача не подтверждена (код $up_rc)"
-      fi
-    else
-      last="приём ${got:-0}/$N байт"
-    fi
-    ((attempt == 1)) && sleep 3
-  done
-  say "$last после 2 попыток; проверьте журнал Xray и ограничения транспорта"
-  return 1
+  got=$(xfer_down "$h" "$p" "$N" 18)
+  if ((got != N)); then
+    say "приём ${got:-0}/$N байт (лимит 18 с)"
+    return 1
+  fi
+  if ! xfer_up "$h" "$p" "$N" 18 16; then
+    say "приём $N/$N байт, передача не подтверждена (лимит 18 с)"
+    return 1
+  fi
+  return 0
 }
 unit_failed() { systemctl is-failed --quiet "$(unit_of "$1")"; }
 # Диагностика различает: нет ответа, обрыв после N КБ, сброс, ошибка конфигурации
@@ -1451,13 +1465,72 @@ diag() {
     t3) say "    ${detail:-ошибка передачи}; причины: таймаут, XHTTP-режим, сеть или фильтрация. Логи: rp logs" ;;
   esac
 }
+# A safe push must not spend the 10-minute rollback window on four full scans.
+# Retain the operator's manual choice; in auto try the current transport first,
+# then other configured candidates. Full T1-T3 remains in 'rp select'.
+cmd_select_quick() {
+  local t old="" selected="" m="" res="" wanted="" bad="" 
+  local -a choices=()
+  m=$(mode_get) || return 1
+  old=$(active)
+  if [[ $m == manual:* ]]; then
+    wanted=${m#manual:}
+    mode_allowed "$wanted" || { say "Ручной режим $wanted отсутствует в конфигурации"; return 1; }
+    choices=("$wanted")
+  else
+    if [[ -n $old ]] && mode_allowed "$old"; then choices+=("$old"); fi
+    for t in $TRANSPORT_ORDER; do [[ $t == "$old" ]] || choices+=("$t"); done
+  fi
+  systemctl stop rp-watch >/dev/null 2>&1 || true
+  say "Быстрая проверка обновления: ${choices[*]}"
+  for t in "${choices[@]}"; do
+    if ! tr_start "$t" || unit_failed "$t"; then
+      say "  ! $t: служба не запустилась"; continue
+    fi
+    if ! t2_check "$t"; then
+      say "  ! $t: T2 не прошёл"; continue
+    fi
+    res=$(t3_check "$t") || {
+      sleep 3
+      res=$(t3_check "$t") || { say "  ! $t: T3 не прошёл: $res"; continue; }
+    }
+    selected=$t; break
+  done
+  if [[ -n $selected ]]; then
+    printf '%s\n' "$selected" >"$STATE/active"
+    date +%s >"$STATE/since"
+    say "  ✓ Активен $selected (mode=$m)"
+  else
+    tr_stop_all
+    rm -f "$STATE/active" "$STATE/since"
+    say "  ✗ Ни один разрешённый транспорт не прошёл проверку; fail-closed"
+  fi
+  systemctl enable --now rp-watch >/dev/null 2>&1 || {
+    say "  ✗ Невозможно запустить сторож rp-watch"; return 1;
+  }
+  [[ -n $selected ]]
+}
 cmd_select() {
   # Проверяются ВСЕ транспорты; рабочие попадают в usable, неработающие исключаются (VPS-1 уберёт их командой rp prune)
-  local t first="" res tmpu=() ok_n=0 bad=""
-  systemctl stop rp-watch >/dev/null 2>&1
-  : >"$STATE/results"
-  say "Проверка транспортов (T1–T3): ${TRANSPORT_FORCE:-$TRANSPORT_ORDER}"
+  [[ ${RP_SELECT_QUICK:-0} == 1 ]] && { cmd_select_quick; return $?; }
+  local t first="" res tmpu=() ok_n=0 bad="" target="" last_checked="" current_mode="" pinned=""
+  local -a scan_order=()
+  current_mode=$(mode_get) || current_mode=invalid
+  [[ $current_mode == manual:* ]] && pinned=${current_mode#manual:}
+  target=${pinned:-${TRANSPORT_ORDER%% *}}
+  # Scan the intended final channel LAST, so it can remain running without
+  # a redundant 200 KB probe + restart after the scan.
   for t in ${TRANSPORT_FORCE:-$TRANSPORT_ORDER}; do
+    [[ $t == "$target" ]] || scan_order+=("$t")
+  done
+  for t in ${TRANSPORT_FORCE:-$TRANSPORT_ORDER}; do
+    [[ $t == "$target" ]] && { scan_order+=("$t"); break; }
+  done
+  systemctl stop rp-watch >/dev/null 2>&1 || true
+  : >"$STATE/results"
+  say "Проверка транспортов (T1–T3): ${scan_order[*]}"
+  for t in "${scan_order[@]}"; do
+    last_checked=$t
     say "── $t"
     if ! tr_start "$t" || unit_failed "$t"; then
       say "  ✗ транспорт не запустился"; diag "$t" cfg
@@ -1468,12 +1541,12 @@ cmd_select() {
     t2_check "$t" || { say "  ✗ T2 рукопожатие"; diag "$t" t2; echo "$t=fail:t2" >>"$STATE/results"; bad+=" $t"; continue; }; say "  ✓ T2"
     res=$(t3_check "$t") || {
       say "  ! T3: повторная проверка после прогрева обратного канала"
-      sleep 6
+      sleep 3
       res=$(t3_check "$t") || { say "  ✗ T3 передача ≥200 КБ"; diag "$t" t3 "$res"; echo "$t=fail:t3" >>"$STATE/results"; bad+=" $t"; continue; }
     }; say "  ✓ T3"
     echo "$t=ok" >>"$STATE/results"; tmpu+=("$t"); ok_n=$((ok_n + 1))
   done
-  tr_stop_all
+  # Do not stop the successfully scanned final transport here.
   say ""
   if ((ok_n > 0)); then
     printf '%s\n' "${tmpu[@]}" >"$STATE/usable"
@@ -1485,9 +1558,11 @@ cmd_select() {
   first=""
   # A configured manual pin survives reinstall/update and the full 'rp select'.
   # A failed pinned transport must NOT be silently replaced by a fallback.
-  local pinned="" current_mode=""; current_mode=$(mode_get) || current_mode=invalid
-  [[ $current_mode == manual:* ]] && pinned=${current_mode#manual:}
-  local -a final_candidates=("${tmpu[@]}")
+  local -a final_candidates=()
+  # Scan order differs from priority order; selection must honor priority.
+  for t in ${TRANSPORT_FORCE:-$TRANSPORT_ORDER}; do
+    [[ " ${tmpu[*]} " == *" $t "* ]] && final_candidates+=("$t")
+  done
   [[ $current_mode != invalid ]] || final_candidates=()
   if [[ -n $pinned ]]; then
     final_candidates=()
@@ -1495,11 +1570,15 @@ cmd_select() {
       [[ $t == "$pinned" ]] && final_candidates+=("$t")
     done
   fi
+  # Highest-priority healthy transport, or the pinned one in manual mode.
   for t in "${final_candidates[@]}"; do
-    if tr_start "$t" && t2_check "$t" && t3_check "$t" >/dev/null && func_ok "$t"; then
+    if [[ $t == "$last_checked" && $t == "${tmpu[-1]:-}" ]] && func_ok "$t"; then
       first=$t; break
     fi
-    say "  ! $t не прошёл повторную проверку, пробую следующий"
+    if tr_start "$t" && t2_check "$t" && func_ok "$t"; then
+      first=$t; break
+    fi
+    say "  ! $t не прошёл контроль готовности, пробую следующий"
   done
   if [[ -n $first ]]; then
     printf '%s\n' "$first" >"$STATE/active"; date +%s >"$STATE/since"
@@ -1692,10 +1771,22 @@ cmd_remove() {
   fi
   systemctl daemon-reload; say "Удалено. Бинарники /usr/local/bin/{xray,hysteria,rp} оставлены; rm — вручную."
 }
-cmd_confirm() { systemctl stop rp-rollback.timer >/dev/null 2>&1; rm -f "$STATE/backup.tgz"; say "Обновление подтверждено, откат отменён"; }
+cmd_confirm() {
+  systemctl stop rp-rollback.timer >/dev/null 2>&1 || true
+  rm -f "$STATE/backup.tgz" "$STATE/mode.before-identity" "$STATE/active.before-identity" "$STATE/since.before-identity"
+  say "Обновление подтверждено, откат отменён"
+}
 cmd_rollback() {
   [[ -f $STATE/backup.tgz ]] || { say "Резервной копии нет"; return 1; }
-  tar -xzf "$STATE/backup.tgz" -C / && systemctl daemon-reload && cmd_restart; say "Возврат к прежним параметрам выполнен"
+  tar -xzf "$STATE/backup.tgz" -C / || { say "Не удалось восстановить резервную копию" >&2; return 1; }
+  local f
+  for f in mode active since; do
+    if [[ -f $STATE/$f.before-identity ]]; then
+      mv -f "$STATE/$f.before-identity" "$STATE/$f" || return 1
+    fi
+  done
+  systemctl daemon-reload && cmd_restart || return 1
+  say "Возврат к прежним параметрам выполнен"
 }
 menu() {
   while :; do
@@ -2249,7 +2340,21 @@ rp_main() {
   rp_dl "$hurl" "$tmp/h" || rp_fail "не скачалась Hysteria2"
   [[ $(sha256sum "$tmp/h" | awk '{print $1}') == "$hsha" ]] || rp_fail "SHA256 Hysteria2 не совпала"
   install -m 755 "$tmp/h" /usr/local/bin/hysteria.new && mv /usr/local/bin/hysteria.new /usr/local/bin/hysteria
-  # 4. файлы бандла
+  # 4. files: distinguish an ordinary code update from re-provisioning after
+  # VPS-1 was deleted and its management key was regenerated.  A stale manual
+  # transport on VPS-2 otherwise pins the wrong newly installed bridge.
+  local old_ssh_pub="" new_ssh_pub="" rp_new_identity=0
+  old_ssh_pub=$(grep '^SSH_PUB=' /etc/rp/rp2.conf 2>/dev/null || true)
+  new_ssh_pub=$(tar -xOzf "$tmp/b.tgz" etc/rp/rp2.conf 2>/dev/null | grep '^SSH_PUB=' | head -1 || true)
+  if [[ -n $old_ssh_pub && -n $new_ssh_pub && $old_ssh_pub != "$new_ssh_pub" ]]; then
+    rp_new_identity=1
+    rp_msg "Обнаружен новый ключ управления VPS-1: прежняя фиксация транспорта не переносится"
+    if [[ $RP_SAFE == 1 ]]; then
+      for f in mode active since; do
+        if [[ -f /var/lib/rp/$f ]]; then cp -p /var/lib/rp/$f /var/lib/rp/$f.before-identity; fi
+      done
+    fi
+  fi
   rp_msg "Конфигурация и службы"
   install -d -m 755 /var/lib/rp
   tar -xzf "$tmp/b.tgz" -C / || rp_fail "не распаковался бандл"
@@ -2280,9 +2385,21 @@ rp_main() {
   systemctl is-active --quiet sshd || systemctl enable --now sshd >/dev/null 2>&1
   local prl; prl=$(sshd -T 2>/dev/null | awk '/^permitrootlogin/{print $2}')
   [[ $prl == no ]] && rp_msg "! В sshd запрещён вход root (PermitRootLogin no): ключ rp работать не будет"
-  # 7. запуск и проверка транспортов (проверяются все, неработающие исключаются)
+  # 7. Fresh provisioning intentionally resets old manual pin/state from a
+  # previous installation, because UUIDs, WG keys and REALITY secrets differ.
+  # An ordinary safe 'rp push' preserves the operator's manual mode.
+  if [[ $RP_SAFE != 1 || $rp_new_identity == 1 ]]; then
+    rm -f /var/lib/rp/mode /var/lib/rp/mode-request /var/lib/rp/mode-result \
+          /var/lib/rp/active /var/lib/rp/since
+    rp_msg "Новая установка: прежний ручной режим VPS-2 сброшен в auto"
+  fi
   if [[ $RP_SAFE == 1 ]]; then systemd-run --on-active=600 --unit=rp-rollback --description="rp: откат обновления" /usr/local/bin/rp rollback >/dev/null 2>&1; fi
-  /usr/local/bin/rp select; local rc=$?
+  if [[ $RP_SAFE == 1 ]]; then
+    RP_SELECT_QUICK=1 /usr/local/bin/rp select
+  else
+    /usr/local/bin/rp select
+  fi
+  local rc=$?
   echo
   rp_msg "Отпечаток host key (сверьте при первом rp ssh):"
   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null || ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub 2>/dev/null
@@ -3338,7 +3455,18 @@ push_wait() {
     rc=""; sleep 6; t=$((t + 6))
   done
   [[ -n $rc ]] || { err "VPS-2 не вернулся на связь за 9 минут (откат на VPS-2 сработает сам)"; return 1; }
-  ((rc == 0)) || { err "Установка на VPS-2 завершилась с ошибкой (код $rc); журнал: rp ssh 'cat /var/lib/rp/push.log'"; return 1; }
+  if ((rc != 0)); then
+    err "Установка на VPS-2 завершилась с ошибкой (код $rc)"
+    local tail_log
+    tail_log=$(RP_READ_RETRIES=1 vps2_read 'tail -n 32 /var/lib/rp/push.log' 2>/dev/null || true)
+    if [[ -n $tail_log ]]; then
+      printf '%s\n' "$tail_log" | sed 's/^/    [VPS-2] /' >&2
+    else
+      warn "Управляющий SSH не отвечает. Откройте VPS-2 через консоль хостера и выполните: tail -n 80 /var/lib/rp/push.log"
+    fi
+    warn "Повторный rp push пока не выполняйте: сначала выясните причину ошибки"
+    return 1
+  fi
   route_sync_locked >/dev/null 2>&1 || warn "VPS-2 доступен, но маршрут Xray VPS-1 пока не согласован"
   wait_exit || { err "Выход через VPS-2 не работает после обновления (откат на VPS-2 сработает сам)"; return 1; }
   touch "$STATE/linked"
