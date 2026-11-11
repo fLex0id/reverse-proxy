@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# rp — цепочка «клиенты WG → VPS-1 (РФ) → туннель, устойчивый к ТСПУ → VPS-2 (выход)».
-# Сборка 1.1.8: безопасные тесты без перезапусков, верная привязка к активному транспорту.
+# rp — клиенты WG → VPS-1 (РФ) → туннель (XHTTP/HY2) → VPS-2 (выход).
+# 1.2.3: DNS routing consistency, fail-closed name resolution and verified geosite updates.
+# Сборка 1.2.1: согласование обоих Xray-балансировщиков, журнал переключений, восстановление управления.
 # Один файл: роль VPS-1 (сервер, меню, генератор) или VPS-2 (блок на чистом bash, сторож).
 # Образец по структуре и стилю — tt.sh; отступления помечены «ОТСТУПЛЕНИЕ» с причиной.
 # Rocky Linux 9/10. Конфигурация: /etc/rp/rp.conf (единственный источник правды).
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.0-synchronized-routing"
+SELF_VERSION="1.2.3-dns-leak-guard"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -26,6 +27,8 @@ SELF_BIN=/usr/local/bin/rp
 XRAY_PINNED="26.4.25"
 HY2_PINNED="2.8.2"
 RU_REPO="runetfreedom/russia-v2ray-rules-dat"
+# RU_REF=latest: get an immutable timestamped release tag from GitHub API before downloading.
+# Set RU_REF to a known numeric tag (e.g. 202611111121) in rp.conf for pinned updates.
 SOCKS_PORT=1080
 # Адрес для установки команды rp и обновления самого скрипта (можно переопределить переменной RP_URL)
 RP_URL="${RP_URL:-https://raw.githubusercontent.com/fLex0id/reverse-proxy/main/rp_gpt.sh}"
@@ -677,29 +680,48 @@ EOF
   printf '[Unit]\nRequires=rp-net.service\nAfter=rp-net.service\n' >/etc/systemd/system/wg-quick@wg0.service.d/rp.conf
   cat >"$LIB/route-restore.sh" <<'EOS_ROUTE_RESTORE'
 #!/usr/bin/env bash
-# Xray gRPC balancer overrides are in-memory. Restore after every restart.
-# Never default back to unpinned leastPing if a previously fixed route exists.
-set -u
+# Xray gRPC overrides are in-memory; restore BOTH balancing planes after restart.
+# On failure, do not report a healthy service while configuration is inconsistent.
+set -uo pipefail
 state=/var/lib/rp/route-target
 [[ -s $state ]] || exit 0
-# If XHTTP transports were removed, there is no Xray gRPC balancer to restore.
 grep -q '"RoutingService"' /etc/rp/xray.json || exit 0
 read -r target <"$state"
-case "$target" in
-  to-exit|r-xhttp|r-xhttp2) : ;;
-  *) echo "rp route restore: invalid target" >&2; exit 1 ;;
-esac
-if ! python3 -I - /etc/rp/xray.json "$target" <<'PY_ROUTE_VALID'
-import json,sys
-x=json.load(open(sys.argv[1]))
-sel=next((b.get('selector',[]) for b in x.get('routing',{}).get('balancers',[]) if b.get('tag')=='exit'),[])
-sys.exit(0 if sys.argv[2] in sel else 1)
-PY_ROUTE_VALID
-then
-  echo "rp route restore: stale target $target no longer configured; skipping" >&2
-  exit 0
+case $target in to-exit|r-xhttp|r-xhttp2) : ;; *) exit 1;; esac
+# Pending handover: restore the management bridge separately from customer exit.
+control_target=$target
+policy=$(cat /var/lib/rp/route-policy 2>/dev/null || echo manual)
+[[ $policy == auto ]] && control_target=to-exit  # clear rev; observatory chooses live bridge
+if [[ -s /var/lib/rp/route-transition ]]; then
+  desired=$(sed -n 's/^desired=//p' /var/lib/rp/route-transition | head -1)
+  case $desired in
+    reality-xhttp) control_target=r-xhttp ;;
+    reality-xhttp2) control_target=r-xhttp2 ;;
+    hy2-wg|hy2o-wg) control_target=to-exit ;;
+  esac
 fi
-for i in $(seq 1 25); do
+if ! python3 -I - /etc/rp/xray.json "$target" "$control_target" <<'PY_ROUTE_VALID'
+import json,sys
+try:
+    x=json.load(open(sys.argv[1]))
+    bals={b['tag']: b for b in x.get('routing',{}).get('balancers',[])}
+    target=sys.argv[2]
+    assert target in bals['exit']['selector']
+    ctl=sys.argv[3]
+    if ctl!='to-exit' and 'rev' in bals:
+        assert ctl in bals['rev']['selector']
+except (OSError,ValueError,KeyError,TypeError,AssertionError):
+    sys.exit(1)
+PY_ROUTE_VALID
+then echo 'rp route restore: target not configured' >&2; exit 1; fi
+for ((i=0;i<25;i++)); do
+  if grep -Eq '"tag"[[:space:]]*:[[:space:]]*"rev"' /etc/rp/xray.json; then
+    if [[ $control_target == to-exit ]]; then
+      /usr/local/bin/xray api bo --server=127.0.0.1:10085 -b rev -r >/dev/null 2>&1 || { sleep 0.4; continue; }
+    else
+      /usr/local/bin/xray api bo --server=127.0.0.1:10085 -b rev "$control_target" >/dev/null 2>&1 || { sleep 0.4; continue; }
+    fi
+  fi
   /usr/local/bin/xray api bo --server=127.0.0.1:10085 -b exit "$target" >/dev/null 2>&1 && exit 0
   sleep 0.4
 done
@@ -921,23 +943,51 @@ vps1_set() {
 # ── Списки РФ (.dat), релиз закреплён по тегу ────────────────────────────
 # Формат .dat (geosite/geoip): понимает Xray, без отдельного ядра. Исходник списков — $RU_REPO.
 # ОТСТУПЛЕНИЕ от tt.sh (.srs для sing-box): Xray читает только .dat.
-ru_fetch_one() { # geosite.dat каталог; официальный файл + SHA256 из одного источника
-  local n=$1 dir=$2 base want got
-  local -a bases=("https://raw.githubusercontent.com/$RU_REPO/release" "https://cdn.jsdelivr.net/gh/$RU_REPO@release")
-  for base in "${bases[@]}"; do
-    rm -f "$dir/$n" "$dir/$n.sha256sum"
-    if curl -fLsS --connect-timeout 8 --max-time 30 --retry 1 --retry-delay 1 \
-        -o "$dir/$n" "$base/$n" 2>/dev/null && [[ -s $dir/$n ]] &&
-       curl -fLsS --connect-timeout 8 --max-time 20 --retry 1 --retry-delay 1 \
-        -o "$dir/$n.sha256sum" "$base/$n.sha256sum" 2>/dev/null; then
-      want=$(awk 'NF {print tolower($1); exit}' "$dir/$n.sha256sum")
-      got=$(sha256sum "$dir/$n" | awk '{print $1}')
-      if [[ $want =~ ^[0-9a-f]{64}$ && $want == "$got" ]]; then return 0; fi
-      err "SHA256 $n не совпал на источнике $base"
+ru_resolve_ref() { # возвращает неизменяемый тег, никогда скользящую ветку release
+  local ref api tmp
+  ref=$(cf RU_REF latest)
+  if [[ $ref == latest ]]; then
+    tmp=$(mktemp "$STATE/ru-ref.XXXXXXXX") || return 1
+    api="https://api.github.com/repos/$RU_REPO/releases/latest"
+    if ! curl -fLsS --connect-timeout 8 --max-time 25 --retry 1 \
+        -H 'Accept: application/vnd.github+json' -o "$tmp" "$api" 2>/dev/null; then
+      rm -f "$tmp"; err "Не удалось определить стабильный тег geosite (GitHub API). Рабочие базы сохранены"; return 1
     fi
-  done
-  err "Не удалось получить проверенный $n ни с GitHub Raw, ни с jsDelivr"
-  return 1
+    ref=$(python3 - "$tmp" <<'PY_REF'
+import json, re, sys
+try:
+    tag=json.load(open(sys.argv[1], encoding='utf-8')).get('tag_name', '')
+    if not re.fullmatch(r'20[0-9]{10}', tag): raise ValueError('non-versioned tag')
+    print(tag)
+except Exception: sys.exit(1)
+PY_REF
+) || { rm -f "$tmp"; err "Некорректный тег в ответе GitHub"; return 1; }
+    rm -f "$tmp"
+  fi
+  [[ $ref =~ ^20[0-9]{10}$ ]] || { err "RU_REF должен быть 'latest' либо точным тегом YYYYMMDDHHMM"; return 1; }
+  printf '%s\n' "$ref"
+}
+ru_fetch_one() { # данные и SHA одного конкретного релиза, не из скользящей ветки
+  local n=$1 dir=$2 ref=$3 base want got
+  base="https://github.com/$RU_REPO/releases/download/$ref"
+  rm -f "$dir/$n" "$dir/$n.sha256sum"
+  if ! curl -fLsS --connect-timeout 12 --max-time 120 --retry 2 --retry-delay 2 \
+       -o "$dir/$n" "$base/$n" 2>/dev/null ||
+     ! curl -fLsS --connect-timeout 12 --max-time 40 --retry 2 --retry-delay 2 \
+       -o "$dir/$n.sha256sum" "$base/$n.sha256sum" 2>/dev/null; then
+    err "Не удалось скачать $n и SHA256 из зафиксированного релиза $ref"; return 1
+  fi
+  want=$(awk 'NF {print tolower($1); exit}' "$dir/$n.sha256sum")
+  got=$(sha256sum "$dir/$n" | awk '{print $1}')
+  [[ $want =~ ^[0-9a-f]{64}$ && $want == "$got" ]] || {
+    err "SHA256 $n не совпал (релиз $ref). Ничего не заменено"; return 1;
+  }
+  local bytes
+  bytes=$(stat -c %s "$dir/$n") || return 1
+  if ((bytes < 1048576 || bytes > 367001600)); then
+    err "Размер $n подозрителен ($bytes байт); установка отменена"; return 1
+  fi
+  return 0
 }
 # Восстановить штатную geoip.dat из того же проверенного релиза Xray.
 # RunetFreedom geoip.dat содержит собственные наборы блокировок, но не заменяет
@@ -963,7 +1013,7 @@ xray_restore_geoip() {
 }
 ru_update() { # обновление: geosite РФ + штатная geoip Xray; тест до замены, откат при ошибке
   conf_load
-  local tmp n old new changed=0 active=0 rc=0 restore_geoip=0
+  local tmp n old new changed=0 active=0 rc=0 restore_geoip=0 ref=""
   tmp=$(mktemp -d "$STATE/ru.XXXXXX") || return 1
   mkdir -p "$tmp/assets" "$tmp/config" "$tmp/backup"
 
@@ -971,8 +1021,15 @@ ru_update() { # обновление: geosite РФ + штатная geoip Xray; 
   if [[ -f $STATE/linked ]] && sx -m 8 -o /dev/null https://www.gstatic.com/generate_204 2>/dev/null; then
     export ALL_PROXY; ALL_PROXY=$(sx_proxy)
   fi
-  if ! ru_fetch_one geosite.dat "$tmp/assets"; then unset ALL_PROXY; rm -rf "${tmp:?}"; return 1; fi
+  ref=$(ru_resolve_ref) || { unset ALL_PROXY; rm -rf "${tmp:?}"; return 1; }
+  if ! ru_fetch_one geosite.dat "$tmp/assets" "$ref"; then unset ALL_PROXY; rm -rf "${tmp:?}"; return 1; fi
   unset ALL_PROXY
+  # Структурная проверка: ru-blocked, российские наборы, контрольные домены и пересечения.
+  if ! py verify-geo "$tmp/assets/geosite.dat" >"$tmp/geo-verify.log" 2>&1; then
+    err "Новая геобаза не прошла проверку безопасности; текущие базы не изменены:"
+    sed 's/^/    /' "$tmp/geo-verify.log" >&2
+    rm -rf "${tmp:?}"; return 1
+  fi
 
   # Сохраняем штатный geoip.dat Xray. Не заменяем его российским custom geoip:
   # тот не гарантирует наличие стандартной категории geoip:ru.
@@ -1044,7 +1101,7 @@ ru_update() { # обновление: geosite РФ + штатная geoip Xray; 
     rm -rf "${tmp:?}"; return 1
   fi
 
-  conf_set RU_TAG release RU_UPDATED "$(date -u +%Y%m%dT%H%M%SZ)"
+  conf_set RU_TAG "$ref" RU_UPDATED "$(date -u +%Y%m%dT%H%M%SZ)"
   rm -rf "${tmp:?}"
   ok "Списки РФ: geosite обновлён и проверен; штатный geoip Xray сохранён$( ((restore_geoip)) && echo ' (восстановлен)' )"
   return 0
@@ -1209,6 +1266,28 @@ say() {
   fi
 }
 tr_all() { echo "$TRANSPORT_ORDER"; }
+# By default prefer availability over preemptive failback. A candidate T2/T3
+# requires tr_start -> tr_stop_all and would interrupt a healthy tunnel.
+failback_policy() {
+  local p
+  p=$(cat "$STATE/failback-policy" 2>/dev/null || true)
+  case "$p" in active) echo active ;; *) echo passive ;; esac
+}
+cmd_failback() {
+  local target=${1:-status} tmp
+  case "$target" in
+    status) say "Failback: $(failback_policy) (passive = no interruption of healthy tunnel)" ;;
+    passive|active)
+      if [[ $target == active ]]; then
+        say "WARNING: active failback may briefly stop the healthy tunnel every 30 minutes." >&2
+      fi
+      tmp=$(mktemp "$STATE/.failback.XXXXXXXX") || return 1
+      printf '%s\n' "$target" >"$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$STATE/failback-policy" || { rm -f "$tmp"; return 1; }
+      say "Failback policy: $target"
+      ;;
+    *) say "Usage: rp failback [status|passive|active]" >&2; return 2 ;;
+  esac
+}
 # Persistent on VPS-2; deliberately NOT stored in rp2.conf so 'rp push' preserves it.
 # A pinned transport never falls back to a different protocol. In case of failure,
 # the watchdog retries that same protocol and preserves fail-closed routing.
@@ -1529,22 +1608,53 @@ cmd_egress() {
 # fixnet — привести пересылку и NAT в рабочее состояние (идемпотентно)
 cmd_fixnet() {
   local ez z
-  sysctl -q -w net.ipv4.ip_forward=1 net.ipv4.conf.all.rp_filter=2 >/dev/null 2>&1
+  sysctl -q -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || return 1
+  if [[ -d /proc/sys/net/ipv4/conf/rp-wg ]]; then
+    sysctl -q -w net.ipv4.conf.rp-wg.rp_filter=2 >/dev/null 2>&1 || return 1
+  fi
   systemctl enable --now rp-nat >/dev/null 2>&1 || { say "Ошибка включения rp-nat" >&2; return 1; }
   systemctl restart rp-nat >/dev/null 2>&1 || { say "Ошибка загрузки NAT" >&2; return 1; }
   if systemctl is-active --quiet firewalld; then
-    # rp-wg — в той же зоне, что и внешний интерфейс: пересылка внутри зоны разрешена без политик
+    # Separate rp-wg from the host's public zone. Do NOT add --add-forward to
+    # that zone (it would also affect unrelated 3x-ui / hosting workloads).
+    local wg_zone=rp-tunnel policy=rp-tunnel-egress old_zone
     ez=$(ip -4 route show default | awk '{print $5; exit}')
-    z=$(firewall-cmd --get-zone-of-interface="$ez" 2>/dev/null); [[ -n $z ]] || z=$(firewall-cmd --get-default-zone)
-    firewall-cmd --permanent --zone=trusted --remove-interface=rp-wg >/dev/null 2>&1
-    firewall-cmd --permanent --delete-policy=rp-egress >/dev/null 2>&1
-    firewall-cmd --permanent --zone="$z" --add-interface=rp-wg >/dev/null 2>&1
-    firewall-cmd --permanent --zone="$z" --add-forward >/dev/null 2>&1
-    # SSH с VPS-1 по туннелю остаётся доступным, даже если закрыть порт 22 снаружи
-    firewall-cmd --permanent --zone="$z" --add-rich-rule='rule family="ipv4" source address="10.77.0.1" service name="ssh" accept' >/dev/null 2>&1
-    firewall-cmd --reload >/dev/null 2>&1
-    ip link show rp-wg >/dev/null 2>&1 && firewall-cmd --zone="$z" --change-interface=rp-wg >/dev/null 2>&1
-    say "firewalld: rp-wg в зоне $z, пересылка включена"
+    [[ -n $ez ]] || { say 'firewalld: default IPv4 interface not found' >&2; return 1; }
+    z=$(firewall-cmd --get-zone-of-interface="$ez" 2>/dev/null) || z=""
+    [[ -n $z ]] || z=$(firewall-cmd --get-default-zone) || return 1
+    [[ $z != "$wg_zone" ]] || { say 'firewalld: egress zone equals rp-tunnel' >&2; return 1; }
+    if ! firewall-cmd --permanent --get-zones | tr ' ' '\n' | grep -qx "$wg_zone"; then
+      firewall-cmd --permanent --new-zone="$wg_zone" >/dev/null || return 1
+    fi
+    if ! firewall-cmd --permanent --get-policies | tr ' ' '\n' | grep -qx "$policy"; then
+      firewall-cmd --permanent --new-policy="$policy" >/dev/null || return 1
+    fi
+    old_zone=$(firewall-cmd --permanent --get-zone-of-interface=rp-wg 2>/dev/null || true)
+    if [[ -n $old_zone && $old_zone != "$wg_zone" ]]; then
+      firewall-cmd --permanent --zone="$old_zone" --remove-interface=rp-wg >/dev/null || return 1
+    fi
+    firewall-cmd --permanent --zone="$wg_zone" --query-interface=rp-wg >/dev/null 2>&1 ||
+      firewall-cmd --permanent --zone="$wg_zone" --add-interface=rp-wg >/dev/null || return 1
+    firewall-cmd --permanent --zone="$wg_zone" --query-service=ssh >/dev/null 2>&1 ||
+      firewall-cmd --permanent --zone="$wg_zone" --add-service=ssh >/dev/null || return 1
+    firewall-cmd --permanent --policy="$policy" --query-ingress-zone="$wg_zone" >/dev/null 2>&1 ||
+      firewall-cmd --permanent --policy="$policy" --add-ingress-zone="$wg_zone" >/dev/null || return 1
+    # The public zone may change if the VPS moves networks; replace outdated
+    # egress zones, but only within our own policy.
+    local old_eg
+    for old_eg in $(firewall-cmd --permanent --policy="$policy" --list-egress-zones 2>/dev/null); do
+      [[ $old_eg == "$z" ]] || firewall-cmd --permanent --policy="$policy" --remove-egress-zone="$old_eg" >/dev/null || return 1
+    done
+    firewall-cmd --permanent --policy="$policy" --query-egress-zone="$z" >/dev/null 2>&1 ||
+      firewall-cmd --permanent --policy="$policy" --add-egress-zone="$z" >/dev/null || return 1
+    firewall-cmd --permanent --policy="$policy" --set-target=ACCEPT >/dev/null || return 1
+    firewall-cmd --reload >/dev/null || return 1
+    ip link show rp-wg >/dev/null 2>&1 &&
+      firewall-cmd --zone="$wg_zone" --change-interface=rp-wg >/dev/null 2>&1
+    if firewall-cmd --zone="$z" --query-forward >/dev/null 2>&1; then
+      say "! firewalld: в общей зоне $z уже включён forward (возможно, старой версией rp); автоматически не отключаю, чтобы не сломать другие сервисы"
+    fi
+    say "firewalld: rp-wg в отдельной зоне $wg_zone; policy $policy -> $z"
   fi
   [[ $(sysctl -n net.ipv4.ip_forward 2>/dev/null) == 1 ]] &&
     nft list table ip rp_nat >/dev/null 2>&1 || {
@@ -1556,6 +1666,7 @@ cmd_status() {
   local t; t=$(active)
   say "Режим: $(mode_get); транспорт: ${t:-нет — fail-closed}"
   say "Приоритеты: $(tr_order); прошли первичный тест: $(tr '\n' ' ' <"$STATE/usable" 2>/dev/null)"
+  say "Failback: $(failback_policy) (passive не прерывает рабочее соединение)"
   say "Сквозная проба (HY2 и XHTTP): случайный интервал ${WATCH_MIN:-15}–${WATCH_MAX:-35} с; штатные QUIC/TCP keepalive не меняются"
   say "hy2: $(systemctl is-active rp-hy2)  hy2o: $(systemctl is-active rp-hy2o)  wg: $(systemctl is-active wg-quick@rp-wg)  xhttp: $(systemctl is-active rp-xray@xhttp)  xhttp2: $(systemctl is-active rp-xray@xhttp2)  сторож: $(systemctl is-active rp-watch)"
   [[ -n $t ]] && { func_ok "$t" && say "Проверка: туннель работает" || say "Проверка: туннель НЕ отвечает"; }
@@ -1573,6 +1684,11 @@ cmd_remove() {
   rm -rf /etc/systemd/system/rp-* /usr/local/share/rp "$ETC" "$STATE"
   [[ -f /root/.ssh/authorized_keys ]] && sed -i '/ rp@vps1$/d' /root/.ssh/authorized_keys
   nft delete table ip rp_nat 2>/dev/null; rm -f /etc/sysctl.d/99-rp.conf
+  if systemctl is-active --quiet firewalld; then
+    firewall-cmd --permanent --delete-policy=rp-tunnel-egress >/dev/null 2>&1 || true
+    firewall-cmd --permanent --delete-zone=rp-tunnel >/dev/null 2>&1 || true
+    firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
   systemctl daemon-reload; say "Удалено. Бинарники /usr/local/bin/{xray,hysteria,rp} оставлены; rm — вручную."
 }
 cmd_confirm() { systemctl stop rp-rollback.timer >/dev/null 2>&1; rm -f "$STATE/backup.tgz"; say "Обновление подтверждено, откат отменён"; }
@@ -1599,7 +1715,7 @@ case ${1:-menu} in
   menu) menu ;; status) cmd_status ;; restart) cmd_restart ;; logs) cmd_logs "${2:-80}" ;; select) cmd_select ;;
   test) t=$(active); t1_check "$t" && t2_check "$t" && t3_check "$t" && say "T1–T3: ок" ;;
   remove) cmd_remove ;; version) cmd_version ;; confirm) cmd_confirm ;; rollback) cmd_rollback ;;
-  results) cmd_results ;; egress) cmd_egress ;; fixnet) cmd_fixnet ;; mode) shift; cmd_mode "$@" ;; _setorder) shift; cmd_setorder "$@" ;;
+  results) cmd_results ;; egress) cmd_egress ;; fixnet) cmd_fixnet ;; mode) shift; cmd_mode "$@" ;; failback) shift; cmd_failback "$@" ;; _setorder) shift; cmd_setorder "$@" ;;
   _func) func_ok "$(active)" ;;
   _fn) shift; "$@" ;;
   *) say "rp: status | restart | logs [N] | select | test | results | egress | fixnet | version | remove (без аргументов — меню)"; say "Заменить параметры: вставьте новый блок из VPS-1." ;;
@@ -1629,6 +1745,11 @@ rand_between() {
   printf '%d\n' "$((lo + raw % (hi - lo + 1)))"
 }
 activity_sleep() { sleep "$(rand_between "$WATCH_MIN" "$WATCH_MAX")"; }
+# 'passive' (default) never tears down a good connection just to re-test a
+# preferred candidate. Priority order still applies after the CURRENT path fails.
+failback_policy_now() {
+  [[ $(cat "$ST/failback-policy" 2>/dev/null || true) == active ]] && echo active || echo passive
+}
 error_sleep() { sleep "$(rand_between 8 15)"; }
 log() { logger -t rp-watch -- "$*"; }
 active() { cat "$ST/active" 2>/dev/null || true; }
@@ -1802,8 +1923,8 @@ while :; do
     errors=0
     # On fallback: wait for 30 min of uninterrupted operation before failback.
     # Failed failback must not cause immediate repeated attempts or lose the old path.
-    if [[ $t != "${order[0]}" ]] && ((now - last_switch >= 1800)) &&
-       ((now - last_failback >= 1800)); then
+    if [[ $(failback_policy_now) == active && $t != "${order[0]}" ]] &&
+       ((now - last_switch >= 1800)) && ((now - last_failback >= 1800)); then
       last_failback=$now
       attempted=0; upgraded=""
       # Try ALL higher-priority candidates in rank order, not just position 1.
@@ -2138,9 +2259,14 @@ rp_main() {
   install -d -m 700 /etc/wireguard; install -m 600 /etc/rp/rp-wg.conf /etc/wireguard/rp-wg.conf; chmod 600 /etc/rp/rp-wg.conf
   # shellcheck disable=SC1091
   . /etc/rp/rp2.conf
-  { printf 'net.ipv4.ip_forward=1\nnet.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\nnet.ipv4.conf.all.rp_filter=2\n'
-    [[ ${DISABLE_IPV6:-1} == 1 ]] && printf 'net.ipv6.conf.all.disable_ipv6=1\nnet.ipv6.conf.default.disable_ipv6=1\n'
-  } >/etc/sysctl.d/99-rp.conf; sysctl -q -p /etc/sysctl.d/99-rp.conf >/dev/null 2>&1
+  # VPS-2 may host unrelated services; never toggle its global IPv6 or
+  # global rp_filter. ip_forward is necessary for the inner WG egress only.
+  printf '# Managed by rp (VPS-2); do not disable global IPv6/rp_filter\nnet.ipv4.ip_forward=1\n' \
+    >/etc/sysctl.d/99-rp.conf
+  sysctl -q -p /etc/sysctl.d/99-rp.conf >/dev/null 2>&1
+  if [[ $(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null) == 1 ]]; then
+    rp_msg '! IPv6 сейчас выключен на VPS-2 (возможно, прежней версией rp). rp его не включает автоматически; проверьте настройки других сервисов.'
+  fi
   command -v restorecon >/dev/null && restorecon -R /etc/rp /usr/local/bin /usr/local/lib/rp /usr/local/share/rp 2>/dev/null
   systemctl daemon-reload
   # 5. NAT и пересылка, фаервол (порты наружу не открываются); rp fixnet — единая реализация
@@ -2149,7 +2275,7 @@ rp_main() {
   # 6. SSH: ключ с ограничениями (только с loopback и внутреннего WG-адреса, без форвардинга)
   install -d -m 700 /root/.ssh; touch /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys
   sed -i '/ rp@vps1$/d' /root/.ssh/authorized_keys
-  printf 'from="127.0.0.1,10.77.0.1",no-port-forwarding,no-agent-forwarding,no-X11-forwarding %s rp@vps1\n' "$(grep '^SSH_PUB=' /etc/rp/rp2.conf | cut -d'"' -f2)" >>/root/.ssh/authorized_keys
+  printf 'from="127.0.0.1,10.77.0.1",restrict,pty %s rp@vps1\n' "$(grep '^SSH_PUB=' /etc/rp/rp2.conf | cut -d'"' -f2)" >>/root/.ssh/authorized_keys
   systemctl is-active --quiet sshd || systemctl enable --now sshd >/dev/null 2>&1
   local prl; prl=$(sshd -T 2>/dev/null | awk '/^permitrootlogin/{print $2}')
   [[ $prl == no ]] && rp_msg "! В sshd запрещён вход root (PermitRootLogin no): ключ rp работать не будет"
@@ -2651,66 +2777,216 @@ route_target_for() {
     *) return 1 ;;
   esac
 }
-route_api_override() {
+route_api_override() { # баланcировщик, тег|clear
+  local bal=$1 target=$2
+  [[ $bal == exit || $bal == rev ]] || return 2
+  case $target in
+    to-exit|r-xhttp|r-xhttp2)
+      "$XRAY_BIN" api bo --server=127.0.0.1:10085 -b "$bal" "$target" >/dev/null 2>&1 ;;
+    clear)
+      "$XRAY_BIN" api bo --server=127.0.0.1:10085 -b "$bal" -r >/dev/null 2>&1 ;;
+    *) return 2 ;;
+  esac
+}
+route_rev_has() { # Detect whether this outbound is valid for the separate management balancer.
+  local tag=$1
+  python3 -I - "$ETC/xray.json" "$tag" <<'PY_REV_HAS'
+import json, sys
+try:
+    with open(sys.argv[1], encoding='utf-8') as f:
+        conf = json.load(f)
+    bal = next(b for b in conf.get('routing', {}).get('balancers', []) if b['tag'] == 'rev')
+    sys.exit(0 if sys.argv[2] in bal.get('selector', []) else 1)
+except (OSError, ValueError, TypeError, KeyError, StopIteration):
+    sys.exit(1)
+PY_REV_HAS
+}
+route_has_rev() { # rev exists whenever SSH doors use reverse XHTTP bridges.
+  grep -Eq '"tag"[[:space:]]*:[[:space:]]*"rev"' "$ETC/xray.json" 2>/dev/null
+}
+route_prepare() { # Pre-arm ONLY the management reverse bridge, never customer traffic.
   local target=$1
   [[ $target == to-exit || $target == r-xhttp || $target == r-xhttp2 ]] || return 2
-  "$XRAY_BIN" api bo --server=127.0.0.1:10085 -b exit "$target" >/dev/null 2>&1
+  route_has_rev || return 0
+  if [[ $target == to-exit ]]; then
+    route_api_override rev clear
+  else
+    route_rev_has "$target" || return 1
+    route_api_override rev "$target"
+  fi
 }
 route_pin() {
-  local target=$1 tmp old
+  local target=$1 policy=${2:-manual} tmp ptmp old old_policy rev_target old_rev
+  [[ $policy == auto || $policy == manual ]] || return 2
   [[ $target == to-exit || $target == r-xhttp || $target == r-xhttp2 ]] || return 2
   old=$(cat "$STATE/route-target" 2>/dev/null || true)
+  old_policy=$(cat "$STATE/route-policy" 2>/dev/null || echo manual)
   if ! { tr_has reality-xhttp || tr_has reality-xhttp2; }; then
-    # Hysteria2-only Xray uses a direct to-exit outbound without any balancer.
     [[ $target == to-exit ]] || return 1
-    rm -f "$STATE/route-target"
+    rm -f "$STATE/route-target" "$STATE/route-policy"
     return 0
   fi
-  # Re-issue even for the same target: Xray might have been restarted externally.
-  if ! route_api_override "$target"; then
-    err "Xray отказался фиксировать маршрут $target (API 127.0.0.1:10085); предыдущий маршрут сохранён"
-    return 1
+  # CRITICAL: exit serves customer traffic, rev serves the reverse-SSH door.
+  # Updating exit alone loses SSH when VPS-2 switches between XHTTP bridges.
+  # Apply rev FIRST for XHTTP, then exit; for Hysteria use WG control and
+  # clear the stale rev override (its selector contains only XHTTP bridges).
+  if route_has_rev; then
+    # Automatic failover needs an unpinned management balancer, otherwise a
+    # switch XHTTP2 -> XHTTP permanently strands control on the old bridge.
+    if [[ $target == to-exit || $policy == auto ]]; then rev_target=clear
+    elif route_rev_has "$target"; then rev_target=$target
+    else err "SSH-балансировщик rev не содержит $target"; return 1
+    fi
+    if ! route_api_override rev "$rev_target"; then
+      err "Xray не смог согласовать управляющий балансировщик rev"; return 1
+    fi
+  fi
+  if ! route_api_override exit "$target"; then
+    if [[ -n $old && $old != "$target" ]]; then
+      [[ $old == to-exit || $old_policy == auto ]] && old_rev=clear || old_rev=$old
+      route_has_rev && route_api_override rev "$old_rev" || true
+    fi
+    err "Xray отказался установить исходящий маршрут $target"; return 1
   fi
   tmp=$(mktemp "$STATE/.route-target.XXXXXXXX") || return 1
-  if ! printf '%s\n' "$target" >"$tmp" || ! chmod 644 "$tmp" || ! mv -f "$tmp" "$STATE/route-target"; then
-    rm -f "$tmp"
-    [[ -z $old ]] || route_api_override "$old" || true
-    err "Не удалось сохранить подтверждённый маршрут $target"
+  ptmp=$(mktemp "$STATE/.route-policy.XXXXXXXX") || { rm -f "$tmp"; return 1; }
+  if ! printf '%s\n' "$target" >"$tmp" || ! printf '%s\n' "$policy" >"$ptmp" ||
+     ! chmod 644 "$tmp" "$ptmp" || ! mv -f "$ptmp" "$STATE/route-policy" ||
+     ! mv -f "$tmp" "$STATE/route-target"; then
+    rm -f "$tmp" "$ptmp"
+    if [[ -n $old ]]; then
+      printf '%s\n' "$old_policy" >"$STATE/route-policy"
+      [[ $old == to-exit || $old_policy == auto ]] && old_rev=clear || old_rev=$old
+      route_has_rev && route_api_override rev "$old_rev" || true
+      route_api_override exit "$old" || true
+    fi
+    err "Не удалось сохранить исходящий маршрут/режим $target/$policy"
     return 1
   fi
+}
+# Journal: this local record documents an in-flight operation, not an assertion
+# about VPS-2. VPS-2's /var/lib/rp/mode and /var/lib/rp/active are authoritative.
+transition_start() { # uuid desired previous-target
+  local id=$1 desired=$2 previous=$3 tmp
+  [[ $id =~ ^[0-9a-f-]{8,64}$ ]] || return 2
+  case $desired in auto|reality-xhttp|reality-xhttp2|hy2-wg|hy2o-wg) :;; *) return 2;; esac
+  tmp=$(mktemp "$STATE/.route-transition.XXXXXXXX") || return 1
+  printf 'id=%s\ndesired=%s\nprevious=%s\nstarted=%s\n' \
+    "$id" "$desired" "$previous" "$(date +%s)" >"$tmp" &&
+    chmod 600 "$tmp" && mv -f "$tmp" "$STATE/route-transition"
+}
+transition_clear() { rm -f "$STATE/route-transition"; }
+transition_show() {
+  [[ -s $STATE/route-transition ]] || return 0
+  local id desired started elapsed
+  id=$(sed -n 's/^id=//p' "$STATE/route-transition" | head -1)
+  desired=$(sed -n 's/^desired=//p' "$STATE/route-transition" | head -1)
+  started=$(sed -n 's/^started=//p' "$STATE/route-transition" | head -1)
+  if [[ $started =~ ^[0-9]+$ ]]; then elapsed=$(( $(date +%s) - started )); else elapsed='?'; fi
+  printf 'Ожидает подтверждения: %s (операция %s, прошло %s с)\n' "$desired" "$id" "$elapsed"
+}
+remote_mode_parse() { # validate one coherent response: mode=... active=...
+  local snapshot=$1 mode act
+  mode=$(sed -n 's/^mode=//p' <<<"$snapshot" | head -1)
+  act=$(sed -n 's/^active=//p' <<<"$snapshot" | head -1)
+  case $mode in auto|manual:reality-xhttp|manual:reality-xhttp2|manual:hy2-wg|manual:hy2o-wg) :;; *) return 1;; esac
+  case $act in reality-xhttp|reality-xhttp2|hy2-wg|hy2o-wg) :;; *) return 1;; esac
+  [[ $mode == auto || $mode == "manual:$act" ]] || return 1
+  printf '%s %s\n' "$mode" "$act"
+}
+route_reconcile_snapshot() { # snapshot returned by VPS-2; can be called with rp.lock held
+  local snapshot=$1 parsed mode act target old
+  parsed=$(remote_mode_parse "$snapshot") || return 1
+  read -r mode act <<<"$parsed"
+  target=$(route_target_for "$act") || return 1
+  old=$(cat "$STATE/route-target" 2>/dev/null || true)
+  # An accepted request is async: do not re-pin the OLD bridge before the
+  # watchdog has committed the new one. Only a definite failure permits undo.
+  if [[ -s $STATE/route-transition ]]; then
+    local expected id result
+    expected=$(sed -n 's/^desired=//p' "$STATE/route-transition" | head -1)
+    if [[ $expected != auto && $act != "$expected" ]]; then
+      id=$(sed -n 's/^id=//p' "$STATE/route-transition" | head -1)
+      result=$(RP_READ_RETRIES=1 vps2_read "/usr/local/bin/rp mode result $id" 2>/dev/null || true)
+      if [[ $result != fail ]]; then
+        warn "Переход $expected ещё не завершён (result=${result:-unavailable}); прежний пользовательский маршрут сохраняю"
+        return 1
+      fi
+    fi
+  fi
+  # Apply every time, even if the FILE matches: a restarted Xray has no in-memory override.
+  if [[ $mode == auto ]]; then
+    route_pin "$target" auto || return 1
+  else
+    route_pin "$target" manual || return 1
+  fi
+  cache_vps2_state "$snapshot"
+  if [[ -s $STATE/route-transition ]]; then
+    local desired id result
+    desired=$(sed -n 's/^desired=//p' "$STATE/route-transition" | head -1)
+    id=$(sed -n 's/^id=//p' "$STATE/route-transition" | head -1)
+    if [[ $desired == auto && $mode == auto || $desired == "$act" && $mode == "manual:$act" ]]; then
+      transition_clear
+    else
+      result=$(RP_READ_RETRIES=1 vps2_read "/usr/local/bin/rp mode result $id" 2>/dev/null || true)
+      if [[ $result == fail ]]; then
+        warn "VPS-2 отклонил переключение $desired; восстанавливаю $mode/$act"
+        transition_clear
+      else
+        warn "Переход $desired ожидает результата (result=${result:-unavailable})"
+        return 1
+      fi
+    fi
+  fi
+  [[ $old == "$target" ]] || note "Синхронизирован маршрут VPS-1: $act → $target (exit и rev)"
   return 0
 }
 route_sync() {
-  local snapshot mode act target old
   [[ $(cf ROLE) == vps1 ]] || return 1
-  # Route polling must NOT interfere with rp push/migrate/manual changes.
   exec 7>/run/rp.lock
   flock -n 7 || return 0
-  snapshot=$(vps2_read '/usr/local/bin/rp mode status' 2>/dev/null) || return 0
-  mode=$(sed -n 's/^mode=//p' <<<"$snapshot" | head -1)
-  act=$(sed -n 's/^active=//p' <<<"$snapshot" | head -1)
-  case $mode in auto|manual:reality-xhttp|manual:reality-xhttp2|manual:hy2-wg|manual:hy2o-wg) : ;; *) return 0 ;; esac
-  if [[ $mode == manual:* && $act != "${mode#manual:}" ]]; then
-    # Do not pin a different transport when manual fail-closed is requested.
-    warn "VPS-2 сообщает ручной режим $mode, но active=$act; маршрут не меняю"
-    return 0
-  fi
-  target=$(route_target_for "$act") || return 0
-  old=$(cat "$STATE/route-target" 2>/dev/null || true)
-  [[ $old == "$target" ]] && return 0
-  route_pin "$target" && note "Синхронизирован маршрут VPS-1: $act → $target"
+  local snapshot
+  snapshot=$(RP_READ_RETRIES=1 vps2_read '/usr/local/bin/rp mode status' 2>/dev/null) || return 0
+  route_reconcile_snapshot "$snapshot"
 }
-# Same sync while the interactive command already holds rp.lock.
 route_sync_locked() {
-  local snapshot mode act target
-  snapshot=$(vps2_read '/usr/local/bin/rp mode status') || return 1
-  mode=$(sed -n 's/^mode=//p' <<<"$snapshot" | head -1)
-  act=$(sed -n 's/^active=//p' <<<"$snapshot" | head -1)
-  [[ $mode == auto || $mode == manual:"$act" ]] || return 1
-  target=$(route_target_for "$act") || return 1
-  route_pin "$target"
+  local snapshot
+  snapshot=$(vps2_read '/usr/local/bin/rp mode status' 2>/dev/null) || return 1
+  route_reconcile_snapshot "$snapshot"
 }
-
+# Repair a split-brain installation without modifying VPS-2 or needing an SSH
+# path that is currently routed to the WRONG reverse bridge. The requested
+# transport MUST be independently confirmed on VPS-2 after local API repair.
+route_recover() { # named transport confirmed by administrator on VPS-2 console
+  local desired=$1 target old snapshot mode act i
+  [[ $desired == reality-xhttp || $desired == reality-xhttp2 || $desired == hy2-wg || $desired == hy2o-wg ]] || return 2
+  tr_has "$desired" || { err "Транспорт $desired отсутствует в конфигурации"; return 1; }
+  target=$(route_target_for "$desired") || return 1
+  old=$(cat "$STATE/route-target" 2>/dev/null || true)
+  note "Восстанавливаю локальные балансировщики Xray под $desired, VPS-2 не изменяю"
+  route_pin "$target" || return 1
+  for ((i=1; i<=12; i++)); do
+    snapshot=$(RP_READ_RETRIES=1 vps2_read '/usr/local/bin/rp mode status' 2>/dev/null || true)
+    if [[ -n $snapshot ]]; then
+      read -r mode act < <(remote_mode_parse "$snapshot" 2>/dev/null || echo invalid invalid)
+      if [[ $act == "$desired" ]] && { [[ $mode == auto ]] || [[ $mode == "manual:$desired" ]]; }; then
+        # Explicit recovery cancels a stale pending request on VPS-1.
+        transition_clear
+        route_reconcile_snapshot "$snapshot" || return 1
+        ok "Подтверждено VPS-2: $mode, $act; оба балансировщика согласованы"
+        return 0
+      fi
+      warn "VPS-2 сообщает $mode/$act; ожидалось $desired; восстанавливаю локальный маршрут по фактическому состоянию"
+      transition_clear
+      route_reconcile_snapshot "$snapshot" || true
+      return 1
+    fi
+    sleep 3
+  done
+  warn "Маршрут локально переключён, но VPS-2 не отвечает через обратный SSH; результат НЕ подтверждён"
+  warn "Проверьте на VPS-2: rp mode status; затем rp tunnel sync (или rp tunnel recover ТРАНСПОРТ)"
+  return 1
+}
 # ── Доступ к VPS-2 ───────────────────────────────────────────────────────
 hy2_live() { wg show wg-exit latest-handshakes 2>/dev/null | awk '$2>0 && systime()-$2<180 {f=1} END{exit !f}'; }
 door_port() { py_door="$1"; local it; IFS=';' read -ra _d <<<"$(cf DOORS "ssh=2222=127.0.0.1:22")"; for it in "${_d[@]}"; do [[ ${it%%=*} == "$py_door" ]] && { it=${it#*=}; echo "${it%%=*}"; return 0; }; done; return 1; }
@@ -2794,7 +3070,7 @@ vps2_read() {
       ((${#a[@]})) || continue
       # Buffer each attempt. A dropped SSH stream must not leak partial output
       # into a later successful attempt (e.g. false IP or active-transport name).
-      if output=$(ssh -o BatchMode=yes -o ConnectionAttempts=1 "${a[@]}" "$@" </dev/null 2>/dev/null); then
+      if output=$(ssh -o BatchMode=yes -o ConnectionAttempts=1 -o ConnectTimeout=4 -o ServerAliveInterval=4 -o ServerAliveCountMax=2 "${a[@]}" "$@" </dev/null 2>/dev/null); then
         [[ $* == *'mode status'* ]] && cache_vps2_state "$output"
         printf '%s\n' "$output"
         return 0
@@ -3187,8 +3463,8 @@ cmd_dns() {
     show)
       card "DNS"
       kv "Запросы клиентов" "UDP/TCP 53 на wg0 перехватываются и обслуживаются Xray"
-      kv "Российские домены" "обычный DNS (UDP/53) к $(cf DNS_RU 77.88.8.8), напрямую с VPS-1, в России"
-      kv "Остальные домены" "DoH через туннель, с IP VPS-2; порядок: $(cf DNS_REMOTE)"
+      kv "Российские домены" "$([[ $(cf RU_DIRECT 0) == 1 ]] && echo "DNS $(cf DNS_RU 77.88.8.8) напрямую (кроме ru-blocked/ru-proxy)" || echo "все DNS через туннель")"
+      kv "Остальные домены" "DoH через туннель, fail-closed; порядок: $(cf DNS_REMOTE)"
       card_end
       printf '\n  %sДоступные серверы (все — DoH, шифруются HTTPS внутри туннеля)%s\n' "$B" "$R"
       while IFS='|' read -r k n a t; do printf '   %s%-11s%s %s — %s\n     %s%s%s\n' "$C_ACC" "$k" "$R" "$n" "$a" "$C_DIM" "$t" "$R"; done < <(dns_info) ;;
@@ -3198,7 +3474,20 @@ cmd_dns() {
       vps1_set DNS_REMOTE "$v" && ok "DNS через туннель: $v" ;;
     test)
       for u in $(py dns); do if doh_test "$u"; then ok "$u (DoH) отвечает"; else err "$u (DoH) не отвечает"; fi; done ;;
-    *) die "rp dns [show] | set СЕРВЕРЫ | test" ;;
+    ru)
+      local addr="${2:-}"
+      if [[ -z $addr ]]; then note "Российский DNS: $(cf DNS_RU 77.88.8.8) (напрямую с VPS-1)"; return 0; fi
+      [[ $addr == yandex ]] && addr=77.88.8.8
+      python3 - "$addr" <<'PY_DNS'
+import ipaddress, sys
+try:
+    if ipaddress.ip_address(sys.argv[1]).version != 4: raise ValueError()
+except ValueError:
+    sys.exit("Укажите IPv4 российского DNS (или yandex)")
+PY_DNS
+      [[ $? == 0 ]] || return 1
+      vps1_set DNS_RU "$addr" && ok "Российский DNS: $addr" ;;
+    *) die "rp dns [show] | set СЕРВЕРЫ | ru [IPv4|yandex] | test" ;;
   esac
 }
 
@@ -3399,6 +3688,10 @@ upg_revert() { # upg_revert xray|hy2 бинарник копия-конфига
 ru_lists_edit() { # ru_lists_edit proxy|direct домен
   local kind=$1 d=${2,,} other; other=$([[ $kind == proxy ]] && echo direct || echo proxy)
   [[ $d =~ ^[a-z0-9.-]+\.[a-z0-9-]+$ ]] || die "Нужен домен вида example.com"
+  if [[ $kind == direct && $d =~ (^|\.)(google\.com|youtube\.com|instagram\.com|telegram\.org|cloudflare\.com|github\.com|openai\.com|whatsapp\.com)$ ]]; then
+    err "$d закреплён за туннелем (защита от DNS/маршрутной утечки), прямое исключение отклонено"
+    return 1
+  fi
   touch "$ETC/ru-$kind.list" "$ETC/ru-$other.list"
   grep -qxF "$d" "$ETC/ru-$kind.list" || echo "$d" >>"$ETC/ru-$kind.list"
   grep -vxF "$d" "$ETC/ru-$other.list" >"$ETC/ru-$other.list.tmp"; mv "$ETC/ru-$other.list.tmp" "$ETC/ru-$other.list"
@@ -3432,14 +3725,18 @@ cmd_status() {
   snapshot=$(vps2_read '/usr/local/bin/rp mode status' 2>/dev/null || true)
   policy=$(sed -n 's/^mode=//p' <<<"$snapshot" | head -1)
   act=$(sed -n 's/^active=//p' <<<"$snapshot" | head -1)
-  kv "Режим VPS-2" "${policy:-не подтверждён (SSH недоступен)}"
+  kv "Режим VPS-2" "${policy:-не подтверждён (обратный SSH недоступен)}"
   case "$act" in
     reality-xhttp|reality-xhttp2|hy2-wg|hy2o-wg) kv "Живой транспорт" "$act" ;;
     *) kv "Живой транспорт" "не подтверждён (handshake не показатель)" ;;
   esac
   local_target=$(cat "$STATE/route-target" 2>/dev/null || true)
   expected=$(route_target_for "$act" 2>/dev/null || true)
-  kv "Маршрут VPS-1 (сохранён)" "${local_target:-балансировщик/ещё не синхронизирован}"
+  kv "Маршрут VPS-1 (пользовательский)" "${local_target:-балансировщик/ещё не синхронизирован}"
+  kv "Политика управления VPS-1" "$(cat "$STATE/route-policy" 2>/dev/null || echo не подтверждена)"
+  if [[ -s $STATE/route-transition ]]; then
+    kv "Переключение" "$(transition_show)"
+  fi
   if [[ -n $expected && -n $local_target && $expected != "$local_target" ]]; then
     warn "Маршруты VPS-1 и VPS-2 расходятся: выполните rp tunnel sync"
   fi
@@ -3507,9 +3804,16 @@ cmd_tunnel() {
       fi
       ;;
     status)
-      vps2_read '/usr/local/bin/rp mode status' || { err "VPS-2 не отвечает по SSH"; return 1; }
+      if ! vps2_read '/usr/local/bin/rp mode status'; then
+        warn "Нет подтверждения VPS-2 по обратному SSH; используйте rp tunnel recover ТРАНСПОРТ, если VPS-2 уже переключён"
+      fi
       note "Маршрут Xray VPS-1: $(cat "$STATE/route-target" 2>/dev/null || echo не синхронизирован)"
+      [[ ! -s $STATE/route-transition ]] || transition_show
       return 0 ;;
+    recover)
+      [[ $# -ge 2 ]] || { err "Использование: rp tunnel recover reality-xhttp"; return 2; }
+      route_recover "$2"
+      return $? ;;
     sync)
       if route_sync_locked; then
         ok "Маршрут VPS-1 согласован с активным транспортом VPS-2"
@@ -3518,7 +3822,7 @@ cmd_tunnel() {
       err "Состояние VPS-2 не подтверждено, маршрут VPS-1 оставлен без изменений"
       return 1 ;;
     auto|reality-xhttp|reality-xhttp2|hy2-wg|hy2o-wg) : ;;
-    *) die "rp tunnel [status|select|sync|auto|reality-xhttp2|reality-xhttp|hy2-wg|hy2o-wg]" ;;
+    *) die "rp tunnel [status|select|sync|recover TRANSPORT|auto|reality-xhttp2|reality-xhttp|hy2-wg|hy2o-wg]" ;;
   esac
   [[ $desired == auto ]] || tr_has "$desired" || { err "Транспорт $desired не включён в настройках VPS-1"; return 1; }
   if [[ $desired == auto ]]; then
@@ -3526,12 +3830,32 @@ cmd_tunnel() {
   else
     warn "Ручная фиксация $desired отключает failover на другие протоколы; при сбое — fail-closed"
   fi
+  if [[ -s $STATE/route-transition ]]; then
+    err "Предыдущее переключение ещё не подтверждено. Сначала: rp tunnel status; rp tunnel sync"
+    return 1
+  fi
   req=$(uuid) || return 1
+  local before
+  before=$(cat "$STATE/route-target" 2>/dev/null || true)
+  transition_start "$req" "$desired" "$before" || return 1
   if ! push_ssh "/usr/local/bin/rp mode request $req $desired" /dev/null; then
+    transition_clear
     err "Не удалось передать команду выбора на VPS-2"
     return 1
   fi
-  note "VPS-2 проверяет выбранный транспорт T2/T3; соединение SSH может кратковременно прерваться."
+  # VPS-2 has accepted, but the asynchronous watcher may not have switched.
+  # Pre-arm ONLY the management 'rev' balancer; leave customer 'exit' on the
+  # old working transport until VPS-2 confirms the new active channel.
+  if [[ $desired != auto ]]; then
+    local prepared
+    prepared=$(route_target_for "$desired") || return 1
+    if ! route_prepare "$prepared"; then
+      err "Запрос принят VPS-2, но подготовка управляющего пути не прошла. Операция ожидает восстановления"
+      warn "Проверьте: rp tunnel status; rp tunnel recover $desired"
+      return 1
+    fi
+  fi
+  note "VPS-2 принял запрос. Управляющий путь подготовлен; пользовательский выход остаётся прежним до подтверждения."
   local deadline=$((SECONDS + 300))
   while ((SECONDS < deadline)); do
     reply=$(RP_READ_RETRIES=1 vps2_read "/usr/local/bin/rp mode result $req" 2>/dev/null | tail -1 | tr -d '\r' || true)
@@ -3547,8 +3871,9 @@ cmd_tunnel() {
           [[ $now_mode == "manual:$desired" && $now_active == "$desired" ]] || { warn "VPS-2 ещё переключается"; sleep 3; continue; }
         fi
         if ! route_sync_locked; then
-          err "VPS-2 изменил режим, но Xray VPS-1 НЕ синхронизирован; повторите rp tunnel sync"
-          return 1
+          warn "VPS-2 подтвердил режим, но маршрут ещё согласуется; повторяю"
+          sleep 3
+          continue
         fi
         # The outbound route is now pinned to the confirmed VPS-2 transport.
         # Give existing TCP connections time to drain before testing a fresh one.
@@ -3564,13 +3889,17 @@ cmd_tunnel() {
         printf '%s\n' "$state"
         return 0 ;;
       fail)
-        route_sync_locked >/dev/null 2>&1 || true
-        err "VPS-2 не смог проверить $desired; прежний режим сохранён, предпринята попытка восстановить прежний канал"
+        if ! route_sync_locked >/dev/null 2>&1; then
+          [[ -z $before ]] || route_pin "$before" || true
+        fi
+        transition_clear
+        err "VPS-2 не смог проверить $desired; выполнен откат к прежнему маршруту, если он доступен"
         return 1 ;;
     esac
     sleep 3
   done
-  warn "За 300 с не получено подтверждение операции. Не повторяйте выбор вслепую: rp tunnel status; rp tunnel sync"
+  warn "За 300 с нет подтверждения VPS-2. Запрос сохранён в $STATE/route-transition."
+  warn "Не повторяйте переключение: rp tunnel sync; при необходимости rp tunnel recover ТРАНСПОРТ"
   return 1
 }
 
@@ -3595,11 +3924,12 @@ menu_ru() {
 menu_dns() {
   local c v
   while :; do cls; banner "DNS" "DoH через туннель"; cmd_dns show
-    mhead "Действия"; mi 1 "Выбрать серверы"; mi 2 "Проверить серверы"; mi 3 "Быстро: Quad9 + Cloudflare"; mi 4 "Быстро: только Quad9"; mi 0 "Назад"; mpick c
+    mhead "Действия"; mi 1 "Выбрать серверы"; mi 2 "Проверить серверы"; mi 3 "Быстро: Quad9 + Cloudflare"; mi 4 "Быстро: только Quad9"; mi 5 "Российский DNS (IPv4)"; mi 0 "Назад"; mpick c
     case $c in
       1) v=""; ask v "Серверы через пробел (quad9 cloudflare google adguard или https://…/dns-query)" "$(cf DNS_REMOTE)" '^[A-Za-z0-9:/._ -]+$' "Недопустимые символы"; (cmd_dns set "$v"); pause ;;
       2) (cmd_dns test); pause ;; 3) (cmd_dns set quad9 cloudflare); pause ;; 4) (cmd_dns set quad9); pause ;;
-      0) return ;; *) warn "Введите число от 0 до 4"; sleep 1 ;; esac
+      5) v=""; ask v "IPv4 российского DNS (yandex или адрес)" "$(cf DNS_RU 77.88.8.8)" '^[A-Za-z0-9.]+$' "Укажите IPv4"; (cmd_dns ru "$v"); pause ;;
+      0) return ;; *) warn "Введите число от 0 до 5"; sleep 1 ;; esac
   done
 }
 menu_upd() {
@@ -3694,10 +4024,10 @@ rp $SELF_VERSION — цепочка «клиенты WG → VPS-1 → тунне
   rp test [--long] [--restart]   безопасные T1–T7 (T8 только с --restart)
   rp diag [--fix]          диагностика выхода по участкам; --fix исправляет найденное
   rp transports            транспорты и результаты их проверки на VPS-2
-  rp tunnel [status|select|sync|auto|reality-xhttp2|reality-xhttp|hy2-wg|hy2o-wg]
+  rp tunnel [status|select|sync|recover ТРАНСПОРТ|auto|reality-xhttp2|reality-xhttp|hy2-wg|hy2o-wg]
                            автоматический режим или фиксация одного транспорта на VPS-2
   rp prune                 ручное исключение транспортов (по умолчанию НЕТ; сторож пробует все)
-  rp dns [show|set СЕРВЕРЫ|test]   DoH-серверы через туннель (quad9 cloudflare google adguard)
+  rp dns [show|set СЕРВЕРЫ|ru [IPv4|yandex]|test]  зарубежные DoH и DNS РФ
   rp doctor                версии на обоих концах, выход
   rp rotate                сменить UUID, пароли, shortId, ключи Reality (с откатом)
   rp upgrade [check|xray [версия]|hy2 [версия]|ru|self]   Xray, Hysteria2, списки, сам rp.sh (с откатом)
@@ -3783,6 +4113,7 @@ import hashlib
 import io
 import ipaddress
 import json
+import re
 import os
 import socket
 import sys
@@ -3877,10 +4208,7 @@ def read_list(path):
                 s = line.split("#", 1)[0].strip().lower()
                 if not s or s in seen:
                     continue
-                try:
-                    s.encode("idna")
-                except UnicodeError:
-                    continue
+                s = domain_ascii(s)
                 seen.add(s)
                 out.append(s)
     except OSError:
@@ -3974,6 +4302,37 @@ def dns_hosts(cfg):
     return hosts[:2] or ["9.9.9.9", "149.112.112.112"]
 
 
+# Stable critical services. Narrow suffixes only; operator ru-proxy and guard win.
+# This is a fallback when upstream geosite categories change, NOT a wildcard for *.com.
+RU_DIRECT_CORE = tuple(dict.fromkeys((
+    "ozon.ru", "ozonusercontent.com", "wildberries.ru", "wb.ru", "wbstatic.net",
+    "avito.ru", "avito.st", "megamarket.ru", "dns-shop.ru", "citilink.ru",
+    "mvideo.ru", "eldorado.ru", "lamoda.ru", "market.yandex.ru",
+    "sberbank.ru", "sber.ru", "vtb.ru", "tbank.ru", "tinkoff.ru",
+    "alfabank.ru", "gazprombank.ru", "raiffeisen.ru", "cbr.ru",
+    "nspk.ru", "mironline.ru", "moex.com",
+    "gosuslugi.ru", "gu-st.ru", "nalog.gov.ru", "government.ru",
+    "kremlin.ru", "mos.ru", "gov.ru", "rosreestr.gov.ru",
+    "zakupki.gov.ru", "rospotrebnadzor.ru"
+)))
+RU_FOREIGN_GUARD = ("google.com", "youtube.com", "instagram.com", "telegram.org",
+                    "cloudflare.com", "github.com", "openai.com", "whatsapp.com")
+
+
+def rule_domain_list(names):
+    return ["domain:" + s for s in names]
+
+
+def domain_ascii(s):
+    s = s.strip().lower().rstrip(".")
+    try:
+        s = s.encode("idna").decode("ascii")
+    except UnicodeError:
+        die("ошибка IDNA в доменном списке: %s" % s)
+    if not re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", s) or len(s) > 253:
+        die("некорректное имя домена: %s" % s)
+    return s
+
 # ── Xray на VPS-1 ───────────────────────────────────────────────────────
 
 def xh_settings(cfg, v, server):
@@ -4040,17 +4399,23 @@ def xray_server(cfg):
 
     # Первый outbound — по умолчанию: blackhole (при любой путанице трафик не уходит напрямую).
     out = [{"tag": "block", "protocol": "blackhole"},
-           {"tag": "direct", "protocol": "freedom"}]
+           {"tag": "direct", "protocol": "freedom",
+            "streamSettings": {"sockopt": {"domainStrategy": "ForceIPv4"}}}]
     if hy:
         out.append({"tag": "to-exit", "protocol": "freedom",
-                    "streamSettings": {"sockopt": {"mark": EXIT_MARK}}})
+                    "streamSettings": {"sockopt": {"mark": EXIT_MARK, "domainStrategy": "ForceIPv4"}}})
     if xh:
         # ipsBlocked=[]: Xray 26.x иначе блокирует 127.0.0.1 («blocked target IP») и проба к эхо не проходит;
         # сюда попадает только трафик с reality-входов по правилу «127.0.0.1:ECHO_PORT», остальное — block
         out.append({"tag": "local-echo", "protocol": "freedom",
                     "settings": {"redirect": "127.0.0.1:%d" % ECHO_PORT, "ipsBlocked": []}})
-    out.append({"tag": "dns-out", "protocol": "dns",
-                "settings": {"nonIPQuery": "reject", "blockTypes": [64, 65]}})
+    # Modern DNS outbound (Xray 26.x): SVCB/HTTPS qtypes stay blocked, only A/AAAA
+    # are imported into the built-in split DNS. Unknown types are REFUSED, never forwarded.
+    out.append({"tag": "dns-out", "protocol": "dns", "settings": {"rules": [
+        {"action": "return", "qType": "64-65", "rCode": 5},
+        {"action": "hijack", "qType": "1,28"},
+        {"action": "return", "rCode": 5}
+    ]}})
 
     rev_tags = [VARIANTS[t]["rev"] for t in xh]
     sel = (["to-exit"] if hy else []) + rev_tags
@@ -4058,11 +4423,16 @@ def xray_server(cfg):
     exit_ref = {"balancerTag": "exit"} if use_bal else {"outboundTag": "to-exit"}
 
     ru_dns = cfg.get("DNS_RU", "77.88.8.8")
+    try:
+        if ipaddress.ip_address(ru_dns).version != 4: raise ValueError("IPv4 only")
+    except ValueError:
+        die("DNS_RU: сейчас поддерживается только числовой IPv4 (например 77.88.8.8)")
     ru_on = cfg.get("RU_DIRECT", "1") == "1"
     ru_sets = [s for s in cfg.get("RU_SETS", "category-ru yandex vk category-gov-ru 2gis").split() if s]
     ru_domains = ["geosite:%s" % s for s in ru_sets]
     # domain: — суффиксное сопоставление (быстрее regexp, который Xray проверяет перебором по каждому запросу)
     ru_domains += ["domain:ru", "domain:su", "domain:xn--p1ai"]
+    ru_domains += rule_domain_list(RU_DIRECT_CORE)
 
     def rule(**kw):
         kw["type"] = "field"
@@ -4085,26 +4455,47 @@ def xray_server(cfg):
     etc = cfg.get("ETC", ETC)
     force_proxy = read_list(os.path.join(etc, "ru-proxy.list"))
     force_direct = read_list(os.path.join(etc, "ru-direct.list"))
+    # Foreign control domains never direct, even if an operator or a bad geo
+    # database later assigns a Russian IP or adds one to ru-direct.list.
+    rules.append(rule(inboundTag=["wg-tp"], domain=rule_domain_list(RU_FOREIGN_GUARD), **exit_ref))
     if force_proxy:
         rules.append(rule(inboundTag=["wg-tp"], domain=["domain:%s" % d for d in force_proxy], **exit_ref))
     if ru_on and cfg.get("RU_GUARD", "1") == "1":
         rules.append(rule(inboundTag=["wg-tp"], domain=["geosite:ru-blocked"], **exit_ref))
-    if force_direct:
-        rules.append(rule(inboundTag=["wg-tp"], domain=["domain:%s" % d for d in force_direct], outboundTag="direct"))
+    if ru_on and force_direct:
+        rules.append(rule(inboundTag=["wg-tp"], domain=rule_domain_list(force_direct), outboundTag="direct"))
     if ru_on:
         rules.append(rule(inboundTag=["wg-tp"], domain=ru_domains, outboundTag="direct"))
         if cfg.get("RU_GEOIP", "1") == "1":
             rules.append(rule(inboundTag=["wg-tp"], ip=["geoip:ru"], outboundTag="direct"))
     rules.append(rule(inboundTag=["wg-tp"], **exit_ref))
 
+    # Three disjoint DNS priority layers. Priority on match is NOT sufficient:
+    # overlapping .ru domains also match the direct server, so the final remote
+    # guard DoH must use finalQuery to avoid fallthrough into Russian DNS.
+    remotes = dns_remote(cfg)
     dns_servers = []
     if ru_on:
-        dns_servers.append({"address": ru_dns, "domains": ru_domains, "skipFallback": True})
-    dns_servers += dns_remote(cfg)
+        forced = rule_domain_list(RU_FOREIGN_GUARD) + rule_domain_list(force_proxy)
+        if cfg.get("RU_GUARD", "1") == "1":
+            forced.append("geosite:ru-blocked")
+        if forced:
+            for idx, address in enumerate(remotes):
+                dns_servers.append({"address": address, "domains": forced,
+                                    "skipFallback": True,
+                                    "finalQuery": idx == len(remotes) - 1})
+        # Russian DNS is NEVER a fallback for other domains, even during DoH outage.
+        direct_domains = rule_domain_list(force_direct) + ru_domains
+        dns_servers.append({"address": ru_dns, "domains": direct_domains,
+                            "skipFallback": True, "finalQuery": True})
+    # All other names: encrypted DoH routed over the exit tunnel only.
+    for idx, address in enumerate(remotes):
+        dns_servers.append({"address": address, "finalQuery": idx == len(remotes) - 1})
 
     routing = {"domainStrategy": "AsIs", "rules": rules}
     res = {"log": {"loglevel": "warning", "access": "none"},
-           "dns": {"tag": "dns-in", "servers": dns_servers, "queryStrategy": "UseIPv4"},
+           "dns": {"tag": "dns-in", "servers": dns_servers,
+                   "queryStrategy": "UseIPv4", "disableFallbackIfMatch": True},
            "inbounds": inb, "outbounds": out, "routing": routing}
     if use_bal:
         # gRPC control plane: local loopback ONLY; no external firewall port.
@@ -4137,6 +4528,9 @@ def hy2_server(cfg, obfs=False):
         s += "obfs:\n  type: salamander\n  salamander:\n    password: \"%s\"\n" % cfg["HY2O_OBFS"]
     s += ("masquerade:\n  type: proxy\n  proxy:\n    url: %s\n    rewriteHost: true\n"
           "udp:\n  enabled: true\n  idleTimeout: 120s\n"
+          # Do not turn Hysteria into an unrestricted forward proxy into VPS-1.
+          # Built-in ACL 'reject' must be terminal; no other destinations allowed.
+          "acl:\n  inline:\n    - direct(127.0.0.1, udp/51821)\n    - reject(all)\n"
           "# Без bandwidth (Brutal): остаётся BBR.%s\n"
           % (cfg["HY2_MASQ"], " Salamander включён: пакеты не похожи на QUIC." if obfs
              else " Без obfs: трафик похож на HTTP/3."))
@@ -4297,7 +4691,7 @@ def xray_client(cfg, t):
 
 def vps2_conf(cfg, order):
     keys = ["PUBLIC_IP", "TRANSPORT_FORCE", "HY2_PORT", "HY2O_PORT", "RXH_PORT", "RXH2_PORT",
-            "XRAY_VER", "HY2_VER", "SSH_PUB", "DISABLE_IPV6"]
+            "XRAY_VER", "HY2_VER", "SSH_PUB"]
     lines = ["# /etc/rp/rp2.conf — параметры VPS-2 (создан блоком из VPS-1)",
              'TRANSPORT_ORDER="%s"' % " ".join(order)]
     for k in keys:
@@ -4733,6 +5127,111 @@ def cmd_qr(args):
     print(qr_text(data.rstrip(b"\n")))
 
 
+def _pb_varint(data, pos, end):
+    v, shift = 0, 0
+    for _ in range(10):
+        if pos >= end: raise ValueError("truncated varint")
+        b = data[pos]; pos += 1
+        v |= (b & 127) << shift
+        if b < 128: return v, pos
+        shift += 7
+    raise ValueError("varint too long")
+
+
+def _pb_fields(data, start=0, end=None):
+    end = len(data) if end is None else end
+    p = start
+    while p < end:
+        k, p = _pb_varint(data, p, end)
+        field, wire = k >> 3, k & 7
+        if not field: raise ValueError("field zero")
+        if wire == 0: val, p = _pb_varint(data, p, end)
+        elif wire == 1:
+            val = (p, p + 8)
+            p += 8
+        elif wire == 5:
+            val = (p, p + 4)
+            p += 4
+        elif wire == 2:
+            ln, p = _pb_varint(data, p, end)
+            val = (p, p + ln)
+            p += ln
+        else: raise ValueError("unsupported protobuf wire type %d" % wire)
+        if p > end: raise ValueError("truncated protobuf field")
+        yield field, wire, val
+
+
+def _geo_entries(path, requested):
+    # The outer GeoSiteList field #1 is repeated GeoSite; country_code #1,
+    # repeated domain messages #2; domain type #1, value #2.
+    import mmap
+    result = {key.lower(): [] for key in requested}
+    with open(path, 'rb') as f:
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            for field, wire, span in _pb_fields(data):
+                if field != 1 or wire != 2: continue
+                a, b = span; code = None
+                for sf, sw, sv in _pb_fields(data, a, b):
+                    if sf == 1 and sw == 2:
+                        code = data[sv[0]:sv[1]].decode('ascii', 'replace').lower()
+                        break
+                if code not in result: continue
+                for sf, sw, sv in _pb_fields(data, a, b):
+                    if sf != 2 or sw != 2: continue
+                    typ, value = None, None
+                    for df, dw, dv in _pb_fields(data, sv[0], sv[1]):
+                        if df == 1 and dw == 0: typ = dv
+                        if df == 2 and dw == 2:
+                            value = data[dv[0]:dv[1]].decode('utf-8', 'replace').lower()
+                    if typ in (0, 1, 2, 3) and value:
+                        result[code].append((typ, value))
+    return result
+
+
+def _matches_geo(domain, entries):
+    for typ, value in entries:
+        if typ == 3 and domain == value: return True
+        if typ == 2 and (domain == value or domain.endswith('.' + value)): return True
+        if typ == 0 and value in domain: return True
+        if typ == 1:
+            try:
+                if re.search(value, domain): return True
+            except re.error:
+                raise ValueError("bad regex in geosite")
+    return False
+
+
+def cmd_verify_geo(args):
+    if len(args) != 1: die("verify-geo PATH")
+    path = args[0]
+    if not os.path.isfile(path) or not (1048576 <= os.stat(path).st_size <= 367001600):
+        die("geosite.dat имеет недопустимый размер")
+    cfg = load_conf()
+    ru_sets = [s for s in cfg.get("RU_SETS", "category-ru yandex vk category-gov-ru 2gis").split() if s]
+    needed = set(ru_sets) | {'ru-blocked'}
+    try:
+        groups = _geo_entries(path, needed)
+    except (OSError, ValueError) as exc:
+        die("ошибка структуры GeoSiteList: %s" % exc)
+    missing = [name for name in needed if not groups.get(name)]
+    if missing: die("в geosite.dat отсутствуют категории: %s" % ', '.join(sorted(missing)))
+    blockers = groups['ru-blocked']
+    for domain in RU_DIRECT_CORE:
+        if _matches_geo(domain, blockers):
+            die("критический российский домен %s включён в ru-blocked: обновление отменено" % domain)
+    for domain in RU_FOREIGN_GUARD:
+        if any(_matches_geo(domain, groups[name]) for name in ru_sets):
+            die("зарубежный контрольный домен %s попал в RU-наборы: обновление отменено" % domain)
+    # Core remains a fallback; do not reject an update just because an upstream
+    # category removed a Russian domain. Audit only, not a circular requirement.
+    uncovered = [d for d in RU_DIRECT_CORE if not any(_matches_geo(d, groups[n]) for n in ru_sets)]
+    print("geo-check OK: %d Russian domains protected, %d foreign controls, %d guard entries" %
+          (len(RU_DIRECT_CORE), len(RU_FOREIGN_GUARD), len(blockers)))
+    if uncovered:
+        print("notice: built-in direct core covers %d names absent upstream: %s" %
+              (len(uncovered), ', '.join(uncovered[:8])))
+
+
 def cmd_serve(args):
     """serve ПОРТ ТОКЕН ФАЙЛ СЕРТ КЛЮЧ ТТЛ_СЕК — одноразовая отдача файла по HTTPS (блок для VPS-2).
     Отдаёт только GET /ТОКЕН и только один раз; результат («ok»/«timeout») пишет в файл result рядом."""
@@ -4813,7 +5312,7 @@ def cmd_serve(args):
 
 
 COMMANDS = {"qr": cmd_qr, "serve": cmd_serve, "echo": cmd_echo, "render": cmd_render, "client": cmd_client, "bundle": cmd_bundle,
-            "next-ip": cmd_next_ip, "chunk": cmd_chunk, "probe": cmd_probe, "rpf": cmd_rpf, "dns": cmd_dns}
+            "next-ip": cmd_next_ip, "chunk": cmd_chunk, "probe": cmd_probe, "rpf": cmd_rpf, "dns": cmd_dns, "verify-geo": cmd_verify_geo}
 
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:
