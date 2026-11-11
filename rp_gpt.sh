@@ -7,7 +7,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.1.8-stable-diagnostics"
+SELF_VERSION="1.1.9-manual-transport"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -1143,9 +1143,41 @@ say() {
   fi
 }
 tr_all() { echo "$TRANSPORT_ORDER"; }
+# Persistent on VPS-2; deliberately NOT stored in rp2.conf so 'rp push' preserves it.
+# A pinned transport never falls back to a different protocol. In case of failure,
+# the watchdog retries that same protocol and preserves fail-closed routing.
+mode_get() {
+  local m
+  m=$(cat "$STATE/mode" 2>/dev/null) || m=auto
+  [[ -n $m ]] || m=auto
+  case "$m" in
+    auto|manual:reality-xhttp|manual:reality-xhttp2|manual:hy2-wg|manual:hy2o-wg) printf '%s\n' "$m" ;;
+    *) printf 'invalid\n'; return 1 ;;
+  esac
+}
+manual_target() { local m; m=$(mode_get) || return 1; [[ $m == manual:* ]] || return 1; printf '%s\n' "${m#manual:}"; }
+mode_allowed() {
+  local t
+  for t in $TRANSPORT_ORDER; do [[ $t == "$1" ]] && return 0; done
+  return 1
+}
 # usable/results — последний снимок диагностики, а не постоянный запрет транспорта.
 # Иначе временная потеря UDP исключает HY2 навсегда до ручного rp select.
-tr_order() { if [[ -n ${TRANSPORT_FORCE:-} ]]; then echo "$TRANSPORT_FORCE"; else tr_all; fi; }
+tr_order() {
+  local m t
+  m=$(mode_get) || return 1
+  if [[ $m == manual:* ]]; then
+    t=${m#manual:}
+    # Never silently choose a different transport if a pinned one was removed
+    # from the allowed transports by a future configuration update.
+    mode_allowed "$t" || return 1
+    printf '%s\n' "$t"
+  elif [[ -n ${TRANSPORT_FORCE:-} ]]; then
+    printf '%s\n' "$TRANSPORT_FORCE"
+  else
+    tr_all
+  fi
+}
 active() { cat "$STATE/active" 2>/dev/null; }
 unit_of() { case $1 in hy2-wg) echo rp-hy2 ;; hy2o-wg) echo rp-hy2o ;; reality-xhttp) echo rp-xray@xhttp ;; reality-xhttp2) echo rp-xray@xhttp2 ;; esac; }
 tr_stop_all() { systemctl stop rp-xray@xhttp rp-xray@xhttp2 rp-xray@tcp wg-quick@rp-wg rp-hy2 rp-hy2o 2>/dev/null; return 0; }
@@ -1301,7 +1333,19 @@ cmd_select() {
   # Результат предварительного сканирования может устареть. Ещё раз проверяем
   # окончательно выбранный канал после его повторного запуска.
   first=""
-  for t in "${tmpu[@]}"; do
+  # A configured manual pin survives reinstall/update and the full 'rp select'.
+  # A failed pinned transport must NOT be silently replaced by a fallback.
+  local pinned="" current_mode=""; current_mode=$(mode_get) || current_mode=invalid
+  [[ $current_mode == manual:* ]] && pinned=${current_mode#manual:}
+  local -a final_candidates=("${tmpu[@]}")
+  [[ $current_mode != invalid ]] || final_candidates=()
+  if [[ -n $pinned ]]; then
+    final_candidates=()
+    for t in "${tmpu[@]}"; do
+      [[ $t == "$pinned" ]] && final_candidates+=("$t")
+    done
+  fi
+  for t in "${final_candidates[@]}"; do
     if tr_start "$t" && t2_check "$t" && t3_check "$t" >/dev/null && func_ok "$t"; then
       first=$t; break
     fi
@@ -1325,7 +1369,66 @@ cmd_select() {
     say "Нет активного выхода: действует fail-closed; сторож продолжит восстановление"
     return 1
   fi
-  say "Активен транспорт: $first"
+  say "Активен транспорт: $first (режим: $(mode_get))"
+}
+# VPS-2 control plane: requests are accepted BEFORE any network interruption;
+# rp-watch executes them and records the result. A retry of the same request id
+# never creates a second switching operation.
+cmd_mode() {
+  local sub=${1:-status} id=${2:-} choice=${3:-} old oldid oldchoice f tmp
+  case $sub in
+    auto|reality-xhttp|reality-xhttp2|hy2-wg|hy2o-wg)
+      # Local emergency control from VPS-2 console if the reverse SSH path is down.
+      cmd_mode request "$(cat /proc/sys/kernel/random/uuid)" "$sub"
+      ;;
+    status)
+      say "mode=$(mode_get)"
+      say "active=$(active)"
+      if [[ -s $STATE/mode-request ]]; then
+        read -r oldid oldchoice <"$STATE/mode-request" || true
+        say "pending=$oldchoice"
+      fi
+      ;;
+    result)
+      [[ $id =~ ^[0-9a-f-]{8,64}$ ]] || return 2
+      if [[ -s $STATE/mode-result ]]; then
+        read -r oldid old <"$STATE/mode-result" || true
+        if [[ $id == "$oldid" ]]; then printf '%s\n' "$old"; return 0; fi
+      fi
+      if [[ -s $STATE/mode-request ]]; then
+        read -r oldid oldchoice <"$STATE/mode-request" || true
+        [[ $id == "$oldid" ]] && { printf 'pending\n'; return 0; }
+      fi
+      printf 'unknown\n'; return 1
+      ;;
+    request)
+      [[ $id =~ ^[0-9a-f-]{8,64}$ ]] || { say 'Invalid request ID' >&2; return 2; }
+      case $choice in
+        auto) : ;;
+        reality-xhttp|reality-xhttp2|hy2-wg|hy2o-wg)
+          mode_allowed "$choice" || { say "Transport is not configured: $choice" >&2; return 2; }
+          ;;
+        *) say "Invalid transport: $choice" >&2; return 2 ;;
+      esac
+      exec 8>"$STATE/mode-request.lock"
+      flock -x 8 || return 1
+      if [[ -s $STATE/mode-request ]]; then
+        read -r oldid oldchoice <"$STATE/mode-request" || true
+        [[ $oldid == "$id" && $oldchoice == "$choice" ]] && return 0
+        say 'A transport switch is already in progress' >&2; return 1
+      fi
+      # Repeated request after dropped SSH acknowledgment is idempotent.
+      if [[ -s $STATE/mode-result ]]; then
+        read -r oldid old <"$STATE/mode-result" || true
+        [[ $oldid == "$id" ]] && return 0
+      fi
+      tmp=$(mktemp "$STATE/.mode-request.XXXXXX") || return 1
+      printf '%s %s\n' "$id" "$choice" >"$tmp" && chmod 600 "$tmp" &&
+        mv -f "$tmp" "$STATE/mode-request" || { rm -f "$tmp"; return 1; }
+      say "accepted=$id"
+      ;;
+    *) say 'rp mode status | request ID auto|TRANSPORT | result ID' >&2; return 2 ;;
+  esac
 }
 cmd_results() { cat "$STATE/results" 2>/dev/null; }
 cmd_setorder() { # rp _setorder список — оставить только перечисленные транспорты
@@ -1381,7 +1484,8 @@ cmd_fixnet() {
 }
 cmd_status() {
   local t; t=$(active)
-  say "Транспорт: ${t:-нет — fail-closed}  (приоритеты: $(tr_order); прошли первичный тест: $(tr '\n' ' ' <"$STATE/usable" 2>/dev/null))"
+  say "Режим: $(mode_get); транспорт: ${t:-нет — fail-closed}"
+  say "Приоритеты: $(tr_order); прошли первичный тест: $(tr '\n' ' ' <"$STATE/usable" 2>/dev/null)"
   say "Сквозная проба (HY2 и XHTTP): случайный интервал ${WATCH_MIN:-15}–${WATCH_MAX:-35} с; штатные QUIC/TCP keepalive не меняются"
   say "hy2: $(systemctl is-active rp-hy2)  hy2o: $(systemctl is-active rp-hy2o)  wg: $(systemctl is-active wg-quick@rp-wg)  xhttp: $(systemctl is-active rp-xray@xhttp)  xhttp2: $(systemctl is-active rp-xray@xhttp2)  сторож: $(systemctl is-active rp-watch)"
   [[ -n $t ]] && { func_ok "$t" && say "Проверка: туннель работает" || say "Проверка: туннель НЕ отвечает"; }
@@ -1425,7 +1529,7 @@ case ${1:-menu} in
   menu) menu ;; status) cmd_status ;; restart) cmd_restart ;; logs) cmd_logs "${2:-80}" ;; select) cmd_select ;;
   test) t=$(active); t1_check "$t" && t2_check "$t" && t3_check "$t" && say "T1–T3: ок" ;;
   remove) cmd_remove ;; version) cmd_version ;; confirm) cmd_confirm ;; rollback) cmd_rollback ;;
-  results) cmd_results ;; egress) cmd_egress ;; fixnet) cmd_fixnet ;; _setorder) shift; cmd_setorder "$@" ;;
+  results) cmd_results ;; egress) cmd_egress ;; fixnet) cmd_fixnet ;; mode) shift; cmd_mode "$@" ;; _setorder) shift; cmd_setorder "$@" ;;
   _func) func_ok "$(active)" ;;
   _fn) shift; "$@" ;;
   *) say "rp: status | restart | logs [N] | select | test | results | egress | fixnet | version | remove (без аргументов — меню)"; say "Заменить параметры: вставьте новый блок из VPS-1." ;;
@@ -1499,6 +1603,77 @@ choose_candidate() {
   done
   return 1
 }
+# Execute a requested manual switch in the supervisor, not inside the SSH
+# session used to submit it. Commit only after bidirectional T2/T3 checks.
+mode_result() {
+  local tmp
+  tmp=$(mktemp "$ST/.mode-result.XXXXXXXX") || return 1
+  printf '%s %s\n' "$1" "$2" >"$tmp" && chmod 600 "$tmp" &&
+    mv -f "$tmp" "$ST/mode-result"
+}
+mode_commit() {
+  local tmp
+  tmp=$(mktemp "$ST/.mode.XXXXXXXX") || return 1
+  printf '%s\n' "$1" >"$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$ST/mode"
+}
+process_mode_request() {
+  [[ -s $ST/mode-request ]] || return 1
+  local id desired previous previous_mode status=fail t
+  read -r id desired <"$ST/mode-request" || true
+  [[ $id =~ ^[0-9a-f-]{8,64}$ ]] || { rm -f "$ST/mode-request"; return 0; }
+  case $desired in auto|reality-xhttp|reality-xhttp2|hy2-wg|hy2o-wg) :;;
+    *) mode_result "$id" fail; rm -f "$ST/mode-request"; return 0;; esac
+  previous=$(active)
+  previous_mode=$(fn mode_get 2>/dev/null) || previous_mode=invalid
+  if [[ $desired == auto ]]; then
+    if mode_commit auto; then
+      status=ok
+      # Re-enable priority failback without forcing an unnecessary disconnect.
+      last_switch=$(( $(date +%s) - 1800 ))
+      last_failback=0
+      errors=0
+      log 'automatic failover enabled'
+    fi
+  elif [[ " $(fn tr_all) " != *" $desired "* ]]; then
+    log "manual transport not configured: $desired"
+  elif [[ $previous == "$desired" ]] && fn func_ok "$desired"; then
+    if mode_commit "manual:$desired"; then status=ok; errors=0; fi
+  elif try_transport "$desired"; then
+    if mode_commit "manual:$desired"; then
+      set_active "$desired"
+      strike[$desired]=0; blocked_until[$desired]=0
+      last_switch=$(date +%s); errors=0
+      next_deep=$((last_switch + $(rand_between 480 900)))
+      status=ok
+      log "manual transport selected: $desired"
+    else
+      log 'could not save manual mode; restoring previous transport'
+      if [[ -n $previous ]] && try_transport "$previous"; then
+        set_active "$previous"
+      else
+        clear_active; fn tr_stop_all >/dev/null 2>&1 || true
+      fi
+    fi
+  else
+    log "manual candidate $desired failed T2/T3; restoring $previous"
+    # Do not change the mode on failure. Validate the previous connection again.
+    if [[ -n $previous && " $(fn tr_all) " == *" $previous "* ]] && try_transport "$previous"; then
+      set_active "$previous"
+      errors=0; last_switch=$(date +%s)
+      next_deep=$((last_switch + $(rand_between 480 900)))
+      log "restored previous transport $previous"
+    else
+      clear_active
+      fn tr_stop_all >/dev/null 2>&1 || true
+      # The old AUTO policy may recover through any configured candidate.
+      # The old MANUAL policy only retries its original transport.
+      log 'previous transport could not be restored; fail-closed recovery'
+    fi
+  fi
+  mode_result "$id" "$status" || log "could not record mode result $id"
+  rm -f "$ST/mode-request"
+  return 0
+}
 # On reboot services might not be enabled individually: bring back the stored active.
 order=()
 read -ra order <<<"$(order_now)"
@@ -1516,6 +1691,7 @@ errors=0; last_switch=$(date +%s)
 next_deep=$((last_switch + $(rand_between 480 900)))
 last_failback=0
 while :; do
+  if process_mode_request; then activity_sleep; continue; fi
   read -ra order <<<"$(order_now)"
   if ((${#order[@]} == 0)); then
     # Misconfigured or empty policy: no permission to use an unlisted channel.
@@ -3068,6 +3244,8 @@ cmd_status() {
   kv "Правила сети" "$(dot_state rp-net)"; card_end
   card "Туннель"
   kv "Порядок транспортов" "$(cf TRANSPORT_ORDER)"
+  local policy; policy=$(vps2_read '/usr/local/bin/rp mode status' 2>/dev/null | sed -n 's/^mode=//p' | head -1)
+  kv "Режим VPS-2" "${policy:-не удалось получить}"
   local act; act=$(vps2_run 'cat /var/lib/rp/active' 2>/dev/null)
   if hy2_live || [[ -n $act ]]; then kv "Живой транспорт" "${act:-hy2}"; else kv "Живой транспорт" "${C_ERR}нет${R}"; fi
   kv "Клиентов WG" "$(client_names | wc -l)"; kv "Выход VPS-2" "$([[ -n $(cf VPS2_IPH) ]] && echo "проверен (адрес не хранится)" || echo "ещё не проверялся: rp test")"; card_end
@@ -3096,6 +3274,68 @@ cmd_sni() { # rp sni [хост …] — проверка кандидатов (�
   local -a hosts=("$@")
   ((${#hosts[@]})) || hosts=("${SNI_RU[@]}" "${SNI_WORLD[@]}")
   for h in "${hosts[@]}"; do printf '  %-24s %s\n' "$h" "$(sni_check "$h")"; done
+}
+
+# ── Ручной выбор транспорта VPS-2 ──────────────────────────────────────
+cmd_tunnel() {
+  need_vps1
+  local desired=${1:-status} req reply attempt old="" t cur old_state=""
+  local -a options=("auto|Автоматически|приоритеты и резервирование включены")
+  case $desired in
+    select)
+      for t in $(cf TRANSPORT_ORDER); do
+        case $t in
+          reality-xhttp2) options+=("$t|VLESS + REALITY + XHTTP packet-up|TCP, основной") ;;
+          reality-xhttp) options+=("$t|VLESS + REALITY + XHTTP stream-up|TCP, резерв") ;;
+          hy2-wg) options+=("$t|Hysteria2|UDP, внутренний WG") ;;
+          hy2o-wg) options+=("$t|Hysteria2 + Salamander|UDP, внутренний WG") ;;
+        esac
+      done
+      note "Режим и текущий транспорт на VPS-2:"
+      old_state=$(vps2_read '/usr/local/bin/rp mode status') || { err "Нет управляющего SSH к VPS-2; выбор невозможен"; return 1; }
+      printf '%s
+' "$old_state"
+      note "Фиксированный транспорт: при отказе другой не включается (fail-closed)."
+      old=$(sed -n 's/^mode=//p' <<<"$old_state" | head -1)
+      [[ $old == manual:* ]] && old=${old#manual:}
+      [[ -n $old ]] || old=auto
+      desired=""
+      choose desired "Режим обратного туннеля" "$old" "${options[@]}"
+      if [[ $desired == "$old" ]]; then ok "Режим уже выбран: $desired"; return 0; fi
+      ;;
+    status)
+      vps2_read '/usr/local/bin/rp mode status' || { err "VPS-2 не отвечает по SSH"; return 1; }
+      return 0 ;;
+    auto|reality-xhttp|reality-xhttp2|hy2-wg|hy2o-wg) : ;;
+    *) die "rp tunnel [status|select|auto|reality-xhttp2|reality-xhttp|hy2-wg|hy2o-wg]" ;;
+  esac
+  [[ $desired == auto ]] || tr_has "$desired" || { err "Транспорт $desired не включён в настройках VPS-1"; return 1; }
+  if [[ $desired == auto ]]; then
+    note "Включаю автоматическое переключение и возврат по приоритетам"
+  else
+    warn "Ручная фиксация $desired отключает failover на другие протоколы; при сбое — fail-closed"
+  fi
+  req=$(uuid) || return 1
+  if ! push_ssh "/usr/local/bin/rp mode request $req $desired" /dev/null; then
+    err "Не удалось передать команду выбора на VPS-2"
+    return 1
+  fi
+  note "VPS-2 проверяет выбранный транспорт T2/T3; соединение SSH может кратковременно прерваться."
+  for ((attempt=1; attempt<=36; attempt++)); do
+    reply=$(vps2_read "/usr/local/bin/rp mode result $req" 2>/dev/null | tail -1 | tr -d '\r' || true)
+    case $reply in
+      ok)
+        ok "Режим применён. Текущий транспорт:"
+        vps2_read '/usr/local/bin/rp mode status' || true
+        return 0 ;;
+      fail)
+        err "VPS-2 не смог проверить $desired; прежний режим сохранён, предпринята попытка восстановить прежний канал"
+        return 1 ;;
+    esac
+    sleep 3
+  done
+  warn "Подтверждение не получено. Состояние могло измениться: rp tunnel status / консоль VPS-2"
+  return 1
 }
 
 # ── Меню ─────────────────────────────────────────────────────────────────
@@ -3137,9 +3377,9 @@ menu_tunnel() {
   local c
   while :; do cls; banner "Туннель к VPS-2" "$(cf TRANSPORT_ORDER)"; cmd_door list
     mhead "Действия"; mi 1 "Строка для VPS-2 (он сам скачает блок)"; mi 2 "Блок для VPS-2 (вставка вручную)"; mi 3 "Обновить VPS-2 по SSH (откат 10 мин)"; mi 4 "SSH на VPS-2"
-    mi 5 "Двери (Reality)"; mi 6 "Сменить секреты"; mi 7 "Проверка сайтов SNI"; mi 8 "Транспорты: результаты проверки"; mi 9 "Исключить неработающие транспорты"; mi 0 "Назад"; mpick c
+    mi 5 "Двери (Reality)"; mi 6 "Сменить секреты"; mi 7 "Проверка сайтов SNI"; mi 8 "Транспорты: результаты проверки"; mi 9 "Исключить неработающие транспорты"; mi 10 "Выбрать активный транспорт (авто / вручную)"; mi 0 "Назад"; mpick c
     case $c in 1) (cmd_link); pause ;; 2) (cmd_block); pause ;; 3) (cmd_push); pause ;; 4) (cmd_ssh); pause ;; 5) (cmd_door list); pause ;; 6) (cmd_rotate); pause ;; 7) (cmd_sni); pause ;;
-      8) (cmd_transports); pause ;; 9) (cmd_prune); pause ;; 0) return ;; *) warn "Введите число от 0 до 9"; sleep 1 ;; esac
+      8) (cmd_transports); pause ;; 9) (cmd_prune); pause ;; 10) (lock; cmd_tunnel select); pause ;; 0) return ;; *) warn "Введите число от 0 до 10"; sleep 1 ;; esac
   done
 }
 menu_main() {
@@ -3218,6 +3458,8 @@ rp $SELF_VERSION — цепочка «клиенты WG → VPS-1 → тунне
   rp test [--long] [--restart]   безопасные T1–T7 (T8 только с --restart)
   rp diag [--fix]          диагностика выхода по участкам; --fix исправляет найденное
   rp transports            транспорты и результаты их проверки на VPS-2
+  rp tunnel [status|select|auto|reality-xhttp2|reality-xhttp|hy2-wg|hy2o-wg]
+                           автоматический режим или фиксация одного транспорта на VPS-2
   rp prune                 ручное исключение транспортов (по умолчанию НЕТ; сторож пробует все)
   rp dns [show|set СЕРВЕРЫ|test]   DoH-серверы через туннель (quad9 cloudflare google adguard)
   rp doctor                версии на обоих концах, выход
@@ -3275,6 +3517,7 @@ main() {
     test) need_root; lock; cmd_test "$@" ;;
     diag) need_root; lock; cmd_diag "$@" ;;
     transports) need_root; cmd_transports ;;
+    tunnel) need_root; [[ ${1:-status} == status ]] || lock; cmd_tunnel "$@" ;;
     prune) need_root; lock; cmd_prune ;;
     dns) need_root; lock; cmd_dns "$@" ;;
     doctor) need_root; cmd_doctor ;;
