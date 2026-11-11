@@ -7,7 +7,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.1.3-hardened"
+SELF_VERSION="1.1.3-hardened-hy2fix2"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -882,7 +882,7 @@ wait_udp_fwd() { local i; for ((i = 0; i < ${1:-20}; i++)); do ss -lunH sport = 
 tr_start() {
   tr_stop_all
   case $1 in
-    hy2-wg|hy2o-wg) systemctl start "$(unit_of "$1")" || return 1; wait_udp_fwd 30; systemctl start wg-quick@rp-wg ;;
+    hy2-wg|hy2o-wg) systemctl start "$(unit_of "$1")" || return 1; wait_udp_fwd 30 || return 1; systemctl start wg-quick@rp-wg || return 1; wg_kick ;;
     reality-xhttp|reality-xhttp2) systemctl start "$(unit_of "$1")" ;;
     *) return 1 ;;
   esac
@@ -890,6 +890,23 @@ tr_start() {
 tr_probe_addr() { case $1 in hy2*) echo "$VPS1_WG $ECHO_PORT" ;; *) echo "127.0.0.1 7777" ;; esac; }
 xfer_down() { local got; got=$(timeout 25 bash -c 'exec 3<>/dev/tcp/$0/$1 || exit 1; printf "DN %d\n" "$2" >&3; head -c "$2" <&3 | wc -c' "$1" "$2" "$3" 2>/dev/null) || got=0; echo "${got:-0}"; }
 xfer_up() { timeout 25 bash -c 'exec 3<>/dev/tcp/$0/$1 || exit 1; printf "UP %d\n" "$2" >&3; head -c "$2" /dev/zero >&3; read -r -t 15 l <&3; [[ $l == "OK $2" ]]' "$1" "$2" "$3" 2>/dev/null; }
+# WireGuard is quiet until the first packet. Without PersistentKeepalive, merely
+# starting the interface and waiting for a handshake (old T2 logic) is a deadlock.
+# Generate local WG traffic; it is carried by Hysteria2 UDP forwarding (127.0.0.1:51820).
+# This is not an external UDP connection and opens no public listening port.
+wg_kick() {
+  ip link show rp-wg >/dev/null 2>&1 || return 1
+  # Fail closed if the WG route is missing (avoid sending the probe via VPS-2 public NIC).
+  ip -4 route get 10.77.0.1 2>/dev/null | grep -Eq '(^|[[:space:]])dev rp-wg([[:space:]]|$)' || return 1
+  ( printf 'rp\n' > /dev/udp/10.77.0.1/9 ) 2>/dev/null
+}
+wg_handshake_fresh() {
+  local hs now
+  hs=$(wg show rp-wg latest-handshakes 2>/dev/null | awk 'NR==1{print $2}')
+  [[ ${hs:-} =~ ^[0-9]+$ ]] || return 1
+  now=$(date +%s)
+  ((hs > 0 && hs <= now && now - hs < 150))
+}
 # Lightweight end-to-end health checks for both Hysteria2+WG and VLESS+XHTTP.
 # Vary payload sizes independently: every probe must carry actual reverse-tunnel data.
 probe_size() {
@@ -901,8 +918,14 @@ probe_size() {
 func_ok() {
   local t=$1 h p dn up
   if [[ $t == hy2* ]]; then
-    local hs; hs=$(wg show rp-wg latest-handshakes 2>/dev/null | awk '{print $2}' | head -1)
-    [[ -n ${hs:-} && $hs -gt 0 && $(( $(date +%s) - hs )) -lt 150 ]] || return 1
+    # Active liveness probe supplies real traffic at the watchdog's randomized cadence.
+    local attempt
+    for ((attempt=0; attempt<5; attempt++)); do
+      wg_kick || return 1
+      wg_handshake_fresh && break
+      sleep 1
+    done
+    wg_handshake_fresh || return 1
   fi
   read -r h p < <(tr_probe_addr "$t")
   dn=$(probe_size); up=$(probe_size)
@@ -918,13 +941,18 @@ t1_check() { # T1: доступность порта / UDP-сессии
   esac
   timeout 8 bash -c '</dev/tcp/$0/$1' "$PUBLIC_IP" "$port" 2>/dev/null
 }
-t2_check() { # T2: рукопожатие Reality / QUIC+WG
+t2_check() { # T2: initiate WG handshake (hy2) or verify Reality path
   local t=$1 i
-  for i in $(seq 1 20); do
-    if [[ $t == hy2* ]]; then wg show rp-wg latest-handshakes 2>/dev/null | awk '$2>0{f=1} END{exit !f}' && return 0
-    else func_ok "$t" && return 0; fi
+  for ((i=1; i<=20; i++)); do
+    if [[ $t == hy2* ]]; then
+      # Explicitly initiate handshake rather than relying solely on 28s keepalive.
+      wg_kick && wg_handshake_fresh && return 0
+    else
+      func_ok "$t" && return 0
+    fi
     sleep 2
-  done; return 1
+  done
+  return 1
 }
 t3_check() { # T3: ≥200 КБ в обе стороны (против замирания потока на 15–20 КБ)
   local t=$1 h p got
@@ -944,7 +972,11 @@ diag() {
       elif timeout 5 bash -c '</dev/tcp/$0/$1' "$PUBLIC_IP" "$([[ $t == reality-xhttp ]] && echo "$RXH_PORT" || echo "$RXH2_PORT")" 2>&1 | grep -qi refused; then
         say "    сброс: порт закрыт или сервис VPS-1 не запущен → проверьте «rp status» на VPS-1"
       else say "    нет ответа: пакеты теряются (фильтрация по IP/порту) → смените порт или транспорт"; fi ;;
-    t2) say "    рукопожатие не прошло: сброс или обрыв сразу после подключения → смените SNI/порт или транспорт" ;;
+    t2)
+      if [[ $t == hy2* ]]; then
+        say "    QUIC мог успешно подключиться, но WG handshake через UDP forwarding не состоялся."
+        say "    Проверьте: wg show rp-wg; ip route get 10.77.0.1; ss -lunp; rp logs."
+      else say "    Reality/XHTTP: нет ответа через обратный канал; проверьте SNI, порт и журнал Xray"; fi ;;
     t3) say "    ${detail:-обрыв передачи}: так проявляется замирание потока ТСПУ → смените порт, SNI или транспорт" ;;
   esac
 }
@@ -2694,8 +2726,9 @@ def wg_exit_client(cfg):
     return ("[Interface]\nAddress = 10.77.0.2/30\nPrivateKey = %s\nMTU = %s\nTable = off\n\n"
             "[Peer]\nPublicKey = %s\nPresharedKey = %s\nEndpoint = 127.0.0.1:51820\n"
             "AllowedIPs = 10.77.0.1/32\n"
-            "# Periodic VPS-2 health probes maintain this WireGuard path at random intervals.\n"
-            "# No fixed PersistentKeepalive: local UDP forwarding and traffic probes maintain activity.\n"
+            "# Bootstrap handshake via probe; refresh inner WG link at a non-default 28s.\n"
+            "# VPS-2 initiates to loopback; WG is encapsulated by Hysteria2, not public UDP.\n"
+            "PersistentKeepalive = 28\n"
             % (cfg["EXIT_PRIV2"], cfg.get("EXIT_MTU", "1080"), cfg["EXIT_PUB1"], cfg["EXIT_PSK"]))
 
 
