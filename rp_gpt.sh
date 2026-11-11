@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # rp — цепочка «клиенты WG → VPS-1 (РФ) → туннель, устойчивый к ТСПУ → VPS-2 (выход)».
-# Локальная исправленная сборка fix1 (не релиз GitHub). Перед обновлением self сохраните исправления.
+# Локальная сборка 1.1.4-hardened-priority: приоритет XHTTP, гистерезис и fail-closed.
 # Один файл: роль VPS-1 (сервер, меню, генератор) или VPS-2 (блок на чистом bash, сторож).
 # Образец по структуре и стилю — tt.sh; отступления помечены «ОТСТУПЛЕНИЕ» с причиной.
 # Rocky Linux 9/10. Конфигурация: /etc/rp/rp.conf (единственный источник правды).
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.1.3-hardened-hy2fix2"
+SELF_VERSION="1.1.4-hardened-priority"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -874,7 +874,9 @@ VPS1_WG=10.77.0.1
 N=204800
 say() { printf '%s\n' "$*"; }
 tr_all() { echo "$TRANSPORT_ORDER"; }
-tr_order() { if [[ -n ${TRANSPORT_FORCE:-} ]]; then echo "$TRANSPORT_FORCE"; elif [[ -s $STATE/usable ]]; then tr '\n' ' ' <"$STATE/usable"; else tr_all; fi; }
+# usable/results — последний снимок диагностики, а не постоянный запрет транспорта.
+# Иначе временная потеря UDP исключает HY2 навсегда до ручного rp select.
+tr_order() { if [[ -n ${TRANSPORT_FORCE:-} ]]; then echo "$TRANSPORT_FORCE"; else tr_all; fi; }
 active() { cat "$STATE/active" 2>/dev/null; }
 unit_of() { case $1 in hy2-wg) echo rp-hy2 ;; hy2o-wg) echo rp-hy2o ;; reality-xhttp) echo rp-xray@xhttp ;; reality-xhttp2) echo rp-xray@xhttp2 ;; esac; }
 tr_stop_all() { systemctl stop rp-xray@xhttp rp-xray@xhttp2 rp-xray@tcp wg-quick@rp-wg rp-hy2 rp-hy2o 2>/dev/null; return 0; }
@@ -882,7 +884,7 @@ wait_udp_fwd() { local i; for ((i = 0; i < ${1:-20}; i++)); do ss -lunH sport = 
 tr_start() {
   tr_stop_all
   case $1 in
-    hy2-wg|hy2o-wg) systemctl start "$(unit_of "$1")" || return 1; wait_udp_fwd 30 || return 1; systemctl start wg-quick@rp-wg || return 1; wg_kick ;;
+    hy2-wg|hy2o-wg) systemctl start "$(unit_of "$1")" || return 1; wait_udp_fwd 30 || return 1; systemctl start wg-quick@rp-wg || return 1; wg_kick || true ;;
     reality-xhttp|reality-xhttp2) systemctl start "$(unit_of "$1")" ;;
     *) return 1 ;;
   esac
@@ -988,8 +990,11 @@ cmd_select() {
   say "Проверка транспортов (T1–T3): ${TRANSPORT_FORCE:-$TRANSPORT_ORDER}"
   for t in ${TRANSPORT_FORCE:-$TRANSPORT_ORDER}; do
     say "── $t"
-    tr_start "$t"; sleep 2
-    if unit_failed "$t"; then say "  ✗ юнит не запустился"; diag "$t" cfg; echo "$t=fail:cfg" >>"$STATE/results"; bad+=" $t"; continue; fi
+    if ! tr_start "$t" || unit_failed "$t"; then
+      say "  ✗ транспорт не запустился"; diag "$t" cfg
+      echo "$t=fail:cfg" >>"$STATE/results"; bad+=" $t"; continue
+    fi
+    sleep 2
     t1_check "$t" || { say "  ✗ T1 доступность"; diag "$t" t1; echo "$t=fail:t1" >>"$STATE/results"; bad+=" $t"; continue; }; say "  ✓ T1"
     t2_check "$t" || { say "  ✗ T2 рукопожатие"; diag "$t" t2; echo "$t=fail:t2" >>"$STATE/results"; bad+=" $t"; continue; }; say "  ✓ T2"
     res=$(t3_check "$t") || { say "  ✗ T3 передача ≥200 КБ"; diag "$t" t3 "$res"; echo "$t=fail:t3" >>"$STATE/results"; bad+=" $t"; continue; }; say "  ✓ T3"
@@ -997,22 +1002,38 @@ cmd_select() {
   done
   tr_stop_all
   say ""
-  if ((ok_n == 0)); then
+  if ((ok_n > 0)); then
+    printf '%s\n' "${tmpu[@]}" >"$STATE/usable"
+  else
     : >"$STATE/usable"
-    say "Ни один транспорт не прошёл. Если T1 не проходит ни у одного (VPS-2 не достаёт VPS-1 вообще),"
-    say "прямой путь заблокирован целиком: нужна цепочка через третий узел."
-    return 1
   fi
-  printf '%s\n' "${tmpu[@]}" >"$STATE/usable"
-  first=${tmpu[0]}
-  tr_start "$first"
-  echo "$first" >"$STATE/active"; date +%s >"$STATE/since"
+  # Результат предварительного сканирования может устареть. Ещё раз проверяем
+  # окончательно выбранный канал после его повторного запуска.
+  first=""
+  for t in "${tmpu[@]}"; do
+    if tr_start "$t" && t2_check "$t" && t3_check "$t" >/dev/null && func_ok "$t"; then
+      first=$t; break
+    fi
+    say "  ! $t не прошёл повторную проверку, пробую следующий"
+  done
+  if [[ -n $first ]]; then
+    printf '%s\n' "$first" >"$STATE/active"; date +%s >"$STATE/since"
+  else
+    # Нет выхода — активный маршрут не назначается (Xray: fallback=block).
+    tr_stop_all; rm -f "$STATE/active" "$STATE/since"
+  fi
+  # Сторож обязан запускаться даже при нуле пригодных транспортов: он сам
+  # будет периодически перепроверять ВСЕ настроенные, не отключая их навсегда.
   systemctl enable --now rp-watch >/dev/null 2>&1 || {
     say "Не удалось включить rp-watch: проверьте systemctl status rp-watch" >&2
     return 1
   }
-  say "Рабочие: ${tmpu[*]}"
-  [[ -n $bad ]] && say "Исключены из переключения:$bad (на VPS-1: rp prune уберёт их и закроет порты)"
+  say "Прошли T1–T3: ${tmpu[*]:-ни один}"
+  [[ -n $bad ]] && say "Не прошли при первом сканировании:$bad (сохранены для повторных проверок)"
+  if [[ -z $first ]]; then
+    say "Нет активного выхода: действует fail-closed; сторож продолжит восстановление"
+    return 1
+  fi
   say "Активен транспорт: $first"
 }
 cmd_results() { cat "$STATE/results" 2>/dev/null; }
@@ -1022,7 +1043,7 @@ cmd_setorder() { # rp _setorder список — оставить только �
   sed -i "s|^TRANSPORT_ORDER=.*|TRANSPORT_ORDER=\"$l\"|" "$ETC/rp2.conf"
   for t in $l; do echo "$t"; done >"$STATE/usable"
   systemctl is-active --quiet rp-watch && systemctl restart rp-watch
-  say "Порядок: $l"
+  say "Приоритеты: $l (остальные намеренно исключены администратором)"
 }
 # egress — отчёт «ключ=значение» о том, может ли VPS-2 пропускать трафик VPS-1 в интернет
 cmd_egress() {
@@ -1069,7 +1090,7 @@ cmd_fixnet() {
 }
 cmd_status() {
   local t; t=$(active)
-  say "Транспорт: ${t:-не выбран}  (рабочие: $(tr_order); порядок: $(tr_all))"
+  say "Транспорт: ${t:-нет — fail-closed}  (приоритеты: $(tr_order); прошли первичный тест: $(tr '\n' ' ' <"$STATE/usable" 2>/dev/null))"
   say "Сквозная проба (HY2 и XHTTP): случайный интервал ${WATCH_MIN:-15}–${WATCH_MAX:-35} с; штатные QUIC/TCP keepalive не меняются"
   say "hy2: $(systemctl is-active rp-hy2)  hy2o: $(systemctl is-active rp-hy2o)  wg: $(systemctl is-active wg-quick@rp-wg)  xhttp: $(systemctl is-active rp-xray@xhttp)  xhttp2: $(systemctl is-active rp-xray@xhttp2)  сторож: $(systemctl is-active rp-watch)"
   [[ -n $t ]] && { func_ok "$t" && say "Проверка: туннель работает" || say "Проверка: туннель НЕ отвечает"; }
@@ -1114,23 +1135,20 @@ EOS
 
   cat >"$d/usr/local/lib/rp/watch.sh" <<'EOS'
 #!/usr/bin/env bash
-# VPS-2 watchdog: active probes at an independent random interval (default 15..35 seconds).
-# Avoid predictable 20-second checks and regular 200 KiB payloads every five minutes.
-# Transport-native QUIC keepalive is owned by Hysteria2; do not interfere with it.
+# rp: VPS-2 supervisor. One active transport; all configured candidates retained.
+# Conservative failover (3 failures), two-way T2+T3 validation, circuit breaker.
+# Hysteria2 owns QUIC keepalive; inner WG remains at PersistentKeepalive=28.
 set -u
 ST=/var/lib/rp
-BACKOFF=(60 120 300 900)
-fn() { /usr/local/bin/rp _fn "$@"; }
 # shellcheck disable=SC1091
 . /etc/rp/rp2.conf
 WATCH_MIN=${WATCH_MIN:-15}; WATCH_MAX=${WATCH_MAX:-35}
-# Defensive validation in case rp2.conf was edited manually.
 if [[ ! $WATCH_MIN =~ ^[0-9]+$ || ! $WATCH_MAX =~ ^[0-9]+$ ]] ||
    ((WATCH_MIN < 5 || WATCH_MAX > 120 || WATCH_MAX < WATCH_MIN)); then
-  logger -t rp-watch 'invalid WATCH_MIN/WATCH_MAX, using 15..35 seconds'
+  logger -t rp-watch 'invalid WATCH_MIN/WATCH_MAX, using 15..35'
   WATCH_MIN=15; WATCH_MAX=35
 fi
-# /dev/urandom is available on supported Rocky Linux 9/10. Independent seed each call.
+fn() { /usr/local/bin/rp _fn "$@"; }
 rand_between() {
   local lo=$1 hi=$2 raw
   raw=$(od -An -N4 -tu4 /dev/urandom 2>/dev/null) || raw=""
@@ -1139,65 +1157,169 @@ rand_between() {
 }
 activity_sleep() { sleep "$(rand_between "$WATCH_MIN" "$WATCH_MAX")"; }
 error_sleep() { sleep "$(rand_between 8 15)"; }
-backoff_sleep() {
-  local base=$1
-  sleep "$(rand_between "$base" "$((base + base / 4))")"
+log() { logger -t rp-watch -- "$*"; }
+active() { cat "$ST/active" 2>/dev/null || true; }
+set_active() {
+  printf '%s\n' "$1" >"$ST/active.new" && mv -f "$ST/active.new" "$ST/active"
+  date +%s >"$ST/since"
 }
-active() { cat "$ST/active" 2>/dev/null; }
-set_active() { echo "$1" >"$ST/active"; date +%s >"$ST/since"; }
+clear_active() { rm -f "$ST/active" "$ST/since"; }
 order_now() { fn tr_order; }
-fails=0; restarts=0; ok_since=$(date +%s)
-probation=(60 300 900); pidx=0; pstart=$(date +%s)
-next_deep=$((pstart + $(rand_between 480 900)))   # deep test every ~30..60 min, not every 5 min
+# Cooldown per transport after failures; memory is intentionally reset on service restart.
+declare -A blocked_until=() strike=()
+penalize() {
+  local t=$1 now=$(date +%s) n=${strike[$1]:-0} seconds
+  n=$((n + 1)); ((n > 4)) && n=4
+  strike[$t]=$n
+  seconds=$((300 * (1 << (n - 1))))  # 5, 10, 20, 40 minutes
+  blocked_until[$t]=$((now + seconds))
+  log "$t unavailable; quarantine for ${seconds}s (attempt $n)"
+}
+allowed() { (( $(date +%s) >= ${blocked_until[$1]:-0} )); }
+# A transport is eligible only if it really carries data through both directions.
+# A successful process start / TCP or QUIC handshake alone is NOT enough.
+try_transport() {
+  local t=$1
+  fn tr_start "$t" || return 1
+  fn t2_check "$t" || return 1
+  fn t3_check "$t" >/dev/null || return 1
+  fn func_ok "$t" || return 1
+  return 0
+}
+choose_candidate() {
+  local skip=${1:-} t
+  for t in "${order[@]}"; do
+    [[ $t == "$skip" ]] && continue
+    allowed "$t" || continue
+    if try_transport "$t"; then
+      set_active "$t"; strike[$t]=0; blocked_until[$t]=0
+      log "active transport: $t"
+      return 0
+    fi
+    penalize "$t"
+  done
+  return 1
+}
+# On reboot services might not be enabled individually: bring back the stored active.
+order=()
+read -ra order <<<"$(order_now)"
+if ((${#order[@]})) && [[ -n $(active) ]]; then
+  current=$(active)
+  if [[ " ${order[*]} " == *" $current "* ]]; then
+    # rp select may have just started a healthy transport. Do not tear it down
+    # merely because the watchdog service was (re)started.
+    fn func_ok "$current" || fn tr_start "$current" || log "startup recovery failed for $current"
+  else
+    clear_active
+  fi
+fi
+errors=0; last_switch=$(date +%s)
+next_deep=$((last_switch + $(rand_between 480 900)))
+last_failback=0
 while :; do
   read -ra order <<<"$(order_now)"
-  t=$(active); [[ -n $t ]] || { error_sleep; continue; }
-  # Also detects a corrupted/empty list, without dividing by zero in failover.
-  ((${#order[@]})) || { logger -t rp-watch 'no configured transports'; error_sleep; continue; }
+  if ((${#order[@]} == 0)); then
+    # Misconfigured or empty policy: no permission to use an unlisted channel.
+    fn tr_stop_all >/dev/null 2>&1 || true
+    clear_active
+    log 'empty TRANSPORT_ORDER; fail-closed'
+    sleep 30; continue
+  fi
+  t=$(active)
+  if [[ -n $t && " ${order[*]} " != *" $t "* ]]; then
+    clear_active; t=""
+  fi
+  if [[ -z $t ]]; then
+    # No active transport. Retry failed ones after their cooldown expires.
+    if choose_candidate ""; then
+      errors=0; last_switch=$(date +%s)
+      next_deep=$((last_switch + $(rand_between 480 900)))
+      activity_sleep
+    else
+      fn tr_stop_all >/dev/null 2>&1 || true
+      clear_active
+      error_sleep
+    fi
+    continue
+  fi
   now=$(date +%s)
   good=0
   if fn func_ok "$t"; then good=1; fi
-  if ((good && pidx < ${#probation[@]} && now - pstart >= probation[pidx])); then
-    pidx=$((pidx + 1)); fn t3_check "$t" >/dev/null || good=0
-  fi
   if ((good && now >= next_deep)); then
     next_deep=$((now + $(rand_between 480 900)))
     fn t3_check "$t" >/dev/null || good=0
   fi
   if ((good)); then
-    fails=0; restarts=0
-    # After 30 minutes on fallback, try preferred; restore previous if it fails.
-    if [[ $t != "${order[0]}" ]] && ((now - ok_since >= 1800)); then
-      fn tr_start "${order[0]}"; error_sleep
-      if fn t2_check "${order[0]}" && fn t3_check "${order[0]}" >/dev/null; then
-        set_active "${order[0]}"; ok_since=$now; pidx=0; pstart=$now
-        next_deep=$((now + $(rand_between 480 900)))
-        continue
+    errors=0
+    # On fallback: wait for 30 min of uninterrupted operation before failback.
+    # Failed failback must not cause immediate repeated attempts or lose the old path.
+    if [[ $t != "${order[0]}" ]] && ((now - last_switch >= 1800)) &&
+       ((now - last_failback >= 1800)); then
+      last_failback=$now
+      attempted=0; upgraded=""
+      # Try ALL higher-priority candidates in rank order, not just position 1.
+      # Example: if packet-up stays blocked but auto recovers, leave Hysteria2 for auto.
+      for preferred in "${order[@]}"; do
+        [[ $preferred == "$t" ]] && break
+        allowed "$preferred" || continue
+        attempted=1
+        log "probing higher-priority $preferred (current $t)"
+        if try_transport "$preferred"; then upgraded=$preferred; break; fi
+        penalize "$preferred"
+      done
+      if [[ -n $upgraded ]]; then
+        set_active "$upgraded"; strike[$upgraded]=0; blocked_until[$upgraded]=0
+        log "failback $t -> $upgraded (T2+T3 passed)"
+        last_switch=$(date +%s); errors=0
+        next_deep=$((last_switch + $(rand_between 480 900)))
+        activity_sleep; continue
       fi
-      fn tr_start "$t"; ok_since=$now
+      if ((attempted)); then
+        # Restore the previously healthy transport. Verify it before marking active.
+        if try_transport "$t"; then
+          set_active "$t"
+          log "failed failback, restored $t"
+          last_switch=$(date +%s); errors=0
+          next_deep=$((last_switch + $(rand_between 480 900)))
+          activity_sleep; continue
+        fi
+        penalize "$t"
+        clear_active
+        log 'failed to restore previous transport; fail-closed'
+        if choose_candidate ""; then
+          last_switch=$(date +%s); errors=0
+        else
+          fn tr_stop_all >/dev/null 2>&1 || true
+        fi
+        error_sleep; continue
+      fi
     fi
     activity_sleep; continue
   fi
-  ok_since=$(date +%s); fails=$((fails + 1))
-  logger -t rp-watch "transport $t failed probe ($fails)"
-  if ((fails < 3)); then error_sleep; continue; fi
-  if ((restarts < 2)); then
-    fn tr_start "$t"; restarts=$((restarts + 1)); fails=0
-    pidx=0; pstart=$(date +%s)
-    next_deep=$((pstart + $(rand_between 480 900)))
-    backoff_sleep "${BACKOFF[$((restarts - 1))]}"; continue
+  errors=$((errors + 1))
+  # Failback requires 30 minutes of clean health checks, not just uptime.
+  last_switch=$(date +%s)
+  log "$t end-to-end probe failed ($errors/3)"
+  if ((errors < 3)); then error_sleep; continue; fi
+  errors=0
+  log "restarting unhealthy $t"
+  if try_transport "$t"; then
+    set_active "$t"; strike[$t]=0; blocked_until[$t]=0
+    log "recovered $t after restart"
+    last_switch=$(date +%s)
+    next_deep=$((last_switch + $(rand_between 480 900)))
+    activity_sleep; continue
   fi
-  next=""; for i in "${!order[@]}"; do [[ ${order[i]} == "$t" ]] && next=${order[$(((i + 1) % ${#order[@]}))]}; done
-  [[ -n $next && $next != "$t" ]] || next=${order[0]:-$t}
-  logger -t rp-watch "failover $t -> $next"
-  fn tr_start "$next"; error_sleep
-  if fn t2_check "$next"; then
-    set_active "$next"; fails=0; restarts=0; pidx=0; pstart=$(date +%s)
-    next_deep=$((pstart + $(rand_between 480 900)))
+  penalize "$t"
+  clear_active
+  if choose_candidate "$t"; then
+    last_switch=$(date +%s)
+    next_deep=$((last_switch + $(rand_between 480 900)))
   else
-    idx=$((restarts - 2)); ((idx > 3)) && idx=3; restarts=$((restarts + 1))
-    set_active "$next"; backoff_sleep "${BACKOFF[$idx]}"
+    fn tr_stop_all >/dev/null 2>&1 || true
+    log 'all eligible transports unavailable: fail-closed'
   fi
+  error_sleep
 done
 EOS
   chmod 755 "$d/usr/local/lib/rp/watch.sh" "$d/usr/local/bin/rp"
@@ -1422,11 +1544,10 @@ transport_label() {
   esac
 }
 ord_has() { [[ " $1 " == *" $2 "* ]]; }   # ord_has "список" имя
-# Порядок транспортов — по устойчивости к ТСПУ, а не по скорости (на VPS-2 одновременно работает один транспорт,
-# а «самый быстрый» выбирать нечем): hy2 (QUIC как HTTP/3 к сайту маскировки) → Reality+XHTTP (TLS 1.3 как у
-# настоящего сайта) → XHTTP packet-up (много POST, профиль заметнее) → hy2+Salamander (трафик без признаков QUIC;
-# резерв на случай, если QUIC/HTTP3 фильтруется). Сторож VPS-2 возвращается к первому после 30 минут стабильной работы.
-TR_RANK=(hy2-wg reality-xhttp reality-xhttp2 hy2o-wg)
+# Приоритет для этой инсталляции: XHTTP packet-up, затем XHTTP auto,
+# затем HY2/QUIC и HY2+Salamander. Это политика, а не гарантия невидимости DPI.
+# Один рабочий транспорт VPS-2 за раз; остальные сохраняются для повторных попыток.
+TR_RANK=(reality-xhttp2 reality-xhttp hy2-wg hy2o-wg)
 tr_sort() { # tr_sort "список" → тот же набор в порядке TR_RANK (неизвестные имена отбрасываются)
   local t out=""; for t in "${TR_RANK[@]}"; do [[ " $* " == *" $t "* ]] && out+="${out:+ }$t"; done
   printf '%s\n' "$out"
@@ -1493,10 +1614,10 @@ vps1_install() {
   WG_PORT=${WG_PORT:-$(cf WG_PORT $((20000 + RANDOM % 30000)))}
   ask WG_PORT "UDP-порт WireGuard для клиентов" "$WG_PORT" '^[0-9]+$' "Нужен номер порта" valid_port
   choose TRANSPORT_CHOICE "Транспорты туннеля к VPS-2" all \
-    "all|Все четыре (рекомендуется)|hy2 → xhttp → xhttp(packet-up) → hy2+obfs (по устойчивости к ТСПУ); неработающие исключаются после проверки" \
+    "all|Все четыре (рекомендуется)|XHTTP packet-up → XHTTP auto → HY2 → HY2+Salamander; отказавшие остаются резервом" \
     "udp|Только Hysteria2 (без и с obfs)|если TCP режется ТСПУ" \
     "tcp|Только VLESS Reality · XHTTP (два варианта)|если UDP/QUIC недоступен"
-  case ${TRANSPORT_CHOICE:-all} in udp) order="hy2-wg hy2o-wg" ;; tcp) order="reality-xhttp reality-xhttp2" ;; *) order="${TR_RANK[*]}" ;; esac
+  case ${TRANSPORT_CHOICE:-all} in udp) order="hy2-wg hy2o-wg" ;; tcp) order="reality-xhttp2 reality-xhttp" ;; *) order="${TR_RANK[*]}" ;; esac
   yesno "Дополнительные параметры (порты туннелей)?" n && adv=y
   HY2_PORT=${HY2_PORT:-443}; HY2O_PORT=${HY2O_PORT:-8443}; RXH_PORT=${RXH_PORT:-443}; RXH2_PORT=${RXH2_PORT:-8443}
   if [[ $adv == y ]]; then
@@ -1836,7 +1957,7 @@ cmd_transports() {
 prune_apply() { # prune_apply «список-неработающих» → новый порядок на VPS-1 и VPS-2
   local bad=$1 t new=""
   for t in $(cf TRANSPORT_ORDER); do [[ " $bad " == *" $t "* ]] || new+="${new:+ }$t"; done
-  new=$(tr_sort "$new")   # порядок по устойчивости к ТСПУ
+  new=$(tr_sort "$new")   # единая политика приоритетов
   [[ -n $new ]] || { err "Исключить все транспорты нельзя: сначала смените порты/SNI (rp.conf) и повторите rp select на VPS-2"; return 1; }
   vps1_set TRANSPORT_ORDER "$new" || return 1
   vps2_run "/usr/local/bin/rp _setorder $new" >/dev/null 2>&1 || warn "Порядок на VPS-2 не обновлён: на VPS-2 выполните  rp _setorder $new"
@@ -1850,16 +1971,16 @@ cmd_prune() {
   cmd_transports
   [[ -n $bad ]] || { ok "Все транспорты из конфигурации прошли проверку на VPS-2"; return 0; }
   warn "Не прошли проверку: $bad"
-  yesno "Исключить их (закрыть порты, остановить службы)? Вернуть можно будет правкой TRANSPORT_ORDER в $CONF" y || return 0
+  yesno "Исключить их НАВСЕГДА из резервов (закрыть порты и остановить службы)? Обычно лучше оставить для авто-восстановления" n || return 0
   prune_apply "$bad"
 }
-prune_offer() { # после push: если часть транспортов не прошла — предложить исключить
+prune_offer() { # Никакого автоматического удаления резервов: временная блокировка может исчезнуть.
   local res bad="" t r
   res=$(tr_results) || return 0
   while IFS='=' read -r t r; do [[ -n $t && $r == fail* ]] && [[ " $(cf TRANSPORT_ORDER) " == *" $t "* ]] && bad+="${bad:+ }$t"; done <<<"$res"
   [[ -n $bad ]] || return 0
-  warn "На VPS-2 не прошли проверку: $bad"
-  yesno "Исключить их из конфигурации и закрыть порты?" y && prune_apply "$bad"
+  warn "Первичную проверку не прошли: $bad; остаются в списке резервов с повторными попытками"
+  note "Для намеренного исключения из конфигурации: rp prune (по умолчанию отказ)"
   return 0
 }
 
@@ -2256,7 +2377,7 @@ rp $SELF_VERSION — цепочка «клиенты WG → VPS-1 → тунне
   rp test [--long]         проверки T1–T8 (--long: повтор T3 через 1, 5, 15 мин)
   rp diag [--fix]          диагностика выхода по участкам; --fix исправляет найденное
   rp transports            транспорты и результаты их проверки на VPS-2
-  rp prune                 исключить транспорты, не прошедшие проверку (порты закрываются)
+  rp prune                 ручное исключение транспортов (по умолчанию НЕТ; сторож пробует все)
   rp dns [show|set СЕРВЕРЫ|test]   DoH-серверы через туннель (quad9 cloudflare google adguard)
   rp doctor                версии на обоих концах, выход
   rp rotate                сменить UUID, пароли, shortId, ключи Reality (с откатом)
@@ -2355,10 +2476,8 @@ PROBE_URL = "https://www.gstatic.com/generate_204"
 # XHTTP делит передачу на несколько запросов и этого не боится.
 ALL_TR = ("hy2-wg", "hy2o-wg", "reality-xhttp", "reality-xhttp2")
 LEGACY = {"reality-tcp": "reality-xhttp2"}
-# Порядок по устойчивости к ТСПУ, а не по скорости: hy2 (QUIC как HTTP/3) → Reality+XHTTP (TLS 1.3 как у
-# настоящего сайта) → XHTTP packet-up (много POST, заметнее) → hy2+Salamander (трафик без признаков QUIC, резерв
-# на случай, если QUIC/HTTP3 режется).
-DEFAULT_ORDER = "hy2-wg reality-xhttp reality-xhttp2 hy2o-wg"
+# Единый согласованный с Bash порядок предпочтения транспортов.
+DEFAULT_ORDER = "reality-xhttp2 reality-xhttp hy2-wg hy2o-wg"
 VARIANTS = {
     "reality-xhttp": {"tag": "rx", "port": "RXH_PORT", "sni": "RXH_SNI", "path": "XHTTP_PATH",
                       "uuid": "RL_UUID_X", "probe": "RL_UUID_PX", "rev": "r-xhttp", "mode": "auto"},
@@ -2755,7 +2874,7 @@ def client_conf(cfg, name):
 
 
 def nft_rules(cfg):
-    """kill switch: forward с/на wg0 запрещён (первым), перехват TCP/UDP в TPROXY, QUIC и IPv6 блокируются."""
+    """Fail-closed: forward с/на wg0 запрещён, TCP/UDP уходит в TPROXY, IPv6 блокируется."""
     net = cfg.get("WG_NET", "10.66.0.0/24")
     return """#!/usr/sbin/nft -f
 # Сгенерировано rp. Правка вручную не сохраняется — используйте rp apply.
