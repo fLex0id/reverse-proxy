@@ -6,7 +6,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.1.0"
+SELF_VERSION="1.1.2"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -65,8 +65,9 @@ card_end() { printf '  %s└─%s\n' "$C_DIM" "$R"; }
 # run «Что делаем» команда… — вывод в журнал, на экране спиннер и итог.
 run() {
   local what=$1; shift
-  local t0=$SECONDS rc pid i=0 fr=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+  local t0=$SECONDS rc pid i=0 fr=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) off
   mkdir -p "$(dirname "$LOG")"; printf '\n### %s: %s\n' "$(date '+%F %T')" "$what" >>"$LOG"
+  off=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
   "$@" >>"$LOG" 2>&1 &
   pid=$!
   if [[ -t 1 ]]; then
@@ -77,7 +78,7 @@ run() {
   if ((rc == 0)); then
     local dt=$((SECONDS - t0)); ok "$what$( ((dt >= 3)) && printf ' (%d с)' "$dt")"
   else
-    err "$what"; tail -n 12 "$LOG" | sed 's/^/    /' >&2
+    err "$what"; tail -c +"$((off + 1))" "$LOG" | tail -n 12 | sed 's/^/    /' >&2   # только вывод этого шага
   fi
   return $rc
 }
@@ -192,17 +193,46 @@ fw_open() { # fw_open порт/прото
   [[ $(fw_kind) == firewalld ]] || return 0
   firewall-cmd --permanent --add-port="$1" >/dev/null && firewall-cmd --add-port="$1" >/dev/null
 }
-fw_close() { [[ $(fw_kind) == firewalld ]] || return 0; firewall-cmd --permanent --remove-port="$1" >/dev/null 2>&1; firewall-cmd --remove-port="$1" >/dev/null 2>&1; return 0; }
+fw_close() { [[ $(fw_kind) == firewalld && $1 =~ ^[0-9] ]] || return 0; firewall-cmd --permanent --remove-port="$1" >/dev/null 2>&1; firewall-cmd --remove-port="$1" >/dev/null 2>&1; return 0; }
 fw_trust_if() { [[ $(fw_kind) == firewalld ]] || return 0; firewall-cmd --permanent --zone=trusted --add-interface="$1" >/dev/null 2>&1; firewall-cmd --zone=trusted --add-interface="$1" >/dev/null 2>&1; return 0; }
 selinux_fix() { command -v restorecon >/dev/null && restorecon -R "$ETC" "$LIB" "$STATE" /usr/local/bin 2>/dev/null; return 0; }
 pkg_install() {
   local p; for p in "$@"; do rpm -q "$p" >/dev/null 2>&1 || dnf -y install "$p" || return 1; done
 }
-# dnf с короткими таймаутами: медленное зеркало не должно подвешивать скрипт
-dnf_q() { timeout "${DNF_TIMEOUT:-240}" dnf -y --setopt=timeout=15 --setopt=retries=2 "$@"; }
+# DNF: ограничиваем не только сетевые таймауты, но и полное время каждой операции.
+dnf_q() { timeout --signal=TERM --kill-after=10 "${DNF_TIMEOUT:-180}" dnf -y --setopt=timeout=10 --setopt=retries=1 "$@"; }
 pkg_epel() { rpm -q epel-release >/dev/null 2>&1 || dnf_q install epel-release; }
-# QR-коды клиентов: qrencode — в EPEL (Rocky 9) или в основном репозитории (10); ставим при установке
-pkg_qr() { command -v qrencode >/dev/null 2>&1 && return 0; dnf_q install qrencode || { pkg_epel && dnf_q install qrencode; }; }
+# Включить CRB на Rocky 9 без обязательной установки dnf-plugins-core.
+# Репозиторий CRB нужен EPEL для части зависимостей.
+enable_crb() {
+  dnf config-manager --set-enabled crb >/dev/null 2>&1 && return 0
+  python3 - <<'PYCRB'
+import glob, os, re, tempfile
+rid = re.compile(r'^\[crb\]\s*$')
+for path in glob.glob('/etc/yum.repos.d/*.repo'):
+    try:
+        with open(path, encoding='utf-8') as f: lines = f.readlines()
+    except OSError:
+        continue
+    for i, line in enumerate(lines):
+        if rid.match(line.strip()):
+            j = i + 1
+            while j < len(lines) and not lines[j].lstrip().startswith('['): j += 1
+            section = ''.join(lines[i+1:j])
+            if re.search(r'(?m)^\s*enabled\s*=', section):
+                section = re.sub(r'(?m)^(\s*enabled\s*=\s*)\S+', r'\g<1>1', section)
+            else:
+                section = 'enabled=1\n' + section
+            lines[i+1:j] = [section]
+            fd, tmp = tempfile.mkstemp(prefix='.rp-crb-', dir=os.path.dirname(path))
+            with os.fdopen(fd, 'w', encoding='utf-8') as f: f.writelines(lines)
+            os.chmod(tmp, os.stat(path).st_mode & 0o777)
+            os.replace(tmp, path)
+            raise SystemExit(0)
+raise SystemExit(1)
+PYCRB
+}
+# QR-коды строит встроенный генератор (rp.py qr): пакет qrencode из EPEL не нужен.
 pkg_wg() { # wireguard-tools: в Rocky 9 — EPEL, в 10 — может быть в основном репозитории
   rpm -q wireguard-tools >/dev/null 2>&1 && return 0
   dnf_q install wireguard-tools || { pkg_epel && dnf_q install wireguard-tools; }
@@ -626,35 +656,133 @@ vps1_set() {
 # ── Списки РФ (.dat), релиз закреплён по тегу ────────────────────────────
 # Формат .dat (geosite/geoip): понимает Xray, без отдельного ядра. Исходник списков — $RU_REPO.
 # ОТСТУПЛЕНИЕ от tt.sh (.srs для sing-box): Xray читает только .dat.
-ru_fetch_one() { # ru_fetch_one имя тег каталог; проверка SHA256
-  local n=$1 tag=$2 tmp=$3 want got
-  fetch "https://github.com/$RU_REPO/releases/download/$tag/$n" "$tmp/$n" \
-    || fetch "https://cdn.jsdelivr.net/gh/$RU_REPO@release/$n" "$tmp/$n" || return 1
-  if fetch "https://github.com/$RU_REPO/releases/download/$tag/$n.sha256sum" "$tmp/$n.sum" 2>/dev/null; then
-    want=$(awk '{print tolower($1)}' "$tmp/$n.sum" | head -1); got=$(sha256sum "$tmp/$n" | awk '{print $1}')
-    [[ $want == "$got" ]] || { err "SHA256 $n не совпал"; return 1; }
-  else warn "Файл хэша для $n недоступен — сверка пропущена"; fi
-}
-ru_update() { # первая загрузка — напрямую; обновления — через локальный socks-inbound (туннель)
-  conf_load; local tag tmp changed=0 n old new
-  tag=$(cf RU_TAG); [[ -n $tag && ${1:-} != --latest ]] || tag=$(latest_tag "$RU_REPO")
-  [[ -n $tag ]] || { err "Не удалось определить релиз списков"; return 1; }
-  tmp=$(mktemp -d "$STATE/ru.XXXXXX")
-  # пароль SOCKS передаётся переменной окружения (в аргументы процессов не попадает)
-  if [[ -f $STATE/linked ]] && sx -m 8 -o /dev/null https://www.gstatic.com/generate_204 2>/dev/null; then export ALL_PROXY; ALL_PROXY=$(sx_proxy); fi
-  for n in geosite.dat geoip.dat; do
-    ru_fetch_one "$n" "$tag" "$tmp" || { rm -rf "${tmp:?}"; unset ALL_PROXY; return 1; }
-    old=$(stat -c %s "$ASSETS/$n" 2>/dev/null || echo 0); new=$(stat -c %s "$tmp/$n")
-    ((new * 2 < old)) && { err "$n стал меньше вдвое — отклонён, остаётся прежний"; rm -rf "${tmp:?}"; unset ALL_PROXY; return 1; }
-    cmp -s "$tmp/$n" "$ASSETS/$n" 2>/dev/null || { install -m 644 "$tmp/$n" "$ASSETS/$n.new" && mv "$ASSETS/$n.new" "$ASSETS/$n"; changed=1; }
+ru_fetch_one() { # geosite.dat каталог; официальный файл + SHA256 из одного источника
+  local n=$1 dir=$2 base want got
+  local -a bases=("https://raw.githubusercontent.com/$RU_REPO/release" "https://cdn.jsdelivr.net/gh/$RU_REPO@release")
+  for base in "${bases[@]}"; do
+    rm -f "$dir/$n" "$dir/$n.sha256sum"
+    if curl -fLsS --connect-timeout 8 --max-time 30 --retry 1 --retry-delay 1 \
+        -o "$dir/$n" "$base/$n" 2>/dev/null && [[ -s $dir/$n ]] &&
+       curl -fLsS --connect-timeout 8 --max-time 20 --retry 1 --retry-delay 1 \
+        -o "$dir/$n.sha256sum" "$base/$n.sha256sum" 2>/dev/null; then
+      want=$(awk 'NF {print tolower($1); exit}' "$dir/$n.sha256sum")
+      got=$(sha256sum "$dir/$n" | awk '{print $1}')
+      if [[ $want =~ ^[0-9a-f]{64}$ && $want == "$got" ]]; then return 0; fi
+      err "SHA256 $n не совпал на источнике $base"
+    fi
   done
-  rm -rf "${tmp:?}"; unset ALL_PROXY
-  conf_set RU_TAG "$tag"
-  if ((changed)) && systemctl is-active --quiet rp-xray; then
-    XRAY_LOCATION_ASSET=$ASSETS "$XRAY_BIN" run -test -c "$ETC/xray.json" >/dev/null 2>&1 || { err "Новые списки не подошли к конфигу Xray"; return 1; }
-    systemctl restart rp-xray
+  err "Не удалось получить проверенный $n ни с GitHub Raw, ни с jsDelivr"
+  return 1
+}
+# Восстановить штатную geoip.dat из того же проверенного релиза Xray.
+# RunetFreedom geoip.dat содержит собственные наборы блокировок, но не заменяет
+# базовую Xray geoip.dat с country-категориями (в частности geoip:ru).
+xray_restore_geoip() {
+  local dest=$1 ver arch name url tmp want got
+  ver=$(cf XRAY_VER "$XRAY_PINNED"); arch=$(arch_map xray); name="Xray-linux-$arch.zip"
+  url="https://github.com/XTLS/Xray-core/releases/download/v$ver/$name"
+  tmp=$(mktemp -d "$STATE/xgeoip.XXXXXX") || return 1
+  if ! curl -fLsS --connect-timeout 10 --max-time 120 --retry 1 --retry-delay 2 -o "$tmp/x.zip" "$url" 2>/dev/null ||
+     ! curl -fLsS --connect-timeout 10 --max-time 30 --retry 1 --retry-delay 1 -o "$tmp/x.dgst" "$url.dgst" 2>/dev/null; then
+    err "Не удалось скачать штатную geoip.dat из релиза Xray $ver"
+    rm -rf "${tmp:?}"; return 1
   fi
-  ok "Списки РФ: релиз $tag$( ((changed)) && echo ', обновлены' || echo ', без изменений')"
+  want=$(awk -F'= ' 'toupper($1) ~ /^SHA2?-?256/ {print tolower($2)}' "$tmp/x.dgst" | head -1)
+  got=$(sha256sum "$tmp/x.zip" | awk '{print $1}')
+  if [[ -z $want || $want != "$got" ]] || ! unzip -p "$tmp/x.zip" geoip.dat >"$dest/geoip.dat" || [[ ! -s $dest/geoip.dat ]]; then
+    err "Не удалось проверить или извлечь штатную geoip.dat Xray"
+    rm -rf "${tmp:?}"; return 1
+  fi
+  rm -rf "${tmp:?}"
+  return 0
+}
+ru_update() { # обновление: geosite РФ + штатная geoip Xray; тест до замены, откат при ошибке
+  conf_load
+  local tmp n old new changed=0 active=0 rc=0 restore_geoip=0
+  tmp=$(mktemp -d "$STATE/ru.XXXXXX") || return 1
+  mkdir -p "$tmp/assets" "$tmp/config" "$tmp/backup"
+
+  # Прокси включаем только если уже существует рабочий выход через локальный SOCKS.
+  if [[ -f $STATE/linked ]] && sx -m 8 -o /dev/null https://www.gstatic.com/generate_204 2>/dev/null; then
+    export ALL_PROXY; ALL_PROXY=$(sx_proxy)
+  fi
+  if ! ru_fetch_one geosite.dat "$tmp/assets"; then unset ALL_PROXY; rm -rf "${tmp:?}"; return 1; fi
+  unset ALL_PROXY
+
+  # Сохраняем штатный geoip.dat Xray. Не заменяем его российским custom geoip:
+  # тот не гарантирует наличие стандартной категории geoip:ru.
+  if [[ -s $ASSETS/geoip.dat ]]; then
+    cp -p "$ASSETS/geoip.dat" "$tmp/assets/geoip.dat"
+  else
+    restore_geoip=1
+    xray_restore_geoip "$tmp/assets" || { rm -rf "${tmp:?}"; return 1; }
+  fi
+
+  # Проверяем именно будущую конфигурацию и оба candidate-файла до публикации.
+  if ! py render "$tmp/config" >"$tmp/render.log" 2>&1; then
+    err "Не удалось сформировать конфигурацию Xray для проверки:"
+    sed 's/^/    /' "$tmp/render.log" >&2
+    rm -rf "${tmp:?}"; return 1
+  fi
+  if ! XRAY_LOCATION_ASSET="$tmp/assets" "$XRAY_BIN" run -test -c "$tmp/config/xray.json" >"$tmp/xray-test.log" 2>&1; then
+    # Самовосстановление после прежней версии rp: она могла затереть штатный geoip.dat.
+    if (( ! restore_geoip )); then
+      err "Проверка Xray не прошла с текущей geoip.dat; проверяю штатную базу из релиза Xray"
+      restore_geoip=1
+      xray_restore_geoip "$tmp/assets" || { sed 's/^/    /' "$tmp/xray-test.log" >&2; rm -rf "${tmp:?}"; return 1; }
+    fi
+    if ! XRAY_LOCATION_ASSET="$tmp/assets" "$XRAY_BIN" run -test -c "$tmp/config/xray.json" >"$tmp/xray-test.log" 2>&1; then
+      err "Xray отклонил geosite.dat или конфигурацию. Рабочие файлы не изменены; подробности:"
+      sed 's/^/    /' "$tmp/xray-test.log" >&2
+      rm -rf "${tmp:?}"; return 1
+    fi
+  fi
+
+  # Публикуем только geosite и (при необходимости) восстановленный штатный geoip.
+  for n in geosite.dat geoip.dat; do
+    [[ $n == geoip.dat && $restore_geoip == 0 ]] && continue
+    old=$(stat -c %s "$ASSETS/$n" 2>/dev/null || echo 0)
+    new=$(stat -c %s "$tmp/assets/$n" 2>/dev/null || echo 0)
+    if [[ -f $ASSETS/$n ]] && cmp -s "$tmp/assets/$n" "$ASSETS/$n"; then continue; fi
+    [[ -s $tmp/assets/$n ]] || { err "$n отсутствует в подготовленном наборе"; rm -rf "${tmp:?}"; return 1; }
+    [[ -f $ASSETS/$n ]] && cp -p "$ASSETS/$n" "$tmp/backup/$n"
+    install -m 644 "$tmp/assets/$n" "$ASSETS/$n.new" || { rc=1; break; }
+    changed=1
+  done
+  if ((rc == 0)); then
+    for n in geosite.dat geoip.dat; do
+      [[ -f $ASSETS/$n.new ]] || continue
+      mv -f "$ASSETS/$n.new" "$ASSETS/$n" || { rc=1; break; }
+    done
+  fi
+  if ((rc != 0)); then
+    for n in geosite.dat geoip.dat; do
+      if [[ -f $tmp/backup/$n ]]; then cp -p "$tmp/backup/$n" "$ASSETS/$n"; fi
+      rm -f "$ASSETS/$n.new"
+    done
+    err "Не удалось установить списки; прежние файлы сохранены"
+    rm -rf "${tmp:?}"; return 1
+  fi
+
+  if ((changed)) && systemctl is-active --quiet rp-xray; then
+    active=1
+    if ! systemctl restart rp-xray || ! systemctl is-active --quiet rp-xray; then
+      rc=1
+      err "Xray не запустился с новыми базами — возвращаю прежние файлы"
+    fi
+  fi
+  if ((rc != 0)); then
+    for n in geosite.dat geoip.dat; do
+      if [[ -f $tmp/backup/$n ]]; then cp -p "$tmp/backup/$n" "$ASSETS/$n"; elif [[ $n == geosite.dat || $restore_geoip == 1 ]]; then rm -f "$ASSETS/$n"; fi
+    done
+    ((active)) && systemctl restart rp-xray >/dev/null 2>&1 || true
+    rm -rf "${tmp:?}"; return 1
+  fi
+
+  conf_set RU_TAG release RU_UPDATED "$(date -u +%Y%m%dT%H%M%SZ)"
+  rm -rf "${tmp:?}"
+  ok "Списки РФ: geosite обновлён и проверен; штатный geoip Xray сохранён$( ((restore_geoip)) && echo ' (восстановлен)' )"
+  return 0
 }
 
 # ── VPS-2: файлы пакета (CLI, сторож, юниты) и установочный блок ────────
@@ -1049,6 +1177,7 @@ EOS
 rp_fail() { echo "✗ $*" >&2; exit 1; }
 rp_dl() { local d=2; for _ in 1 2 3 4 5; do curl -fsSL --connect-timeout 10 -m 180 -o "$2" "$1" && [[ -s $2 ]] && return 0; sleep $d; d=$((d * 2)); done; return 1; }
 rp_main() {
+  exec </dev/null   # скрипт уже прочитан целиком (rp_main — последняя строка): команды не должны читать остаток потока
   [[ $EUID -eq 0 ]] || rp_fail "Нужен root"
   command -v dnf >/dev/null || rp_fail "Нужен dnf (Rocky Linux 9/10)"
   local tmp xurl xsha hurl hsha
@@ -1163,6 +1292,15 @@ transport_label() {
   esac
 }
 ord_has() { [[ " $1 " == *" $2 "* ]]; }   # ord_has "список" имя
+# Порядок транспортов — по устойчивости к ТСПУ, а не по скорости (на VPS-2 одновременно работает один транспорт,
+# а «самый быстрый» выбирать нечем): hy2 (QUIC как HTTP/3 к сайту маскировки) → Reality+XHTTP (TLS 1.3 как у
+# настоящего сайта) → XHTTP packet-up (много POST, профиль заметнее) → hy2+Salamander (трафик без признаков QUIC;
+# резерв на случай, если QUIC/HTTP3 фильтруется). Сторож VPS-2 возвращается к первому после 30 минут стабильной работы.
+TR_RANK=(hy2-wg reality-xhttp reality-xhttp2 hy2o-wg)
+tr_sort() { # tr_sort "список" → тот же набор в порядке TR_RANK (неизвестные имена отбрасываются)
+  local t out=""; for t in "${TR_RANK[@]}"; do [[ " $* " == *" $t "* ]] && out+="${out:+ }$t"; done
+  printf '%s\n' "$out"
+}
 tr_port() { case $1 in hy2-wg) echo "UDP/$(cf HY2_PORT)" ;; hy2o-wg) echo "UDP/$(cf HY2O_PORT)" ;; reality-xhttp) echo "TCP/$(cf RXH_PORT)" ;; reality-xhttp2) echo "TCP/$(cf RXH2_PORT)" ;; esac; }
 
 # ── Миграция конфигурации v1.0 → v1.1 ────────────────────────────────────
@@ -1172,14 +1310,14 @@ conf_migrate() {
   conf_load; [[ $(cf CONF_VER 1) == 2 ]] && return 0
   local old t new="" ip dr
   old=$(cf TRANSPORT_ORDER "hy2-wg reality-xhttp reality-tcp")
-  for t in hy2-wg reality-xhttp hy2o-wg reality-xhttp2; do
+  for t in "${TR_RANK[@]}"; do
     case $t in
       hy2o-wg) [[ " $old " == *" hy2-wg "* || " $old " == *" hy2o-wg "* ]] && new+="${new:+ }$t" ;;
       reality-xhttp2) [[ " $old " == *" reality-xhttp2 "* || " $old " == *" reality-tcp "* ]] && new+="${new:+ }$t" ;;
       *) [[ " $old " == *" $t "* ]] && new+="${new:+ }$t" ;;
     esac
   done
-  [[ -n $new ]] || new="hy2-wg reality-xhttp hy2o-wg reality-xhttp2"
+  [[ -n $new ]] || new="${TR_RANK[*]}"
   dr=$(cf DNS_REMOTE); [[ -z $dr || $dr == "https://1.1.1.1/dns-query" ]] && dr="quad9 cloudflare"
   conf_set TRANSPORT_ORDER "$new" DNS_REMOTE "$dr" HY2O_PORT "$(cf HY2O_PORT 8443)" \
     RXH2_PORT "$(cf RXH2_PORT "$(cf RTCP_PORT 8443)")" RXH2_SNI "$(cf RXH2_SNI "$(cf RTCP_SNI "$(cf RXH_SNI www.microsoft.com)")")" \
@@ -1196,12 +1334,12 @@ cmd_migrate() {
   mkdir -p "$STATE"; chmod 755 "$STATE"
   cp -p "$CONF" "$BK_DIR/rp.conf.v1.$(date +%s)" 2>/dev/null || { mkdir -p "$BK_DIR"; cp -p "$CONF" "$BK_DIR/rp.conf.v1.$(date +%s)"; }
   self_install; py_install
-  if ((${RP_SKIP_QR:-0})); then note "qrencode пропущен (RP_SKIP_QR=1)"; else run "QR-коды (qrencode, до 4 минут)" pkg_qr || warn "qrencode не поставился: конфиги клиентов останутся текстом (потом: rp client show)"; fi
   conf_migrate
+  conf_set TRANSPORT_ORDER "$(tr_sort "$(cf TRANSPORT_ORDER)")"
   units_vps1
   systemctl restart rp-net >/dev/null 2>&1
   tr_has hy2-wg && ! [[ -x $HY2_BIN ]] && run "Hysteria2" hy2_install "$(cf HY2_VER "$HY2_PINNED")"
-  run "Хэши релизов для VPS-2" pin_release || warn "Хэши для VPS-2 не получены (rp block повторит попытку)"
+  run "Хэши релизов для VPS-2" pin_release || warn "Хэши для VPS-2 не получены (rp link/rp block повторят попытку)"
   vps1_apply || die "Конфигурация не применилась (изменения откатены)"
   ok "VPS-1 переведён на $SELF_VERSION"
   note "Дальше: rp push — передать обновление на VPS-2 (по SSH, откат через 10 минут без подтверждения), затем rp test"
@@ -1221,10 +1359,10 @@ vps1_install() {
   WG_PORT=${WG_PORT:-$(cf WG_PORT $((20000 + RANDOM % 30000)))}
   ask WG_PORT "UDP-порт WireGuard для клиентов" "$WG_PORT" '^[0-9]+$' "Нужен номер порта" valid_port
   choose TRANSPORT_CHOICE "Транспорты туннеля к VPS-2" all \
-    "all|Все четыре (рекомендуется)|hy2 → xhttp → hy2+obfs → xhttp(packet-up); неработающие исключаются после проверки" \
+    "all|Все четыре (рекомендуется)|hy2 → xhttp → xhttp(packet-up) → hy2+obfs (по устойчивости к ТСПУ); неработающие исключаются после проверки" \
     "udp|Только Hysteria2 (без и с obfs)|если TCP режется ТСПУ" \
     "tcp|Только VLESS Reality · XHTTP (два варианта)|если UDP/QUIC недоступен"
-  case ${TRANSPORT_CHOICE:-all} in udp) order="hy2-wg hy2o-wg" ;; tcp) order="reality-xhttp reality-xhttp2" ;; *) order="hy2-wg reality-xhttp hy2o-wg reality-xhttp2" ;; esac
+  case ${TRANSPORT_CHOICE:-all} in udp) order="hy2-wg hy2o-wg" ;; tcp) order="reality-xhttp reality-xhttp2" ;; *) order="${TR_RANK[*]}" ;; esac
   yesno "Дополнительные параметры (порты туннелей)?" n && adv=y
   HY2_PORT=${HY2_PORT:-443}; HY2O_PORT=${HY2O_PORT:-8443}; RXH_PORT=${RXH_PORT:-443}; RXH2_PORT=${RXH2_PORT:-8443}
   if [[ $adv == y ]]; then
@@ -1250,7 +1388,6 @@ vps1_install() {
   step "Пакеты"
   run "Базовые пакеты" pkg_install curl openssl unzip tar nftables chrony python3 iproute procps-ng openssh-clients || die "dnf не справился: проверьте репозитории"
   run "WireGuard (wireguard-tools)" pkg_wg || die "wireguard-tools не поставились (нужен EPEL на Rocky 9)"
-  run "QR-коды клиентов (qrencode)" pkg_qr || warn "qrencode не поставился — конфиги клиентов будут выводиться текстом"
   run "Служебный пользователь" bash -c 'id rp >/dev/null 2>&1 || useradd -r -s /sbin/nologin -M rp'
   systemctl enable --now chronyd >/dev/null 2>&1 || true
   mkdir -p "$ETC" "$LIB" "$STATE" "$ASSETS" "$BK_DIR"; chown root:rp "$ETC"; chmod 750 "$ETC"; chmod 755 "$STATE" "$ASSETS"
@@ -1275,7 +1412,10 @@ vps1_install() {
   ssh_key; ok "Ключи созданы (секреты только в $CONF, права 600)"
 
   step "Списки РФ"
-  if [[ $ru == y ]]; then run "Списки РФ (.dat)" ru_update || die "Списки не скачались: повторите позже или отключите (RU_DIRECT=0 в $CONF)"; else note "Выключены"; fi
+  if [[ $ru == y ]]; then
+    # Сбой списков не должен ломать установку: продолжаем без них, включить позже — rp ru on
+    run "Списки РФ (.dat)" ru_update || { warn "Списки РФ не скачались — установка продолжится без них (позже: rp ru on)"; conf_set RU_DIRECT 0; ru=n; }
+  else note "Выключены"; fi
 
   step "Службы и применение"
   units_vps1; self_install
@@ -1289,12 +1429,16 @@ vps1_install() {
   step "Готово"
   banner "VPS-1 готов" "$PUBLIC_IP"
   card "Дальше"
-  card_line "1. rp block       — блок для VPS-2 (вставить в веб-консоль VPS-2)"
+  card_line "1. rp link        — короткая строка для VPS-2: он сам скачает блок с VPS-1"
+  card_line "   rp block       — запасной путь: блок для вставки в веб-консоль VPS-2"
   card_line "2. rp client add  — добавить клиента WG (OpenWrt и др.)"
   card_line "3. rp test        — проверки T1–T8 после подключения VPS-2"
   card_line "   rp diag --fix  — если выход в интернет не работает: поиск и исправление по участкам"
   card_end
   note "Меню: rp"
+  if [[ -t 0 && -t 1 ]]; then
+    printf '\n'; yesno "Сформировать строку для VPS-2 сейчас?" y && { (cmd_link); }
+  fi
 }
 
 # ── Клиенты WG ───────────────────────────────────────────────────────────
@@ -1305,8 +1449,7 @@ cl_show() { # cl_show имя — конфиг и QR
   local conf; conf=$(py client "$n") || return 1
   printf '\n%s\n' "$conf"
   mkdir -p /root/rp-clients; printf '%s\n' "$conf" >"/root/rp-clients/$n.conf"; chmod 600 "/root/rp-clients/$n.conf"
-  command -v qrencode >/dev/null 2>&1 || run "QR-коды (qrencode)" pkg_qr || true
-  if command -v qrencode >/dev/null 2>&1; then printf '%s\n' "$conf" | qrencode -t ansiutf8; else note "QR недоступен: не поставился qrencode (dnf install epel-release && dnf install qrencode)"; fi
+  printf '\n'; py qr "/root/rp-clients/$n.conf" || note "QR не построен (конфиг длиннее 458 байт?) — используйте файл"; printf '\n'
   note "Файл: /root/rp-clients/$n.conf"
 }
 cl_add() {
@@ -1334,14 +1477,14 @@ cl_list() {
 }
 
 # ── Блок для VPS-2 ───────────────────────────────────────────────────────
-block_make() { # block_make [каталог] → печатает пути файлов
+block_make() { # block_make [каталог] [single] → печатает пути файлов; single — одним файлом, без деления на части
   need_vps1; local out=${1:-/root/rp-block} extra bund max raw gz n i sha
   [[ -n $(cf XRAY_SHA_64) && -n $(cf HY2_SHA_AMD64) ]] || pin_release || die "Нет хэшей релизов (GitHub недоступен?)"
   rm -rf "${out:?}"; mkdir -p "$out"; chmod 700 "$out"
   extra=$(mktemp -d "$STATE/ex.XXXXXX"); bund=$(mktemp -d "$STATE/bd.XXXXXX")
   vps2_files "$extra"; py bundle "$bund" "$extra" >/dev/null || { rm -rf "${extra:?}" "${bund:?}"; return 1; }
   vps2_installer "$bund/bundle.tgz" >"$out/block.sh"
-  max=$(cf BLOCK_MAX 60000); raw=$(stat -c %s "$out/block.sh")
+  max=$(cf BLOCK_MAX 60000); [[ ${2:-} == single ]] && max=999999999; raw=$(stat -c %s "$out/block.sh")
   if ((raw <= max)); then
     ok "Блок: $out/block.sh ($raw байт, SHA256 внутри)"
   else
@@ -1372,6 +1515,75 @@ cmd_block() {
   note "Вставка на VPS-2: откройте веб-консоль, выполните  cat > b.sh  (вставить, Ctrl-D)  и  bash b.sh"
   note "или сразу вставьте содержимое $out/*.sh в консоль"
   ls -1 "$out"
+}
+
+# ── Строка для VPS-2: VPS-2 сам скачивает блок ───────────────────────────
+# VPS-1 на время поднимает одноразовый HTTPS-сервер (rp.py serve, пользователь rp). Строка для консоли VPS-2:
+#   curl -fsSk --pinnedpubkey sha256//ПИН https://IP:ПОРТ/ТОКЕН|bash
+# Самоподписанный сертификат создаётся на сессию; --pinnedpubkey проверяет ключ сервера (без него VPS-1 нельзя
+# отличить от подмены, а блок содержит секреты). Токен — одноразовый (12 знаков, ~60 бит), TTL 30 минут.
+# Обрыв загрузки безопасен: блок состоит из функций, rp_main вызывается последней строкой.
+fw_open_rt() { [[ $(fw_kind) == firewalld ]] || return 0; firewall-cmd --add-port="$1" >/dev/null 2>&1; return 0; }   # только runtime
+link_close() { # rp _link_close ПОРТ — после остановки сервера: результат, закрыть порт, удалить файлы с секретами
+  local port=${1:-} d=$STATE/serve
+  [[ -s $d/result ]] && cp -f "$d/result" "$STATE/link.result" 2>/dev/null
+  [[ $port =~ ^[0-9]+$ ]] && { firewall-cmd --remove-port="$port/tcp" >/dev/null 2>&1 || true; }
+  rm -rf "${d:?}"; return 0
+}
+cmd_link() { # rp link [порт]
+  need_vps1; conf_load
+  local port=${1:-$(cf LINK_PORT 8444)} ttl=${LINK_TTL:-1800} dir=$STATE/serve ip p token pin str res i
+  valid_port "$port" || die "Недопустимый порт «$port»"
+  ip=$(cf PUBLIC_IP); [[ -n $ip ]] || die "Не задан PUBLIC_IP"
+  for p in WG_PORT HY2_PORT HY2O_PORT RXH_PORT RXH2_PORT; do [[ $(cf $p) == "$port" ]] && die "Порт $port занят туннелем ($p): rp link ДРУГОЙ_ПОРТ"; done
+  systemctl stop rp-serve >/dev/null 2>&1; systemctl reset-failed rp-serve >/dev/null 2>&1
+  ss -ltnH "sport = :$port" 2>/dev/null | grep -q . && die "TCP-порт $port уже занят: rp link ДРУГОЙ_ПОРТ"
+  rm -rf "${dir:?}" "$STATE/link.result"; mkdir -p "$dir"; chmod 700 "$dir"   # до появления секретов
+  run "Блок для VPS-2" block_make "$dir/blk" single || { rm -rf "${dir:?}"; die "Блок не собран"; }
+  [[ -s $dir/blk/block.sh ]] || { rm -rf "${dir:?}"; die "Блок не создан"; }
+  mv "$dir/blk/block.sh" "$dir/block.sh"; rm -rf "$dir/blk"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 -subj "/CN=$ip" \
+    -keyout "$dir/key.pem" -out "$dir/crt.pem" >/dev/null 2>&1 || { rm -rf "${dir:?}"; die "openssl: сертификат не создан"; }
+  pin=$(openssl x509 -in "$dir/crt.pem" -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64 -w0)
+  token=$(LC_ALL=C tr -dc 'a-km-np-z2-9' </dev/urandom | head -c 12)   # без похожих знаков (l, o, 0, 1)
+  [[ ${#token} == 12 && ${#pin} == 44 ]] || { rm -rf "${dir:?}"; die "Не удалось создать токен или отпечаток"; }
+  chown -R rp:rp "$dir"; chmod 700 "$dir"; chmod 600 "$dir"/*.pem "$dir/block.sh"
+  fw_open_rt "$port/tcp"
+  systemd-run --quiet --collect --unit=rp-serve --description="rp: одноразовая отдача блока VPS-2" \
+    -p User=rp -p Group=rp -p RuntimeMaxSec=$((ttl + 60)) -p NoNewPrivileges=true -p ProtectSystem=strict -p ProtectHome=true \
+    -p PrivateTmp=true -p "ReadWritePaths=$dir" -p "ExecStopPost=+$SELF_BIN _link_close $port" \
+    /usr/bin/python3 -I "$RP_PY" serve "$port" "$token" "$dir/block.sh" "$dir/crt.pem" "$dir/key.pem" "$ttl" \
+    || { link_close "$port"; die "Не удалось запустить сервер (systemd-run)"; }
+  sleep 1; systemctl is-active --quiet rp-serve || { err "Сервер не запустился:"; journalctl -u rp-serve -n 8 --no-pager 2>/dev/null | sed 's/^/    /' >&2; link_close "$port"; return 1; }
+  str="curl -fsSk --pinnedpubkey sha256//$pin https://$ip:$port/$token|bash"
+  printf '\n'; card "Введите на VPS-2 (консоль хостера, root)"; card_line ""; card_line "$str"; card_line ""; card_end
+  note "Длина строки: ${#str} символов. Действует $((ttl / 60)) мин и только для одной загрузки; порт $port/tcp открыт лишь на это время."
+  note "Если VPS-2 не достаёт порт: rp link ДРУГОЙ_ПОРТ, либо запасной путь — rp block (вставка вручную)."
+  trap 'printf "\n"; systemctl stop rp-serve >/dev/null 2>&1; warn "Прервано: сервер остановлен, порт закрыт"; exit 130' INT TERM
+  printf '  Жду загрузку блока (Ctrl-C — отмена) '
+  for ((i = 0; i < ttl + 90; i++)); do
+    systemctl is-active --quiet rp-serve || break
+    ((i % 5 == 0)) && printf '.'; sleep 1
+  done
+  printf '\n'; trap - INT TERM
+  for ((i = 0; i < 15; i++)); do [[ -d $dir ]] || break; sleep 1; done   # link_close (ExecStopPost) ещё пишет результат
+  res=$(cat "$STATE/link.result" 2>/dev/null)
+  case $res in
+    ok) ok "VPS-2 скачал блок; сервер остановлен, секреты удалены, порт закрыт" ;;
+    timeout) warn "Время вышло: блок не скачан (сервер остановлен, порт закрыт). Повторите: rp link"; return 1 ;;
+    *) warn "Сервер остановлен без результата. Повторите: rp link"; return 1 ;;
+  esac
+  note "VPS-2 ставит пакеты и проверяет транспорты (обычно 2–5 минут); жду подключения до 10 минут…"
+  for ((i = 0; i < 300; i++)); do
+    if hy2_live || vps2_run true >/dev/null 2>&1; then
+      touch "$STATE/linked"; ok "VPS-2 подключился"
+      note "Проверка выхода: rp test    (если часть транспортов не прошла — rp prune)"
+      return 0
+    fi
+    sleep 2
+  done
+  warn "VPS-2 пока не подключился. На VPS-2 смотрите: rp status / rp logs; здесь: rp status, rp test"
+  return 1
 }
 
 # ── Доступ к VPS-2 ───────────────────────────────────────────────────────
@@ -1411,7 +1623,7 @@ cmd_door() {
 # перезапускается, SSH-сеанс оборвётся); откат на VPS-2 сработает сам через 10 минут без подтверждения
 push_start() {
   local delay=${1:-0} out blk
-  out=$(block_make /root/rp-block | tail -n1); blk="$out/block.sh"
+  out=$(block_make /root/rp-block single | tail -n1); blk="$out/block.sh"
   [[ -f $blk ]] || { err "Блок состоит из нескольких частей; для push задайте BLOCK_MAX побольше (rp.conf) или вставьте части вручную"; return 1; }
   local -a a; mapfile -t a < <(ssh_args) || { err "Нет доступа к VPS-2"; return 1; }
   ssh -o BatchMode=yes "${a[@]}" 'mkdir -p /var/lib/rp; rm -f /var/lib/rp/push.rc; cat >/root/.rp-push.sh' <"$blk" || { err "Не удалось передать блок"; return 1; }
@@ -1471,6 +1683,7 @@ cmd_transports() {
 prune_apply() { # prune_apply «список-неработающих» → новый порядок на VPS-1 и VPS-2
   local bad=$1 t new=""
   for t in $(cf TRANSPORT_ORDER); do [[ " $bad " == *" $t "* ]] || new+="${new:+ }$t"; done
+  new=$(tr_sort "$new")   # порядок по устойчивости к ТСПУ
   [[ -n $new ]] || { err "Исключить все транспорты нельзя: сначала смените порты/SNI (rp.conf) и повторите rp select на VPS-2"; return 1; }
   vps1_set TRANSPORT_ORDER "$new" || return 1
   vps2_run "/usr/local/bin/rp _setorder $new" >/dev/null 2>&1 || warn "Порядок на VPS-2 не обновлён: на VPS-2 выполните  rp _setorder $new"
@@ -1614,7 +1827,7 @@ cmd_test() {
     act=$(vps2_run 'cat /var/lib/rp/active' 2>/dev/null); live=${act:-hy2-wg}; t_res T2 ok "рукопожатие: $live (WG handshake свежий)"
   elif vps2_run true >/dev/null 2>&1; then
     act=$(vps2_run 'cat /var/lib/rp/active' 2>/dev/null); live=${act:-reality}; t_res T2 ok "рукопожатие: $live (дверь SSH отвечает)"
-  else t_res T2 fail "VPS-2 не подключён: выполните «rp block», вставьте блок на VPS-2; «rp status»"; fi
+  else t_res T2 fail "VPS-2 не подключён: выполните «rp link» и введите строку на VPS-2 (или «rp block»); затем «rp status»"; fi
   if [[ -z $live ]]; then
     t_res T3 skip ""; t_res T4 skip ""; t_res T5 skip ""; t_res T6 skip ""; t_res T7 skip ""; t_res T8 skip ""
     warn "Если VPS-2 не достаёт VPS-1 ни одним транспортом — прямой путь заблокирован целиком: нужна цепочка через третий узел."; return 1
@@ -1674,7 +1887,8 @@ cmd_doctor() {
   if v2=$(vps2_run '/usr/local/bin/rp version' 2>/dev/null); then
     card "VPS-2"; kv "Версии" "$v2"; card_end
     local mine; mine="xray $(cf XRAY_VER) hysteria $(cf HY2_VER)"
-    [[ $v2 == "$mine" ]] && ok "Версии на обоих концах согласованы" || warn "Версии различаются (VPS-1: $mine) — rp push"
+    local a b; a=$(sed -E 's/(^| )v([0-9])/\1\2/g' <<<"$v2"); b=$(sed -E 's/(^| )v([0-9])/\1\2/g' <<<"$mine")   # префикс «v» не различие
+    [[ $a == "$b" ]] && ok "Версии на обоих концах согласованы" || warn "Версии различаются (VPS-1: $mine) — rp push"
   else warn "VPS-2 недоступен по SSH"; fi
   return 0
 }
@@ -1713,7 +1927,7 @@ cmd_upgrade() {
       if hy2_live || vps2_run true >/dev/null 2>&1; then
         if push_start 0 && push_wait; then rm -f "$bin.old" "$bk"; ok "$label $ver работает на обоих концах"; prune_offer
         else upg_revert "$what" "$bin" "$bk"; die "На VPS-2 не удалось: VPS-2 откатится сам; на VPS-1 возвращена $cur"; fi
-      else rm -f "$bin.old" "$bk"; warn "VPS-2 не на связи: обновление поставлено на VPS-1; на VPS-2 передайте блок (rp block)"; fi ;;
+      else rm -f "$bin.old" "$bk"; warn "VPS-2 не на связи: обновление поставлено на VPS-1; на VPS-2 передайте блок (rp link или rp block)"; fi ;;
     ru) ru_update --latest ;;
     self) self_upgrade ;;
     *) die "rp upgrade [check] | xray [версия] | hy2 [версия] | ru | self" ;;
@@ -1767,7 +1981,13 @@ cmd_logs() { journalctl -u rp-xray -u rp-hy2 -u rp-hy2o -u rp-net -u wg-quick@wg
 cmd_restart() { need_vps1; systemctl restart rp-net rp-xray; tr_has hy2-wg && systemctl restart rp-hy2; tr_has hy2o-wg && systemctl restart rp-hy2o; [[ $(cf TRANSPORT_ORDER) == *hy2* ]] && systemctl restart wg-quick@wg-exit; ok "Перезапущено"; }
 cmd_uninstall() {
   need_vps1; yesno "Удалить rp с VPS-1 (клиенты потеряют выход)?" n || return 0
-  systemctl disable --now rp-xray rp-hy2 rp-hy2o rp-echo rp-net rp-ru.timer wg-quick@wg0 wg-quick@wg-exit >/dev/null 2>&1
+  # по одной: общий «disable --now» со списком обрывается на первой несуществующей службе (rp-hy2o нет в установках 1.0),
+  # и остальные, включая rp-xray, продолжают работать
+  systemctl stop rp-serve >/dev/null 2>&1   # временный unit без файла: disable для него не сработает
+  local u; for u in rp-serve rp-xray rp-hy2 rp-hy2o rp-echo rp-ru.timer rp-net wg-quick@wg0 wg-quick@wg-exit; do
+    systemctl disable --now "$u" >/dev/null 2>&1 || true
+  done
+  fw_close "$(cf LINK_PORT 8444)/tcp"
   nft delete table inet rp_guard 2>/dev/null; nft delete table ip rp_tp 2>/dev/null; nft delete table ip6 rp_block6 2>/dev/null
   while ip rule del fwmark 1 lookup 100 2>/dev/null; do :; done; while ip rule del fwmark 255 lookup 200 2>/dev/null; do :; done
   fw_close "$(cf WG_PORT)/udp"; fw_close "$(cf HY2_PORT)/udp"; fw_close "$(cf HY2O_PORT)/udp"; fw_close "$(cf RXH_PORT)/tcp"; fw_close "$(cf RXH2_PORT)/tcp"; fw_close "$(cf RTCP_PORT)/tcp"
@@ -1818,14 +2038,19 @@ menu_upd() {
 menu_tunnel() {
   local c
   while :; do cls; banner "Туннель к VPS-2" "$(cf TRANSPORT_ORDER)"; cmd_door list
-    mhead "Действия"; mi 1 "Блок для VPS-2"; mi 2 "Обновить VPS-2 по SSH (откат 10 мин)"; mi 3 "SSH на VPS-2"; mi 4 "Двери (Reality)"; mi 5 "Сменить секреты"; mi 6 "Проверка сайтов SNI"
-    mi 7 "Транспорты: результаты проверки"; mi 8 "Исключить неработающие транспорты"; mi 0 "Назад"; mpick c
-    case $c in 1) (cmd_block); pause ;; 2) (cmd_push); pause ;; 3) (cmd_ssh); pause ;; 4) (cmd_door list); pause ;; 5) (cmd_rotate); pause ;; 6) (cmd_sni); pause ;;
-      7) (cmd_transports); pause ;; 8) (cmd_prune); pause ;; 0) return ;; *) warn "Введите число от 0 до 8"; sleep 1 ;; esac
+    mhead "Действия"; mi 1 "Строка для VPS-2 (он сам скачает блок)"; mi 2 "Блок для VPS-2 (вставка вручную)"; mi 3 "Обновить VPS-2 по SSH (откат 10 мин)"; mi 4 "SSH на VPS-2"
+    mi 5 "Двери (Reality)"; mi 6 "Сменить секреты"; mi 7 "Проверка сайтов SNI"; mi 8 "Транспорты: результаты проверки"; mi 9 "Исключить неработающие транспорты"; mi 0 "Назад"; mpick c
+    case $c in 1) (cmd_link); pause ;; 2) (cmd_block); pause ;; 3) (cmd_push); pause ;; 4) (cmd_ssh); pause ;; 5) (cmd_door list); pause ;; 6) (cmd_rotate); pause ;; 7) (cmd_sni); pause ;;
+      8) (cmd_transports); pause ;; 9) (cmd_prune); pause ;; 0) return ;; *) warn "Введите число от 0 до 9"; sleep 1 ;; esac
   done
 }
 menu_main() {
   local c
+  conf_load
+  if (($(cf CONF_VER 1) < 2)); then   # конфигурация от версии 1.0: без перехода меню покажет устаревшие значения
+    warn "Конфигурация создана версией 1.0 — нужен переход на $SELF_VERSION (ключи и клиенты сохраняются)"
+    yesno "Выполнить rp migrate сейчас?" y && { (cmd_migrate); pause; }
+  fi
   while :; do
     conf_load; cls; banner "rp" "VPS-1 · $(cf PUBLIC_IP) · v$SELF_VERSION"
     printf '  Xray %s   WG %s\n' "$(dot_state rp-xray)" "$(dot_state wg-quick@wg0)"
@@ -1841,7 +2066,7 @@ menu_main() {
     case $c in
       1) menu_clients ;; 2) menu_tunnel ;; 3) menu_ru ;; 4) menu_dns ;;
       5) (cmd_test); pause ;; 6) (cmd_diag --fix); pause ;; 7) (cmd_doctor); pause ;; 8) (cmd_status); pause ;; 9) (cmd_logs 60); pause ;;
-      10) menu_upd ;; 11) (cmd_restart); pause ;; 12) (cmd_uninstall); pause ;;
+      10) menu_upd ;; 11) (cmd_restart); pause ;; 12) (cmd_uninstall); pause; [[ -d $STATE ]] || exit 0 ;;   # после удаления меню не нужно
       0) exit 0 ;; *) warn "Введите число от 0 до 12"; sleep 1 ;;
     esac
   done
@@ -1866,8 +2091,9 @@ rp $SELF_VERSION — цепочка «клиенты WG → VPS-1 → тунне
   rp install               установка; роль VPS-1 / VPS-2 выбирается здесь
   rp migrate               перейти с версии 1.0 (конфиг, службы, QR-пакеты) и применить
   VPS-1:
-  rp client add|del|list|show [имя]   клиенты WG (конфиг и QR; qrencode ставится автоматически)
-  rp block [каталог]       блок для VPS-2 (при большом размере — части с SHA256)
+  rp client add|del|list|show [имя]   клиенты WG (конфиг и QR; QR строит сам скрипт)
+  rp link [порт]           короткая строка для VPS-2: он сам скачает блок с VPS-1 (одноразовый HTTPS, TTL 30 мин)
+  rp block [каталог]       блок для VPS-2 вручную (при большом размере — части с SHA256)
   rp push                  передать блок на VPS-2 по SSH, дождаться и подтвердить (откат через 10 мин)
   rp ssh [команда]         SSH на VPS-2 через туннель (по ключу, с отпечатком host key)
   rp door list|add имя порт хост:порт|del имя    «двери» в Reality-режимах
@@ -1917,6 +2143,8 @@ main() {
     help|-h|--help) usage ;;
     client) need_root; need_vps1; case ${1:-list} in add) lock; cl_add "${2:-}" ;; del) lock; cl_del "${2:-}" ;; list) cl_list ;; show) cl_show "${2:-}" ;; *) die "rp client add|del|list|show [имя]" ;; esac ;;
     block) need_root; cmd_block "$@" ;;
+    link) need_root; lock; cmd_link "$@" ;;
+    _link_close) link_close "$@" ;;     # служебная: вызывает systemd после остановки rp-serve (без lock)
     push) need_root; lock; cmd_push ;;
     ssh) need_root; cmd_ssh "$@" ;;
     door) need_root; lock; cmd_door "$@" ;;
@@ -1940,7 +2168,7 @@ main() {
 }
 
 # ── Встроенный Python (только стандартная библиотека) ────────────────────
-# rp-build: e9f61ffb690d
+# rp-build: 838142a0b5c5
 py_source() { cat <<'RP_PY_EOF'
 #!/usr/bin/env python3
 # rp.py — генератор конфигов VPS-1 и пакета для VPS-2. Только стандартная библиотека (3.9+).
@@ -1971,7 +2199,10 @@ PROBE_URL = "https://www.gstatic.com/generate_204"
 # XHTTP делит передачу на несколько запросов и этого не боится.
 ALL_TR = ("hy2-wg", "hy2o-wg", "reality-xhttp", "reality-xhttp2")
 LEGACY = {"reality-tcp": "reality-xhttp2"}
-DEFAULT_ORDER = "hy2-wg reality-xhttp hy2o-wg reality-xhttp2"
+# Порядок по устойчивости к ТСПУ, а не по скорости: hy2 (QUIC как HTTP/3) → Reality+XHTTP (TLS 1.3 как у
+# настоящего сайта) → XHTTP packet-up (много POST, заметнее) → hy2+Salamander (трафик без признаков QUIC, резерв
+# на случай, если QUIC/HTTP3 режется).
+DEFAULT_ORDER = "hy2-wg reality-xhttp reality-xhttp2 hy2o-wg"
 VARIANTS = {
     "reality-xhttp": {"tag": "rx", "port": "RXH_PORT", "sni": "RXH_SNI", "path": "XHTTP_PATH",
                       "uuid": "RL_UUID_X", "probe": "RL_UUID_PX", "rev": "r-xhttp", "mode": "auto"},
@@ -2209,8 +2440,10 @@ def xray_server(cfg):
         out.append({"tag": "to-exit", "protocol": "freedom",
                     "streamSettings": {"sockopt": {"mark": EXIT_MARK}}})
     if xh:
+        # ipsBlocked=[]: Xray 26.x иначе блокирует 127.0.0.1 («blocked target IP») и проба к эхо не проходит;
+        # сюда попадает только трафик с reality-входов по правилу «127.0.0.1:ECHO_PORT», остальное — block
         out.append({"tag": "local-echo", "protocol": "freedom",
-                    "settings": {"redirect": "127.0.0.1:%d" % ECHO_PORT}})
+                    "settings": {"redirect": "127.0.0.1:%d" % ECHO_PORT, "ipsBlocked": []}})
     out.append({"tag": "dns-out", "protocol": "dns",
                 "settings": {"nonIPQuery": "reject", "blockTypes": [64, 65]}})
 
@@ -2223,7 +2456,8 @@ def xray_server(cfg):
     ru_on = cfg.get("RU_DIRECT", "1") == "1"
     ru_sets = [s for s in cfg.get("RU_SETS", "category-ru yandex vk category-gov-ru 2gis").split() if s]
     ru_domains = ["geosite:%s" % s for s in ru_sets]
-    ru_domains += ["regexp:\\.ru$", "regexp:\\.su$", "regexp:\\.xn--p1ai$"]
+    # domain: — суффиксное сопоставление (быстрее regexp, который Xray проверяет перебором по каждому запросу)
+    ru_domains += ["domain:ru", "domain:su", "domain:xn--p1ai"]
 
     def rule(**kw):
         kw["type"] = "field"
@@ -2273,7 +2507,7 @@ def xray_server(cfg):
             bals.append({"tag": "rev", "selector": rev_tags, "strategy": {"type": "leastPing"}, "fallbackTag": "block"})
         routing["balancers"] = bals
         res["observatory"] = {"subjectSelector": sel, "probeUrl": cfg.get("PROBE_URL", PROBE_URL),
-                              "probeInterval": "15s", "enableConcurrency": True}
+                              "probeInterval": "10s", "enableConcurrency": True}
     return json.dumps(res, indent=2, ensure_ascii=False) + "\n"
 
 
@@ -2419,12 +2653,13 @@ def xray_client(cfg, t):
               "xhttpSettings": xh_settings(cfg, v, False)}
 
     def vless(tag, user_id, reverse=None):
-        u = {"id": user_id, "encryption": "none"}
+        # Xray 26.x: для reverse (и для единообразия — для пробы) нужен «упрощённый» стиль outbound
+        # (address/port/id без vnext/users); со старым vnext Xray отвечает «VLESS users: please use
+        # simplified outbound's config style to use "reverse"» и мост не стартует (проверено xray run -test).
+        st = {"address": cfg["PUBLIC_IP"], "port": port, "id": user_id, "encryption": "none"}
         if reverse:
-            u["reverse"] = {"tag": reverse}
-        return {"tag": tag, "protocol": "vless",
-                "settings": {"vnext": [{"address": cfg["PUBLIC_IP"], "port": port, "users": [u]}]},
-                "streamSettings": stream}
+            st["reverse"] = {"tag": reverse}
+        return {"tag": tag, "protocol": "vless", "settings": st, "streamSettings": stream}
 
     rules = [{"type": "field", "inboundTag": ["probe-in"], "outboundTag": "probe"}]
     for name, lport, host, tport in doors(cfg):
@@ -2436,7 +2671,10 @@ def xray_client(cfg, t):
         "log": {"loglevel": "warning", "access": "none"},
         "inbounds": [{"tag": "probe-in", "listen": "127.0.0.1", "port": 7777, "protocol": "tunnel",
                       "settings": {"address": "127.0.0.1", "port": ECHO_PORT, "network": "tcp"}}],
-        "outbounds": [{"tag": "direct", "protocol": "freedom"},
+        # Xray 26.x: freedom по умолчанию блокирует частные адреса (127.0.0.1…) для трафика reverse-входа —
+        # «дверь» к SSH VPS-2 и проба иначе получают «blocked target IP». Защита остаётся в маршрутах r-in:
+        # только адреса дверей идут в direct, geoip:private → block (проверено xray run на localhost).
+        "outbounds": [{"tag": "direct", "protocol": "freedom", "settings": {"ipsBlocked": []}},
                       {"tag": "block", "protocol": "blackhole"},
                       vless("bridge", cfg[v["uuid"]], reverse="r-in"),
                       vless("probe", cfg[v["probe"]])],
@@ -2633,7 +2871,320 @@ def cmd_echo(args):
     asyncio.run(main())
 
 
-COMMANDS = {"echo": cmd_echo, "render": cmd_render, "client": cmd_client, "bundle": cmd_bundle,
+# ── QR-код (ISO/IEC 18004): байтовый режим, коррекция L, версии 1–14 (до 458 байт) ──────────────
+# Свой генератор вместо qrencode: пакет из EPEL на практике ставился десятки минут и падал, а QR нужен
+# только для конфигов клиентов WG. Проверено декодированием всех версий (OpenCV).
+_QR_L = {1: (26, 7, 1, 19, 0, 0), 2: (44, 10, 1, 34, 0, 0), 3: (70, 15, 1, 55, 0, 0), 4: (100, 20, 1, 80, 0, 0),
+         5: (134, 26, 1, 108, 0, 0), 6: (172, 18, 2, 68, 0, 0), 7: (196, 20, 2, 78, 0, 0), 8: (242, 24, 2, 97, 0, 0),
+         9: (292, 30, 2, 116, 0, 0), 10: (346, 18, 2, 68, 2, 69), 11: (404, 20, 4, 81, 0, 0),
+         12: (466, 24, 2, 92, 2, 93), 13: (532, 26, 4, 107, 0, 0), 14: (581, 30, 3, 115, 1, 116)}
+_QR_ALIGN = {1: [], 2: [6, 18], 3: [6, 22], 4: [6, 26], 5: [6, 30], 6: [6, 34], 7: [6, 22, 38], 8: [6, 24, 42],
+             9: [6, 26, 46], 10: [6, 28, 50], 11: [6, 30, 54], 12: [6, 32, 58], 13: [6, 34, 62], 14: [6, 26, 46, 66]}
+
+
+def _gf_tables():
+    exp, log = [0] * 512, [0] * 256
+    x = 1
+    for i in range(255):
+        exp[i] = x
+        log[x] = i
+        x <<= 1
+        if x & 0x100:
+            x ^= 0x11d
+    for i in range(255, 512):
+        exp[i] = exp[i - 255]
+    return exp, log
+
+
+_EXP, _LOG = _gf_tables()
+
+
+def _rs_ec(data, n):
+    gen = [1]
+    for i in range(n):
+        nxt = [0] * (len(gen) + 1)
+        for j, c in enumerate(gen):
+            nxt[j] ^= c
+            if c:
+                nxt[j + 1] ^= _EXP[_LOG[c] + i]
+        gen = nxt
+    rem = [0] * n
+    for b in data:
+        f = b ^ rem[0]
+        rem = rem[1:] + [0]
+        if f:
+            for i in range(n):
+                if gen[i + 1]:
+                    rem[i] ^= _EXP[_LOG[gen[i + 1]] + _LOG[f]]
+    return rem
+
+
+def qr_matrix(data):
+    """Матрица модулей (список строк bool) для байтов data."""
+    ver = None
+    for v in sorted(_QR_L):
+        total, ec, b1, d1, b2, d2 = _QR_L[v]
+        cap = b1 * d1 + b2 * d2
+        need = 4 + (8 if v < 10 else 16) + 8 * len(data)
+        if need <= cap * 8:
+            ver = v
+            break
+    if ver is None:
+        die("QR: данных слишком много (%d байт, максимум 458)" % len(data))
+    total, ec, b1, d1, b2, d2 = _QR_L[ver]
+    cap = b1 * d1 + b2 * d2
+    bits = [0, 1, 0, 0]
+    n = len(data)
+    bits += [(n >> i) & 1 for i in range(7 if ver < 10 else 15, -1, -1)]
+    for b in data:
+        bits += [(b >> i) & 1 for i in range(7, -1, -1)]
+    bits += [0] * min(4, cap * 8 - len(bits))
+    bits += [0] * (-len(bits) % 8)
+    cw = [int("".join(map(str, bits[i:i + 8])), 2) for i in range(0, len(bits), 8)]
+    pad = [0xEC, 0x11]
+    while len(cw) < cap:
+        cw.append(pad[(len(cw) - len(bits) // 8) % 2])
+    blocks, pos = [], 0
+    for cnt, dl in ((b1, d1), (b2, d2)):
+        for _ in range(cnt):
+            blocks.append(cw[pos:pos + dl])
+            pos += dl
+    ecs = [_rs_ec(b, ec) for b in blocks]
+    out = []
+    for i in range(max(len(b) for b in blocks)):
+        for b in blocks:
+            if i < len(b):
+                out.append(b[i])
+    for i in range(ec):
+        for e in ecs:
+            out.append(e[i])
+    assert len(out) == total, "QR: ошибка таблицы версии %d" % ver
+    allbits = []
+    for c in out:
+        allbits += [(c >> i) & 1 for i in range(7, -1, -1)]
+
+    size = ver * 4 + 17
+    mod = [[False] * size for _ in range(size)]
+    fn = [[False] * size for _ in range(size)]
+
+    def setfn(x, y, v):
+        mod[y][x] = bool(v)
+        fn[y][x] = True
+
+    for i in range(size):
+        setfn(6, i, i % 2 == 0)
+        setfn(i, 6, i % 2 == 0)
+    for cx, cy in ((3, 3), (size - 4, 3), (3, size - 4)):
+        for dy in range(-4, 5):
+            for dx in range(-4, 5):
+                x, y = cx + dx, cy + dy
+                if 0 <= x < size and 0 <= y < size:
+                    setfn(x, y, max(abs(dx), abs(dy)) not in (2, 4))
+    ap = _QR_ALIGN[ver]
+    for i, cx in enumerate(ap):
+        for j, cy in enumerate(ap):
+            if (i == 0 and j == 0) or (i == 0 and j == len(ap) - 1) or (i == len(ap) - 1 and j == 0):
+                continue
+            for dy in range(-2, 3):
+                for dx in range(-2, 3):
+                    setfn(cx + dx, cy + dy, max(abs(dx), abs(dy)) != 1)
+
+    def fmt(mask):
+        d = (1 << 3) | mask                       # уровень L = 01
+        r = d
+        for _ in range(10):
+            r = (r << 1) ^ ((r >> 9) * 0x537)
+        b = ((d << 10) | r) ^ 0x5412
+        g = lambda i: (b >> i) & 1
+        for i in range(6):
+            setfn(8, i, g(i))
+        setfn(8, 7, g(6))
+        setfn(8, 8, g(7))
+        setfn(7, 8, g(8))
+        for i in range(9, 15):
+            setfn(14 - i, 8, g(i))
+        for i in range(8):
+            setfn(size - 1 - i, 8, g(i))
+        for i in range(8, 15):
+            setfn(8, size - 15 + i, g(i))
+        setfn(8, size - 8, True)
+
+    fmt(0)
+    if ver >= 7:
+        r = ver
+        for _ in range(12):
+            r = (r << 1) ^ ((r >> 11) * 0x1F25)
+        b = (ver << 12) | r
+        for i in range(18):
+            a, c = size - 11 + i % 3, i // 3
+            setfn(a, c, (b >> i) & 1)
+            setfn(c, a, (b >> i) & 1)
+    k = 0
+    for right in range(size - 1, 0, -2):
+        if right <= 6:                            # вертикальный тайминг (x=6) пропускаем: пары 5-4, 3-2, 1-0
+            right -= 1
+        for vert in range(size):
+            for j in range(2):
+                x = right - j
+                y = size - 1 - vert if ((right + 1) & 2) == 0 else vert
+                if not fn[y][x] and k < len(allbits):
+                    mod[y][x] = bool(allbits[k])
+                    k += 1
+    masks = [lambda x, y: (x + y) % 2 == 0, lambda x, y: y % 2 == 0, lambda x, y: x % 3 == 0,
+             lambda x, y: (x + y) % 3 == 0, lambda x, y: (x // 3 + y // 2) % 2 == 0,
+             lambda x, y: x * y % 2 + x * y % 3 == 0, lambda x, y: (x * y % 2 + x * y % 3) % 2 == 0,
+             lambda x, y: ((x + y) % 2 + x * y % 3) % 2 == 0]
+
+    def penalty(m):
+        p = 0
+        for lines in (m, [list(c) for c in zip(*m)]):
+            for row in lines:
+                run = 1
+                for i in range(1, size):
+                    if row[i] == row[i - 1]:
+                        run += 1
+                    else:
+                        if run >= 5:
+                            p += 3 + run - 5
+                        run = 1
+                if run >= 5:
+                    p += 3 + run - 5
+                s = "".join("1" if v else "0" for v in row)
+                p += 40 * (s.count("10111010000") + s.count("00001011101"))
+        for y in range(size - 1):
+            for x in range(size - 1):
+                if m[y][x] == m[y][x + 1] == m[y + 1][x] == m[y + 1][x + 1]:
+                    p += 3
+        dark = sum(v for row in m for v in row)
+        p += 10 * int(abs(dark * 100 / (size * size) - 50) / 5)
+        return p
+
+    best, bm = None, 0
+    base = [row[:] for row in mod]
+    for mk in range(8):
+        m = [row[:] for row in base]
+        for y in range(size):
+            for x in range(size):
+                if not fn[y][x] and masks[mk](x, y):
+                    m[y][x] = not m[y][x]
+        mod = m
+        fmt(mk)
+        pen = penalty(mod)
+        if best is None or pen < best:
+            best, bm = pen, mk
+    m = [row[:] for row in base]
+    for y in range(size):
+        for x in range(size):
+            if not fn[y][x] and masks[bm](x, y):
+                m[y][x] = not m[y][x]
+    mod = m
+    fmt(bm)
+    return mod
+
+
+def qr_text(data, quiet=2):
+    """QR для терминала: чёрные модули на белом фоне (не зависит от темы), по две строки в знаке."""
+    m = qr_matrix(data)
+    n = len(m)
+    q = quiet
+    full = [[False] * (n + 2 * q) for _ in range(q)] + \
+           [[False] * q + row + [False] * q for row in m] + [[False] * (n + 2 * q) for _ in range(q)]
+    if len(full) % 2:
+        full.append([False] * (n + 2 * q))
+    lines = []
+    for y in range(0, len(full), 2):
+        s = "".join({(True, True): "█", (True, False): "▀", (False, True): "▄", (False, False): " "}[(t, b)]
+                     for t, b in zip(full[y], full[y + 1]))
+        lines.append("\x1b[30;47m%s\x1b[0m" % s)
+    return "\n".join(lines)
+
+
+def cmd_qr(args):
+    """qr [файл] — QR из файла или stdin."""
+    data = open(args[0], "rb").read() if args else sys.stdin.buffer.read()
+    print(qr_text(data.rstrip(b"\n")))
+
+
+def cmd_serve(args):
+    """serve ПОРТ ТОКЕН ФАЙЛ СЕРТ КЛЮЧ ТТЛ_СЕК — одноразовая отдача файла по HTTPS (блок для VPS-2).
+    Отдаёт только GET /ТОКЕН и только один раз; результат («ok»/«timeout») пишет в файл result рядом."""
+    import hmac
+    import http.server
+    import socketserver
+    import ssl
+    import threading
+    if len(args) != 6:
+        die("serve ПОРТ ТОКЕН ФАЙЛ СЕРТ КЛЮЧ ТТЛ")
+    port, token, path, crt, key, ttl = args[0], args[1], args[2], args[3], args[4], int(args[5])
+    resf = os.path.join(os.path.dirname(os.path.abspath(path)), "result")
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(crt, key)
+    done, lock, state = threading.Event(), threading.Lock(), {"taken": False}
+
+    class H(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.0"
+        timeout = 15
+
+        def setup(self):
+            self.request.do_handshake()          # рукопожатие в потоке соединения: сканер не вешает сервер
+            super().setup()
+
+        def do_GET(self):
+            if not hmac.compare_digest(self.path.encode(), ("/" + token).encode()):
+                time.sleep(1)
+                self.send_error(404)
+                return
+            with lock:
+                if state["taken"]:
+                    self.send_error(404)
+                    return
+                state["taken"] = True
+            try:
+                with open(path, "rb") as f:
+                    body = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                self.wfile.flush()
+            except Exception:
+                state["taken"] = False
+                raise
+            done.set()
+
+        def log_message(self, *a):
+            pass
+
+    class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
+        daemon_threads = True
+        allow_reuse_address = True
+
+        def get_request(self):
+            s, a = self.socket.accept()
+            s.settimeout(15)
+            return ctx.wrap_socket(s, server_side=True, do_handshake_on_connect=False), a
+
+        def handle_error(self, request, client_address):
+            pass
+
+    srv = S(("0.0.0.0", int(port)), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    ok = done.wait(ttl)
+    time.sleep(1)                                 # дать закончить отправку
+    srv.shutdown()
+    for p in (path, key):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    with open(resf, "w") as f:
+        f.write("ok\n" if ok else "timeout\n")
+    sys.exit(0 if ok else 3)
+
+
+COMMANDS = {"qr": cmd_qr, "serve": cmd_serve, "echo": cmd_echo, "render": cmd_render, "client": cmd_client, "bundle": cmd_bundle,
             "next-ip": cmd_next_ip, "chunk": cmd_chunk, "probe": cmd_probe, "rpf": cmd_rpf, "dns": cmd_dns}
 
 if __name__ == "__main__":
