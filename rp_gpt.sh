@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # rp — цепочка «клиенты WG → VPS-1 (РФ) → туннель, устойчивый к ТСПУ → VPS-2 (выход)».
-# Сборка 1.1.5-save-ascii: сохраняемое обновление, ASCII-консоль, XHTTP приоритет и fail-closed.
+# Сборка 1.1.7-fw-xhttp-t3: операции с WG без изменений firewall, надёжнее T3, XHTTP stream-up.
 # Один файл: роль VPS-1 (сервер, меню, генератор) или VPS-2 (блок на чистом bash, сторож).
 # Образец по структуре и стилю — tt.sh; отступления помечены «ОТСТУПЛЕНИЕ» с причиной.
 # Rocky Linux 9/10. Конфигурация: /etc/rp/rp.conf (единственный источник правды).
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.1.5-save-ascii"
+SELF_VERSION="1.1.7-fw-xhttp-t3"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -316,9 +316,26 @@ arch_map() { # arch_map xray|hy2
   esac
 }
 fw_kind() { if systemctl is-active --quiet firewalld 2>/dev/null; then echo firewalld; else echo none; fi; }
-fw_open() { # fw_open порт/прото
+fw_open() { # идемпотентно и без ALREADY_ENABLED; одна явно выбранная зона
   [[ $(fw_kind) == firewalld ]] || return 0
-  firewall-cmd --permanent --add-port="$1" >/dev/null && firewall-cmd --add-port="$1" >/dev/null
+  local port=${1:-} zone out rc
+  local -a opts=()
+  [[ $port =~ ^[0-9]+/(tcp|udp)$ ]] || { err "Неверный порт firewalld: $port"; return 1; }
+  zone=$(firewall-cmd --get-default-zone 2>/dev/null) || { err "firewalld: не удалось узнать зону"; return 1; }
+  [[ -n $zone ]] || { err "firewalld: зона не определена"; return 1; }
+  # Runtime и permanent различаются; используем одну и ту же зону.
+  # Код 11 ALREADY_ENABLED при конкурентном/повторном добавлении — не ошибка.
+  local scope
+  for scope in permanent runtime; do
+    opts=(--zone="$zone")
+    [[ $scope == permanent ]] && opts=(--permanent "${opts[@]}")
+    if firewall-cmd "${opts[@]}" --query-port="$port" >/dev/null 2>&1; then continue; fi
+    if out=$(firewall-cmd "${opts[@]}" --add-port="$port" 2>&1); then continue; else rc=$?; fi
+    if ((rc == 11)) || [[ $out == *ALREADY_ENABLED* ]]; then continue; fi
+    err "firewalld: не удалось открыть $port ($scope, зона $zone): ${out:-код $rc}"
+    return "${rc:-1}"
+  done
+  return 0
 }
 fw_close() { [[ $(fw_kind) == firewalld && $1 =~ ^[0-9] ]] || return 0; firewall-cmd --permanent --remove-port="$1" >/dev/null 2>&1; firewall-cmd --remove-port="$1" >/dev/null 2>&1; return 0; }
 fw_trust_if() { [[ $(fw_kind) == firewalld ]] || return 0; firewall-cmd --permanent --zone=trusted --add-interface="$1" >/dev/null 2>&1; firewall-cmd --zone=trusted --add-interface="$1" >/dev/null 2>&1; return 0; }
@@ -781,23 +798,37 @@ vps1_units_sync() {
   return 0
 }
 vps1_apply() {
+  local scope=${1:-all}
+  [[ $scope == all || $scope == clients-only ]] || { err "Неверная область применения: $scope"; return 1; }
   conf_load
   local stage bk f path mode own act n=0 rc=0
   stage=$(mktemp -d "$STATE/stage.XXXXXX") || return 1; chmod 700 "$stage"
   py render "$stage" >"$stage/manifest" || { rm -rf "${stage:?}"; return 1; }
-  XRAY_LOCATION_ASSET=$ASSETS "$XRAY_BIN" run -test -c "$stage/xray.json" >"$stage/xtest.log" 2>&1 \
-    || { err "Xray отклонил конфиг (run -test):"; sed 's/^/    /' "$stage/xtest.log" >&2; rm -rf "${stage:?}"; return 1; }
+  if [[ $scope == all ]]; then
+    XRAY_LOCATION_ASSET=$ASSETS "$XRAY_BIN" run -test -c "$stage/xray.json" >"$stage/xtest.log" 2>&1 \
+      || { err "Xray отклонил конфиг (run -test):"; sed 's/^/    /' "$stage/xtest.log" >&2; rm -rf "${stage:?}"; return 1; }
+  fi
   bk="$BK_DIR/$(date +%Y%m%d-%H%M%S)-$$"; mkdir -p "$bk"
   ACT=(); local -a done_paths=()
   while IFS='|' read -r f path mode own act; do
     [[ -n $f ]] || continue
+    # WG-клиент не должен менять Xray, Hysteria2, nftables и firewalld.
+    [[ $scope == clients-only && $f != wg0.conf ]] && continue
     if [[ -f $path ]] && cmp -s "$stage/$f" "$path"; then continue; fi
     if [[ -f $path ]]; then cp -p "$path" "$bk/$(printf '%s' "$path" | tr / _)"; else : >"$bk/$(printf '%s' "$path" | tr / _).absent"; fi
     install -m "$mode" -o "${own%%:*}" -g "${own##*:}" "$stage/$f" "$path.rp-new" && mv "$path.rp-new" "$path" || { rc=1; break; }
     done_paths+=("$path"); ACT[$act]=1; n=$((n + 1))
   done <"$stage/manifest"
-  if ((rc == 0)); then vps1_units_sync; fi
-  if ((rc == 0 && n > 0)); then vps1_actions && vps1_check || rc=1; fi
+  if ((rc == 0)) && [[ $scope == all ]]; then
+    vps1_units_sync || rc=1
+  fi
+  if ((rc == 0 && n > 0)); then
+    if [[ $scope == clients-only ]]; then
+      vps1_actions && wg show wg0 peers >/dev/null 2>&1 || rc=1
+    else
+      vps1_actions && vps1_check || rc=1
+    fi
+  fi
   if ((rc != 0)); then
     err "Применение не удалось — возвращаю прежние файлы"
     for path in "${done_paths[@]}"; do
@@ -1128,8 +1159,16 @@ tr_start() {
   esac
 }
 tr_probe_addr() { case $1 in hy2*) echo "$VPS1_WG $ECHO_PORT" ;; *) echo "127.0.0.1 7777" ;; esac; }
-xfer_down() { local got; got=$(timeout 25 bash -c 'exec 3<>/dev/tcp/$0/$1 || exit 1; printf "DN %d\n" "$2" >&3; head -c "$2" <&3 | wc -c' "$1" "$2" "$3" 2>/dev/null) || got=0; echo "${got:-0}"; }
-xfer_up() { timeout 25 bash -c 'exec 3<>/dev/tcp/$0/$1 || exit 1; printf "UP %d\n" "$2" >&3; head -c "$2" /dev/zero >&3; read -r -t 15 l <&3; [[ $l == "OK $2" ]]' "$1" "$2" "$3" 2>/dev/null; }
+# Для коротких проб 15 c, для T3 — до 50 c; не теряем частичный объём при timeout.
+xfer_down() {
+  local got
+  got=$(timeout "${4:-15}" bash -c 'exec 3<>/dev/tcp/$0/$1 || exit 1; printf "DN %d\n" "$2" >&3; head -c "$2" <&3 | wc -c' "$1" "$2" "$3" 2>/dev/null) || true
+  [[ ${got:-} =~ ^[[:space:]]*[0-9]+[[:space:]]*$ ]] || got=0
+  printf '%d\n' "$got"
+}
+xfer_up() {
+  timeout "${4:-20}" bash -c 'exec 3<>/dev/tcp/$0/$1 || exit 1; printf "UP %d\n" "$2" >&3; head -c "$2" /dev/zero >&3; read -r -t "$3" l <&3; [[ $l == "OK $2" ]]' "$1" "$2" "$3" "${5:-15}" 2>/dev/null
+}
 # WireGuard is quiet until the first packet. Without PersistentKeepalive, merely
 # starting the interface and waiting for a handshake (old T2 logic) is a deadlock.
 # Generate local WG traffic; it is carried by Hysteria2 UDP forwarding (127.0.0.1:51820).
@@ -1194,12 +1233,26 @@ t2_check() { # T2: initiate WG handshake (hy2) or verify Reality path
   done
   return 1
 }
-t3_check() { # T3: ≥200 КБ в обе стороны (против замирания потока на 15–20 КБ)
-  local t=$1 h p got
+t3_check() { # Двусторонние 200 КБ; один кратковременный сбой не означает блокировку.
+  local t=$1 h p got attempt last="нет ответа" up_rc
   read -r h p < <(tr_probe_addr "$t")
-  got=$(xfer_down "$h" "$p" $N)
-  if ((got != N)); then say "обрыв после ~$((got / 1024)) КБ на приёме"; return 1; fi
-  xfer_up "$h" "$p" $N || { say "обрыв на передаче"; return 1; }
+  for attempt in 1 2; do
+    got=$(xfer_down "$h" "$p" "$N" 50)
+    if ((got == N)); then
+      if xfer_up "$h" "$p" "$N" 50 40; then
+        ((attempt > 1)) && logger -t rp "T3: $t succeeded on retry (transient transfer issue)" || true
+        return 0
+      else
+        up_rc=$?
+        last="приём $N/$N байт, передача не подтверждена (код $up_rc)"
+      fi
+    else
+      last="приём ${got:-0}/$N байт"
+    fi
+    ((attempt == 1)) && sleep 3
+  done
+  say "$last после 2 попыток; проверьте журнал Xray и ограничения транспорта"
+  return 1
 }
 unit_failed() { systemctl is-failed --quiet "$(unit_of "$1")"; }
 # Диагностика различает: нет ответа, обрыв после N КБ, сброс, ошибка конфигурации
@@ -1217,7 +1270,7 @@ diag() {
         say "    QUIC мог успешно подключиться, но WG handshake через UDP forwarding не состоялся."
         say "    Проверьте: wg show rp-wg; ip route get 10.77.0.1; ss -lunp; rp logs."
       else say "    Reality/XHTTP: нет ответа через обратный канал; проверьте SNI, порт и журнал Xray"; fi ;;
-    t3) say "    ${detail:-обрыв передачи}: так проявляется замирание потока ТСПУ → смените порт, SNI или транспорт" ;;
+    t3) say "    ${detail:-ошибка передачи}; причины: таймаут, XHTTP-режим, сеть или фильтрация. Логи: rp logs" ;;
   esac
 }
 cmd_select() {
@@ -1991,13 +2044,13 @@ transport_label() {
   case $1 in
     hy2-wg) echo "Hysteria2 · QUIC/UDP · без обфускации · несёт WG" ;;
     hy2o-wg) echo "Hysteria2 · QUIC/UDP · обфускация Salamander · несёт WG" ;;
-    reality-xhttp) echo "VLESS Reverse · Reality · XHTTP (auto) · TCP" ;;
+    reality-xhttp) echo "VLESS Reverse · Reality · XHTTP (stream-up) · TCP" ;;
     reality-xhttp2) echo "VLESS Reverse · Reality · XHTTP (packet-up) · TCP" ;;
     *) echo "$1" ;;
   esac
 }
 ord_has() { [[ " $1 " == *" $2 "* ]]; }   # ord_has "список" имя
-# Приоритет для этой инсталляции: XHTTP packet-up, затем XHTTP auto,
+# Приоритет для этой инсталляции: XHTTP packet-up, затем XHTTP stream-up,
 # затем HY2/QUIC и HY2+Salamander. Это политика, а не гарантия невидимости DPI.
 # Один рабочий транспорт VPS-2 за раз; остальные сохраняются для повторных попыток.
 TR_RANK=(reality-xhttp2 reality-xhttp hy2-wg hy2o-wg)
@@ -2034,7 +2087,7 @@ conf_migrate() {
 }
 cmd_migrate() {
   need_root; need_vps1
-  banner "Переход на rp $SELF_VERSION" "с версии 1.0"
+  banner "Применение rp $SELF_VERSION" "обновление действующей конфигурации"
   mkdir -p "$STATE"; chmod 755 "$STATE"
   cp -p "$CONF" "$BK_DIR/rp.conf.v1.$(date +%s)" 2>/dev/null || { mkdir -p "$BK_DIR"; cp -p "$CONF" "$BK_DIR/rp.conf.v1.$(date +%s)"; }
   self_install || die "Не удалось сохранить исполняемый rp; миграция остановлена"
@@ -2068,7 +2121,7 @@ vps1_install() {
   WG_PORT=${WG_PORT:-$(cf WG_PORT $((20000 + RANDOM % 30000)))}
   ask WG_PORT "UDP-порт WireGuard для клиентов" "$WG_PORT" '^[0-9]+$' "Нужен номер порта" valid_port
   choose TRANSPORT_CHOICE "Транспорты туннеля к VPS-2" all \
-    "all|Все четыре (рекомендуется)|XHTTP packet-up → XHTTP auto → HY2 → HY2+Salamander; отказавшие остаются резервом" \
+    "all|Все четыре (рекомендуется)|XHTTP packet-up → XHTTP stream-up → HY2 → HY2+Salamander; отказавшие остаются резервом" \
     "udp|Только Hysteria2 (без и с obfs)|если TCP режется ТСПУ" \
     "tcp|Только VLESS Reality · XHTTP (два варианта)|если UDP/QUIC недоступен"
   case ${TRANSPORT_CHOICE:-all} in udp) order="hy2-wg hy2o-wg" ;; tcp) order="reality-xhttp2 reality-xhttp" ;; *) order="${TR_RANK[*]}" ;; esac
@@ -2088,7 +2141,7 @@ vps1_install() {
   kv "Публичный IP" "$PUBLIC_IP"; kv "WG клиентов" "UDP/$WG_PORT"; kv "Транспорты" "$order"
   ord_has "$order" hy2-wg && kv "Hysteria2" "UDP/$HY2_PORT · ${HY2_MASQ_HOST:-}"
   ord_has "$order" hy2o-wg && kv "Hysteria2 + obfs" "UDP/$HY2O_PORT · Salamander"
-  ord_has "$order" reality-xhttp && kv "XHTTP (auto)" "TCP/$RXH_PORT · ${RXH_SNI:-—}"
+  ord_has "$order" reality-xhttp && kv "XHTTP (stream-up)" "TCP/$RXH_PORT · ${RXH_SNI:-—}"
   ord_has "$order" reality-xhttp2 && kv "XHTTP (packet-up)" "TCP/$RXH2_PORT · ${RXH2_SNI:-—}"
   kv "DNS через туннель" "DoH: Quad9, затем Cloudflare"
   kv "Списки РФ" "$([[ $ru == y ]] && echo напрямую || echo выключены)"; card_end
@@ -2177,11 +2230,11 @@ cl_add() {
     cp -p "$backup" "$CLIENTS"; rm -f "$backup"; return 1
   fi
   # Проверка конфигурации до установки и после применения.
-  if ! py client "$n" >/dev/null || ! vps1_apply ||
+  if ! py client "$n" >/dev/null || ! vps1_apply clients-only ||
      ! wg show wg0 peers 2>/dev/null | grep -Fxq "$b"; then
     err "Клиент не был успешно добавлен в работающий wg0; возвращаю прежний список"
     cp -p "$backup" "$CLIENTS"
-    vps1_apply || warn "Не удалось повторно применить прежний список — проверьте wg show wg0"
+    vps1_apply clients-only || warn "Не удалось повторно применить прежний список — проверьте wg show wg0"
     rm -f "$backup"
     return 1
   fi
@@ -2191,12 +2244,26 @@ cl_add() {
 }
 
 cl_del() {
-  need_vps1; local n=${1:-}; mapfile -t _l < <(client_names)
+  need_vps1; local n=${1:-} pub peers; mapfile -t _l < <(client_names)
   [[ -n $n ]] || pick_from n "Удалить клиента" "${_l[@]}" || { warn "Клиентов нет"; return 1; }
-  client_names | grep -qx "$n" || die "Клиента «$n» нет"
-  cp -p "$CLIENTS" "$CLIENTS.bak"; grep -v -P "^\Q$n\E\t" "$CLIENTS.bak" >"$CLIENTS" || true
-  vps1_apply || { mv "$CLIENTS.bak" "$CLIENTS"; die "Не удалось применить, клиент возвращён"; }
-  rm -f "$CLIENTS.bak" "/root/rp-clients/$n.conf"; ok "Клиент «$n» удалён"
+  client_names | grep -Fxq "$n" || die "Клиента «$n» нет"
+  pub=$(awk -F '\t' -v n="$n" '$1==n {print $3; exit}' "$CLIENTS")
+  [[ -n $pub ]] || { err "Публичный ключ клиента $n не найден"; return 1; }
+  cp -p "$CLIENTS" "$CLIENTS.bak" || return 1
+  grep -v -P "^\Q$n\E\t" "$CLIENTS.bak" >"$CLIENTS" || true
+  if ! vps1_apply clients-only; then
+    mv "$CLIENTS.bak" "$CLIENTS"
+    vps1_apply clients-only || warn "Не удалось восстановить wg0 — проверьте wg show wg0"
+    err "Не удалось применить удаление; список клиентов восстановлен"
+    return 1
+  fi
+  if ! peers=$(wg show wg0 peers 2>/dev/null) || printf '%s\n' "$peers" | grep -Fxq "$pub"; then
+    err "Peer не удалён из работающего wg0; откатываю изменение"
+    mv "$CLIENTS.bak" "$CLIENTS"
+    vps1_apply clients-only || warn "Не удалось восстановить wg0 — проверьте wg show wg0"
+    return 1
+  fi
+  rm -f "$CLIENTS.bak" "/root/rp-clients/$n.conf"; ok "Клиент «$n» удалён (wg0 проверен)"
 }
 cl_list() {
   need_vps1; local n=0 name ip
@@ -2317,11 +2384,29 @@ cmd_link() { # rp link [порт]
 # ── Доступ к VPS-2 ───────────────────────────────────────────────────────
 hy2_live() { wg show wg-exit latest-handshakes 2>/dev/null | awk '$2>0 && systime()-$2<180 {f=1} END{exit !f}'; }
 door_port() { py_door="$1"; local it; IFS=';' read -ra _d <<<"$(cf DOORS "ssh=2222=127.0.0.1:22")"; for it in "${_d[@]}"; do [[ ${it%%=*} == "$py_door" ]] && { it=${it#*=}; echo "${it%%=*}"; return 0; }; done; return 1; }
-ssh_args() { # печатает аргументы ssh в зависимости от живого транспорта
-  local host port
-  if hy2_live; then host=10.77.0.2; port=22; else host=127.0.0.1; port=$(door_port ssh) || return 1; fi
+# Два независимых пути управления VPS-2. Внешний SSH-порт VPS-2 не открываем.
+# XHTTP: SSH через локальную дверь 127.0.0.1:2222, доступную лишь после
+# регистрации обратного моста; HY2: SSH через внутренний WG 10.77.0.2:22.
+ssh_args_for() { # ssh_args_for xhttp|hy2 — аргументы для конкретного пути
+  local method=$1 host port
+  case $method in
+    xhttp)
+      { tr_has reality-xhttp || tr_has reality-xhttp2; } || return 1
+      host=127.0.0.1; port=$(door_port ssh) || return 1
+      [[ $port =~ ^[0-9]+$ ]] || return 1
+      ;;
+    hy2)
+      hy2_live || return 1
+      host=10.77.0.2; port=22
+      ;;
+    *) return 1 ;;
+  esac
   printf '%s\n' -i "$ETC/ssh/id_ed25519" -o IdentitiesOnly=yes -o "UserKnownHostsFile=$ETC/ssh/known_hosts" \
-    -o StrictHostKeyChecking=accept-new -o HostKeyAlias=vps2 -o ConnectTimeout=10 -o ServerAliveInterval=15 -p "$port" "root@$host"
+    -o StrictHostKeyChecking=accept-new -o HostKeyAlias=vps2 -o ConnectTimeout=6 \
+    -o ConnectionAttempts=1 -o ServerAliveInterval=15 -o ServerAliveCountMax=2 -p "$port" "root@$host"
+}
+ssh_args() { # обычный интерактивный rp ssh по предпочитаемому пути
+  if hy2_live; then ssh_args_for hy2; else ssh_args_for xhttp; fi
 }
 cmd_ssh() {
   need_vps1; local -a a; mapfile -t a < <(ssh_args) || die "Нет двери для SSH (rp door add ssh 2222 127.0.0.1:22)"
@@ -2349,16 +2434,114 @@ cmd_door() {
 # ── Обновление VPS-2 по SSH: передача, ожидание, подтверждение ───────────
 # push_start [задержка_с] — блок на VPS-2 и запуск в отдельном сеансе (туннель при проверке транспортов
 # перезапускается, SSH-сеанс оборвётся); откат на VPS-2 сработает сам через 10 минут без подтверждения
+# Одна временная потеря SSH не должна отменять rp push: обратный XHTTP-мост
+# может еще регистрироваться, либо сторож меняет активный транспорт.
+# Проверяем РЕАЛЬНЫЙ SSH (а не только ss -lnt на 127.0.0.1:2222),
+# затем выполняем действие; при отказе пробуем другой доступный путь.
+# Не повторяем ошибку аутентификации/host key: это не сетевой сбой.
+push_ssh() { # push_ssh "команда на VPS-2" файл-stdin(или /dev/null)
+  local command=$1 input=${2:-/dev/null} attempt method msg rc=1 auth=0
+  local -a a=() methods=()
+  local errfile
+  errfile=$(mktemp "$STATE/push-ssh.XXXXXXXX") || return 1
+  for ((attempt=1; attempt<=6; attempt++)); do
+    if hy2_live; then methods=(hy2 xhttp); else methods=(xhttp hy2); fi
+    for method in "${methods[@]}"; do
+      # Проверка применимости пути выполняется до передачи файла.
+      # mapfile не передаёт код возврата process substitution, поэтому сначала
+      # проверяем наличие порта/свежего WG handshake.
+      if [[ $method == hy2 ]]; then
+        hy2_live || continue
+      else
+        { tr_has reality-xhttp || tr_has reality-xhttp2; } || continue
+        door_port ssh >/dev/null || continue
+      fi
+      mapfile -t a < <(ssh_args_for "$method")
+      ((${#a[@]})) || continue
+      if ssh -o BatchMode=yes "${a[@]}" true </dev/null 2>"$errfile"; then
+        if ssh -o BatchMode=yes "${a[@]}" "$command" <"$input" 2>"$errfile"; then
+          rm -f "$errfile"
+          return 0
+        else
+          rc=$?
+        fi
+      else
+        rc=$?
+      fi
+      # Код 255 означает ошибку соединения SSH. Ошибки remote-команды не
+      # исправятся повторами и могут означать недостаток места/неверный хэш.
+      if ((rc != 255)); then
+        msg=$(tail -n 3 "$errfile")
+        rm -f "$errfile"
+        err "Команда на VPS-2 завершилась с ошибкой $rc: ${msg:-без вывода}"
+        return "$rc"
+      fi
+      # Лог не содержит содержимого передаваемого блока с секретами.
+      msg=$(tail -n 2 "$errfile" | tr '\n' ' ')
+      printf '%s push_ssh attempt=%s path=%s status=%s error=%s\n' "$(date -Is)" "$attempt" "$method" "$rc" "$msg" >>"$LOG"
+      if grep -Eqi 'Permission denied|Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED|Too many authentication failures|Bad owner or permissions' "$errfile"; then
+        auth=1; break
+      fi
+    done
+    ((auth)) && break
+    ((attempt < 6)) && { warn "SSH к VPS-2 пока недоступен (попытка $attempt/6); повторяю"; sleep 3; }
+  done
+  msg=$(tail -n 3 "$errfile")
+  rm -f "$errfile"
+  err "SSH к VPS-2 не установился после проверок: ${msg:-нет доступного обратного пути}"
+  if ((auth)); then
+    warn "Проверьте SSH-ключ и host key; автоматический повтор при ошибке аутентификации отключён"
+  else
+    warn "Возможна задержка регистрации XHTTP Reverse или переключение транспорта. Диагностика: rp status; rp ssh; rp logs"
+  fi
+  return 1
+}
+
 push_start() {
-  local delay=${1:-0} out blk
+  local delay=${1:-0} out blk digest upload_cmd start_cmd id
   out=$(block_make /root/rp-block single | tail -n1); blk="$out/block.sh"
   [[ -f $blk ]] || { err "Блок состоит из нескольких частей; для push задайте BLOCK_MAX побольше (rp.conf) или вставьте части вручную"; return 1; }
-  local -a a; mapfile -t a < <(ssh_args) || { err "Нет доступа к VPS-2"; return 1; }
-  ssh -o BatchMode=yes "${a[@]}" 'mkdir -p /var/lib/rp; rm -f /var/lib/rp/push.rc; cat >/root/.rp-push.sh' <"$blk" || { err "Не удалось передать блок"; return 1; }
-  ssh -o BatchMode=yes "${a[@]}" "setsid -f bash -c 'sleep $delay; RP_SAFE=1 bash /root/.rp-push.sh' >/var/lib/rp/push.log 2>&1 </dev/null" || { err "Не удалось запустить обновление"; return 1; }
+  digest=$(sha256sum "$blk" | awk '{print $1}') || return 1
+  [[ $digest =~ ^[0-9a-f]{64}$ ]] || return 1
+  # Сначала передаём во временный файл, проверяем SHA256 и лишь затем публикуем.
+  # При сетевом сбросе повторная передача безопасна и не оставляет частичный блок.
+  upload_cmd=$(cat <<EOF
+umask 077
+install -d -m 700 /var/lib/rp || exit 1
+tmp=\$(mktemp /root/.rp-push.XXXXXXXX) || exit 1
+trap 'rm -f "\$tmp"' EXIT
+cat >"\$tmp" || exit 1
+printf '%s  %s\n' '$digest' "\$tmp" | sha256sum -c - --status || exit 1
+mv -f -- "\$tmp" /root/.rp-push.sh
+EOF
+)
+  if ! push_ssh "$upload_cmd" "$blk"; then
+    rm -rf "${out:?}"
+    err "Не удалось передать проверенный блок на VPS-2"
+    return 1
+  fi
+  # Идентификатор операции нужен, чтобы повтор SSH после сброса не запустил
+  # установку дважды. Файл push.runid и запуск защищены отдельным flock на VPS-2.
+  id=$(uuid)   # каждое сознательное rp push — новая транзакция; повторы SSH используют тот же id
+  start_cmd=$(cat <<EOF
+install -d -m 700 /var/lib/rp || exit 1
+flock -x /var/lib/rp/push-launch.lock bash -c '
+  if [ "\$(cat /var/lib/rp/push.runid 2>/dev/null)" = "$id" ]; then exit 0; fi
+  rm -f /var/lib/rp/push.rc
+  setsid -f bash -c "sleep $delay; RP_SAFE=1 bash /root/.rp-push.sh" >/var/lib/rp/push.log 2>&1 </dev/null || exit 1
+  printf "%s\n" "$id" >/var/lib/rp/push.runid
+'
+EOF
+)
+  if ! push_ssh "$start_cmd" /dev/null; then
+    rm -rf "${out:?}"
+    err "Не удалось подтвердить запуск обновления на VPS-2"
+    return 1
+  fi
   rm -rf "${out:?}"
   ok "Обновление запущено на VPS-2 (откат через 10 минут, если не подтвердить)"
 }
+
 # push_wait — ждём окончания установки на VPS-2 (до 9 минут), затем выход через VPS-2 и подтверждение
 push_wait() {
   local t=0 rc=""
@@ -2961,7 +3144,7 @@ LEGACY = {"reality-tcp": "reality-xhttp2"}
 DEFAULT_ORDER = "reality-xhttp2 reality-xhttp hy2-wg hy2o-wg"
 VARIANTS = {
     "reality-xhttp": {"tag": "rx", "port": "RXH_PORT", "sni": "RXH_SNI", "path": "XHTTP_PATH",
-                      "uuid": "RL_UUID_X", "probe": "RL_UUID_PX", "rev": "r-xhttp", "mode": "auto"},
+                      "uuid": "RL_UUID_X", "probe": "RL_UUID_PX", "rev": "r-xhttp", "mode": "stream-up"},
     "reality-xhttp2": {"tag": "rx2", "port": "RXH2_PORT", "sni": "RXH2_SNI", "path": "XHTTP2_PATH",
                        "uuid": "RL_UUID_T", "probe": "RL_UUID_PT", "rev": "r-xhttp2", "mode": "packet-up"},
 }
