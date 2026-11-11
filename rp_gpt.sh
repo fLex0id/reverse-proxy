@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # rp — клиенты WG → VPS-1 (РФ) → туннель (XHTTP/HY2) → VPS-2 (выход).
+# 1.2.4: reliable self-update/save validator and actionable download diagnostics.
 # 1.2.3: DNS routing consistency, fail-closed name resolution and verified geosite updates.
 # Сборка 1.2.1: согласование обоих Xray-балансировщиков, журнал переключений, восстановление управления.
 # Один файл: роль VPS-1 (сервер, меню, генератор) или VPS-2 (блок на чистом bash, сторож).
@@ -8,7 +9,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.3-dns-leak-guard"
+SELF_VERSION="1.2.4-self-update-fix"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -2295,28 +2296,68 @@ EOS
 # ── Роль VPS-1 ───────────────────────────────────────────────────────────
 need_vps1() { conf_load; [[ $(cf ROLE) == vps1 ]] || die "Это не VPS-1 (или rp ещё не установлен): выполните «rp install»"; }
 py_install() { mkdir -p "$LIB"; py_source >"$LIB/rp.py.new" && mv "$LIB/rp.py.new" "$LIB/rp.py" && chmod 644 "$LIB/rp.py"; }
-# A process substitution (bash <(curl ...)) is a pipe, not a regular file.
-# Re-download exactly RP_URL, compare versions, validate, then atomically install.
-# Never report success when a fetched copy differs from the running build.
+# Process substitution (bash <(curl ...)) is not a seekable regular file.
+# In that case re-download the published file, validate it, and compare versions.
+# Do not confuse the human-facing description in the header with a stable signature.
 self_version_of() { sed -n 's/^SELF_VERSION="\([^"]*\)"$/\1/p' "$1" | head -1; }
-self_ok() {
-  [[ -s $1 ]] && [[ $(head -n 3 "$1") == *'rp — цепочка'* ]] &&
-    [[ $(self_version_of "$1") =~ ^[0-9]+\.[0-9]+\.[0-9]+[-+a-zA-Z0-9.]*$ ]] &&
-    bash -n "$1" >/dev/null 2>&1
+self_ok() {  # verify a complete rp release, never just a plausible version line
+  local file=$1 header ver sz
+  [[ -f $file && -r $file && -s $file ]] || return 1
+  sz=$(wc -c <"$file") || return 1
+  ((sz >= 32768)) || return 1  # reject truncated HTTP/proxy responses
+  [[ $(head -n 1 "$file") == '#!/usr/bin/env bash' ]] || return 1
+  header=$(sed -n '2p' "$file")
+  case "$header" in '# rp — '*|'# rp - '*) ;; *) return 1 ;; esac
+  ver=$(self_version_of "$file")
+  [[ $ver =~ ^[0-9]+\.[0-9]+\.[0-9]+[-+a-zA-Z0-9.]*$ ]] || return 1
+  [[ $(grep -c '^SELF_VERSION=' "$file") == 1 ]] || return 1
+  grep -Fq "py_source() { cat <<'RP_PY_EOF'" "$file" || return 1
+  [[ $(tail -n 1 "$file") == 'main "$@"' ]] || return 1
+  bash -n "$file" >/dev/null 2>&1
 }
-self_source() { # self_source DEST: current regular script, otherwise the configured GitHub URL
-  local dest=$1 current=${BASH_SOURCE[0]}  # inside function BASH_SOURCE[0] is this script
+self_explain_invalid() { # prints specific reason; called only after failed self_ok
+  local file=$1 sz ver
+  if [[ ! -s $file ]]; then err "Скачанный файл пуст или отсутствует"; return 1; fi
+  sz=$(wc -c <"$file" 2>/dev/null || echo 0)
+  if ((sz < 32768)); then err "Скачано только ${sz} байт (ожидался полный rp.sh): файл обрезан или вместо него пришла HTML-страница"; return 1; fi
+  if [[ $(head -n 1 "$file") != '#!/usr/bin/env bash' ]]; then
+    err "В ответе сервера нет Bash shebang: возможно, вместо скрипта скачана страница ошибки"; return 1
+  fi
+  ver=$(self_version_of "$file")
+  if [[ -z $ver ]]; then err "В загруженном файле отсутствует SELF_VERSION"; return 1; fi
+  if ! bash -n "$file" >/dev/null 2>&1; then
+    err "В загруженном скрипте есть синтаксическая ошибка Bash"; bash -n "$file" >&2; return 1
+  fi
+  err "Файл $ver не прошёл проверку структуры rp (заголовок, встроенный генератор или завершающий main)"
+  return 1
+}
+self_fetch() {  # retrieve and validate; never hide a successful download as a network error
+  local dest=$1
+  if [[ $RP_URL == *[[:space:]]* ]]; then
+    err "RP_URL содержит пробел или перенос строки: $(printf '%q' "$RP_URL")"; return 1
+  fi
+  if ! fetch "$RP_URL" "$dest"; then
+    err "Не удалось скачать $RP_URL (сеть, DNS, TLS или HTTP). Проверьте curl -fLI '$RP_URL'"
+    return 1
+  fi
+  if ! self_ok "$dest"; then
+    self_explain_invalid "$dest"
+    return 1
+  fi
+}
+self_source() { # self_source DEST: current regular script, otherwise the configured URL
+  local dest=$1 current=${BASH_SOURCE[0]}
   if [[ -f $current && -r $current ]] && self_ok "$current"; then
     cp -- "$current" "$dest" || return 1
+    self_ok "$dest" || { self_explain_invalid "$dest"; return 1; }
   else
-    note "Исходный код запущен через поток; скачиваю точную копию: $RP_URL"
-    fetch "$RP_URL" "$dest" || return 1
+    note "Исходный код запущен через поток; скачиваю опубликованную версию: $RP_URL"
+    self_fetch "$dest" || return 1
   fi
-  self_ok "$dest"
 }
 self_install_file() { # pre-validated file, same filesystem atomic rename + backup
   local from=$1 base stage old_backup="" stamp
-  self_ok "$from" || { err "Неверный файл rp или ошибка bash -n"; return 1; }
+  self_ok "$from" || { self_explain_invalid "$from"; return 1; }
   [[ $(self_version_of "$from") == "$SELF_VERSION" ]] || {
     err "Версия файла ($(self_version_of "$from")) не совпадает с запущенной ($SELF_VERSION); сохранение отменено"
     return 1
@@ -2371,8 +2412,8 @@ self_upgrade() {
   local tmp nv prev old_version rc=0
   need_root; mkdir -p "$STATE" "$BK_DIR"
   tmp=$(mktemp "${TMPDIR:-/tmp}/rp-update.XXXXXXXX") || return 1
-  if ! fetch "$RP_URL" "$tmp" || ! self_ok "$tmp"; then
-    rm -f "$tmp"; err "Не удалось скачать и проверить $RP_URL"; return 1
+  if ! self_fetch "$tmp"; then
+    rm -f "$tmp"; return 1
   fi
   nv=$(self_version_of "$tmp")
   old_version=$(self_version_of "$SELF_BIN")
