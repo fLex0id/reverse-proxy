@@ -7,7 +7,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.1.9-manual-transport"
+SELF_VERSION="1.2.0-synchronized-routing"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -675,6 +675,63 @@ WantedBy=multi-user.target
 EOF
   mkdir -p /etc/systemd/system/wg-quick@wg0.service.d
   printf '[Unit]\nRequires=rp-net.service\nAfter=rp-net.service\n' >/etc/systemd/system/wg-quick@wg0.service.d/rp.conf
+  cat >"$LIB/route-restore.sh" <<'EOS_ROUTE_RESTORE'
+#!/usr/bin/env bash
+# Xray gRPC balancer overrides are in-memory. Restore after every restart.
+# Never default back to unpinned leastPing if a previously fixed route exists.
+set -u
+state=/var/lib/rp/route-target
+[[ -s $state ]] || exit 0
+# If XHTTP transports were removed, there is no Xray gRPC balancer to restore.
+grep -q '"RoutingService"' /etc/rp/xray.json || exit 0
+read -r target <"$state"
+case "$target" in
+  to-exit|r-xhttp|r-xhttp2) : ;;
+  *) echo "rp route restore: invalid target" >&2; exit 1 ;;
+esac
+if ! python3 -I - /etc/rp/xray.json "$target" <<'PY_ROUTE_VALID'
+import json,sys
+x=json.load(open(sys.argv[1]))
+sel=next((b.get('selector',[]) for b in x.get('routing',{}).get('balancers',[]) if b.get('tag')=='exit'),[])
+sys.exit(0 if sys.argv[2] in sel else 1)
+PY_ROUTE_VALID
+then
+  echo "rp route restore: stale target $target no longer configured; skipping" >&2
+  exit 0
+fi
+for i in $(seq 1 25); do
+  /usr/local/bin/xray api bo --server=127.0.0.1:10085 -b exit "$target" >/dev/null 2>&1 && exit 0
+  sleep 0.4
+done
+echo "rp route restore: Xray API did not accept $target" >&2
+exit 1
+EOS_ROUTE_RESTORE
+  chmod 755 "$LIB/route-restore.sh"
+  cat >/etc/systemd/system/rp-route-sync.service <<EOF_SYNC_SERVICE
+[Unit]
+Description=rp: reconcile VPS-1 routing with VPS-2 active transport
+After=rp-xray.service
+Wants=rp-xray.service
+
+[Service]
+Type=oneshot
+ExecStart=$SELF_BIN _route_sync
+TimeoutStartSec=75
+EOF_SYNC_SERVICE
+  cat >/etc/systemd/system/rp-route-sync.timer <<'EOF_SYNC_TIMER'
+[Unit]
+Description=rp: detect VPS-2 automatic failover and mirror active route
+
+[Timer]
+OnBootSec=45s
+OnUnitInactiveSec=20s
+RandomizedDelaySec=15s
+AccuracySec=1s
+Unit=rp-route-sync.service
+
+[Install]
+WantedBy=timers.target
+EOF_SYNC_TIMER
   cat >/etc/systemd/system/rp-xray.service <<EOF
 [Unit]
 Description=rp: Xray (VPS-1)
@@ -686,6 +743,7 @@ User=rp
 Group=rp
 Environment=XRAY_LOCATION_ASSET=$ASSETS
 ExecStart=$XRAY_BIN run -c $ETC/xray.json
+ExecStartPost=$LIB/route-restore.sh
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
@@ -780,6 +838,14 @@ vps1_check() {
   done
   nft list table ip rp_tp >/dev/null 2>&1 || { err "Нет таблицы nft rp_tp (перехват не включён)"; return 1; }
   ss -lnt 2>/dev/null | grep -q ':14205 ' || { err "Xray не слушает TPROXY-порт"; return 1; }
+  if tr_has reality-xhttp || tr_has reality-xhttp2; then
+    local api_ok=0 check_n
+    for check_n in 1 2 3 4 5; do
+      if "$XRAY_BIN" api bi --server=127.0.0.1:10085 exit >/dev/null 2>&1; then api_ok=1; break; fi
+      sleep 1
+    done
+    ((api_ok)) || { err "Нет локального RoutingService Xray на 127.0.0.1:10085: проверьте версию Xray и rp-xray.service"; return 1; }
+  fi
   # Применение локальных конфигов (включая нового клиента WG) не должно
   # откатываться лишь потому, что VPS-2 сейчас недоступен. End-to-end
   # доступность проверяется отдельно в rp test / rp diag.
@@ -1320,7 +1386,11 @@ cmd_select() {
     sleep 2
     t1_check "$t" || { say "  ✗ T1 доступность"; diag "$t" t1; echo "$t=fail:t1" >>"$STATE/results"; bad+=" $t"; continue; }; say "  ✓ T1"
     t2_check "$t" || { say "  ✗ T2 рукопожатие"; diag "$t" t2; echo "$t=fail:t2" >>"$STATE/results"; bad+=" $t"; continue; }; say "  ✓ T2"
-    res=$(t3_check "$t") || { say "  ✗ T3 передача ≥200 КБ"; diag "$t" t3 "$res"; echo "$t=fail:t3" >>"$STATE/results"; bad+=" $t"; continue; }; say "  ✓ T3"
+    res=$(t3_check "$t") || {
+      say "  ! T3: повторная проверка после прогрева обратного канала"
+      sleep 6
+      res=$(t3_check "$t") || { say "  ✗ T3 передача ≥200 КБ"; diag "$t" t3 "$res"; echo "$t=fail:t3" >>"$STATE/results"; bad+=" $t"; continue; }
+    }; say "  ✓ T3"
     echo "$t=ok" >>"$STATE/results"; tmpu+=("$t"); ok_n=$((ok_n + 1))
   done
   tr_stop_all
@@ -1585,7 +1655,11 @@ try_transport() {
   local t=$1
   fn tr_start "$t" || return 1
   fn t2_check "$t" || return 1
-  fn t3_check "$t" >/dev/null || return 1
+  if ! fn t3_check "$t" >/dev/null; then
+    # Short reverse-bridge warmup often affects only the first 200 KB probe.
+    sleep 5
+    fn t3_check "$t" >/dev/null || return 1
+  fi
   fn func_ok "$t" || return 1
   return 0
 }
@@ -2279,6 +2353,12 @@ cmd_migrate() {
   tr_has hy2-wg && ! [[ -x $HY2_BIN ]] && run "Hysteria2" hy2_install "$(cf HY2_VER "$HY2_PINNED")"
   run "Хэши релизов для VPS-2" pin_release || warn "Хэши для VPS-2 не получены (rp link/rp block повторят попытку)"
   vps1_apply || die "Конфигурация не применилась (изменения откатены)"
+  if tr_has reality-xhttp || tr_has reality-xhttp2; then
+    systemctl enable --now rp-route-sync.timer >/dev/null 2>&1 || warn "Не удалось запустить фоновую синхронизацию маршрута"
+    # A previous manual pin on VPS-2 must be discovered after upgrading VPS-1.
+    # No fail-open fallback if the control link is transiently unavailable.
+    route_sync_locked >/dev/null 2>&1 || warn "Текущий маршрут пока не подтверждён; позже выполните rp tunnel sync"
+  fi
   ok "VPS-1 переведён на $SELF_VERSION"
   note "Дальше: rp test. rp push нужен только если VPS-2 требует обновления конфигурации"
 }
@@ -2363,6 +2443,9 @@ vps1_install() {
   fw_trust_if wg0; fw_trust_if wg-exit; selinux_fix
   systemctl enable rp-net rp-xray wg-quick@wg0 >/dev/null 2>&1
   run "Применение конфигурации" vps1_apply || die "Конфигурация не применилась (изменения откатены)"
+  if tr_has reality-xhttp || tr_has reality-xhttp2; then
+    systemctl enable --now rp-route-sync.timer >/dev/null 2>&1 || warn "Не удалось включить синхронизацию маршрута"
+  fi
 
   step "Готово"
   banner "VPS-1 готов" "$PUBLIC_IP"
@@ -2557,6 +2640,77 @@ cmd_link() { # rp link [порт]
   return 1
 }
 
+# ── Согласование маршрута Xray с выбранным транспортом VPS-2 ────────────
+# Xray's leastPing has its OWN opinion of the best transport. Without a live
+# override it can keep sending SOCKS, DNS and wg0 flows to the WRONG bridge.
+route_target_for() {
+  case $1 in
+    hy2-wg|hy2o-wg) echo to-exit ;;
+    reality-xhttp) echo r-xhttp ;;
+    reality-xhttp2) echo r-xhttp2 ;;
+    *) return 1 ;;
+  esac
+}
+route_api_override() {
+  local target=$1
+  [[ $target == to-exit || $target == r-xhttp || $target == r-xhttp2 ]] || return 2
+  "$XRAY_BIN" api bo --server=127.0.0.1:10085 -b exit "$target" >/dev/null 2>&1
+}
+route_pin() {
+  local target=$1 tmp old
+  [[ $target == to-exit || $target == r-xhttp || $target == r-xhttp2 ]] || return 2
+  old=$(cat "$STATE/route-target" 2>/dev/null || true)
+  if ! { tr_has reality-xhttp || tr_has reality-xhttp2; }; then
+    # Hysteria2-only Xray uses a direct to-exit outbound without any balancer.
+    [[ $target == to-exit ]] || return 1
+    rm -f "$STATE/route-target"
+    return 0
+  fi
+  # Re-issue even for the same target: Xray might have been restarted externally.
+  if ! route_api_override "$target"; then
+    err "Xray отказался фиксировать маршрут $target (API 127.0.0.1:10085); предыдущий маршрут сохранён"
+    return 1
+  fi
+  tmp=$(mktemp "$STATE/.route-target.XXXXXXXX") || return 1
+  if ! printf '%s\n' "$target" >"$tmp" || ! chmod 644 "$tmp" || ! mv -f "$tmp" "$STATE/route-target"; then
+    rm -f "$tmp"
+    [[ -z $old ]] || route_api_override "$old" || true
+    err "Не удалось сохранить подтверждённый маршрут $target"
+    return 1
+  fi
+  return 0
+}
+route_sync() {
+  local snapshot mode act target old
+  [[ $(cf ROLE) == vps1 ]] || return 1
+  # Route polling must NOT interfere with rp push/migrate/manual changes.
+  exec 7>/run/rp.lock
+  flock -n 7 || return 0
+  snapshot=$(vps2_read '/usr/local/bin/rp mode status' 2>/dev/null) || return 0
+  mode=$(sed -n 's/^mode=//p' <<<"$snapshot" | head -1)
+  act=$(sed -n 's/^active=//p' <<<"$snapshot" | head -1)
+  case $mode in auto|manual:reality-xhttp|manual:reality-xhttp2|manual:hy2-wg|manual:hy2o-wg) : ;; *) return 0 ;; esac
+  if [[ $mode == manual:* && $act != "${mode#manual:}" ]]; then
+    # Do not pin a different transport when manual fail-closed is requested.
+    warn "VPS-2 сообщает ручной режим $mode, но active=$act; маршрут не меняю"
+    return 0
+  fi
+  target=$(route_target_for "$act") || return 0
+  old=$(cat "$STATE/route-target" 2>/dev/null || true)
+  [[ $old == "$target" ]] && return 0
+  route_pin "$target" && note "Синхронизирован маршрут VPS-1: $act → $target"
+}
+# Same sync while the interactive command already holds rp.lock.
+route_sync_locked() {
+  local snapshot mode act target
+  snapshot=$(vps2_read '/usr/local/bin/rp mode status') || return 1
+  mode=$(sed -n 's/^mode=//p' <<<"$snapshot" | head -1)
+  act=$(sed -n 's/^active=//p' <<<"$snapshot" | head -1)
+  [[ $mode == auto || $mode == manual:"$act" ]] || return 1
+  target=$(route_target_for "$act") || return 1
+  route_pin "$target"
+}
+
 # ── Доступ к VPS-2 ───────────────────────────────────────────────────────
 hy2_live() { wg show wg-exit latest-handshakes 2>/dev/null | awk '$2>0 && systime()-$2<180 {f=1} END{exit !f}'; }
 door_port() { py_door="$1"; local it; IFS=';' read -ra _d <<<"$(cf DOORS "ssh=2222=127.0.0.1:22")"; for it in "${_d[@]}"; do [[ ${it%%=*} == "$py_door" ]] && { it=${it#*=}; echo "${it%%=*}"; return 0; }; done; return 1; }
@@ -2583,7 +2737,7 @@ ssh_args_for() { # ssh_args_for xhttp|hy2 — аргументы для конк
 }
 ssh_args() { # confirm the currently active transport before opening the management path
   local active method
-  active=$(vps2_read 'cat /var/lib/rp/active' 2>/dev/null | tr -d '\r\n' || true)
+  active=$(cat "$STATE/vps2-active-cache" 2>/dev/null || true)
   method=$(control_method "$active" 2>/dev/null || true)
   if [[ -n $method ]] && ssh_method_ready "$method"; then
     ssh_args_for "$method"; return 0
@@ -2600,13 +2754,35 @@ cmd_ssh() {
   exec ssh "${a[@]}" "$@"
 }
 vps2_run() { local -a a=(); mapfile -t a < <(ssh_args); [[ ${a[-1]:-} == root@* ]] || return 1; ssh -o BatchMode=yes "${a[@]}" "$@"; }
-# Read-only commands may be safely retried after watchdog switches the reverse tunnel.
+# Prefer the last CONFIRMED VPS-2 transport, not a stale WG handshake.
+# Fall back to the alternate path on a switch without printing transient SSH errors.
+control_paths() {
+  local cached method
+  cached=$(cat "$STATE/vps2-active-cache" 2>/dev/null || true)
+  case $cached in
+    hy2-wg|hy2o-wg) printf '%s\n' hy2 xhttp ;;
+    reality-xhttp|reality-xhttp2) printf '%s\n' xhttp hy2 ;;
+    *) printf '%s\n' xhttp hy2 ;;
+  esac
+}
+cache_vps2_state() {
+  local data=$1 active mode
+  active=$(sed -n 's/^active=//p' <<<"$data" | head -1)
+  mode=$(sed -n 's/^mode=//p' <<<"$data" | head -1)
+  case "$active" in
+    hy2-wg|hy2o-wg|reality-xhttp|reality-xhttp2)
+      printf '%s\n' "$active" >"$STATE/vps2-active-cache.new" &&
+        mv -f "$STATE/vps2-active-cache.new" "$STATE/vps2-active-cache" ;;
+  esac
+}
+# Read-only commands may be retried after a watchdog switch.
 # Never use this function for installation, confirmation, or other mutating commands.
 vps2_read() {
-  local method attempt rc output
+  local method attempt rc output order max_attempts=${RP_READ_RETRIES:-3}
   local -a a=()
-  for attempt in 1 2 3; do
-    for method in xhttp hy2; do
+  [[ $max_attempts =~ ^[1-3]$ ]] || max_attempts=3
+  for ((attempt=1; attempt<=max_attempts; attempt++)); do
+    while IFS= read -r method; do
       if [[ $method == hy2 ]]; then
         hy2_live || continue
       else
@@ -2618,12 +2794,13 @@ vps2_read() {
       ((${#a[@]})) || continue
       # Buffer each attempt. A dropped SSH stream must not leak partial output
       # into a later successful attempt (e.g. false IP or active-transport name).
-      if output=$(ssh -o BatchMode=yes -o ConnectionAttempts=1 "${a[@]}" "$@" </dev/null); then
+      if output=$(ssh -o BatchMode=yes -o ConnectionAttempts=1 "${a[@]}" "$@" </dev/null 2>/dev/null); then
+        [[ $* == *'mode status'* ]] && cache_vps2_state "$output"
         printf '%s\n' "$output"
         return 0
       fi
-    done
-    ((attempt < 3)) && sleep 2
+    done < <(control_paths)
+    ((attempt < max_attempts)) && sleep 2
   done
   return 1
 }
@@ -2845,10 +3022,12 @@ push_wait() {
   done
   [[ -n $rc ]] || { err "VPS-2 не вернулся на связь за 9 минут (откат на VPS-2 сработает сам)"; return 1; }
   ((rc == 0)) || { err "Установка на VPS-2 завершилась с ошибкой (код $rc); журнал: rp ssh 'cat /var/lib/rp/push.log'"; return 1; }
+  route_sync_locked >/dev/null 2>&1 || warn "VPS-2 доступен, но маршрут Xray VPS-1 пока не согласован"
   wait_exit || { err "Выход через VPS-2 не работает после обновления (откат на VPS-2 сработает сам)"; return 1; }
   touch "$STATE/linked"
   vps2_run '/usr/local/bin/rp confirm' >/dev/null 2>&1 || { warn "Подтвердите вручную на VPS-2: rp confirm"; return 0; }
   ok "VPS-2 обновлён и подтверждён"
+  route_sync_locked >/dev/null 2>&1 || warn "Маршрут VPS-1 пока не подтверждён; выполните rp tunnel sync"
 }
 cmd_push() {
   need_vps1; push_start 0 && push_wait || return 1
@@ -3049,6 +3228,11 @@ cmd_test() {
   # Query active from VPS-2; a past WG handshake is NOT a current transport indicator.
   # Three read retries tolerate switching during a watchdog's check.
   act=$(vps2_read 'cat /var/lib/rp/active' 2>/dev/null | tr -d '\r\n' || true)
+  # Test the route that VPS-2 actually selected; no service restart.
+  # This path runs under rp.lock, so use the non-locking reconciler.
+  if [[ -n $act ]] && { tr_has reality-xhttp || tr_has reality-xhttp2; }; then
+    route_sync_locked >/dev/null 2>&1 || warn "Не удалось синхронизировать Xray с VPS-2; T5/T6 могут быть переходными"
+  fi
   method=$(control_method "$act" 2>/dev/null || true)
   if [[ -n $method ]] && ssh_method_ready "$method"; then
     t_res T2 ok "активный на VPS-2: $act (SSH через $method подтверждён)"
@@ -3244,10 +3428,21 @@ cmd_status() {
   kv "Правила сети" "$(dot_state rp-net)"; card_end
   card "Туннель"
   kv "Порядок транспортов" "$(cf TRANSPORT_ORDER)"
-  local policy; policy=$(vps2_read '/usr/local/bin/rp mode status' 2>/dev/null | sed -n 's/^mode=//p' | head -1)
-  kv "Режим VPS-2" "${policy:-не удалось получить}"
-  local act; act=$(vps2_run 'cat /var/lib/rp/active' 2>/dev/null)
-  if hy2_live || [[ -n $act ]]; then kv "Живой транспорт" "${act:-hy2}"; else kv "Живой транспорт" "${C_ERR}нет${R}"; fi
+  local snapshot policy act local_target expected
+  snapshot=$(vps2_read '/usr/local/bin/rp mode status' 2>/dev/null || true)
+  policy=$(sed -n 's/^mode=//p' <<<"$snapshot" | head -1)
+  act=$(sed -n 's/^active=//p' <<<"$snapshot" | head -1)
+  kv "Режим VPS-2" "${policy:-не подтверждён (SSH недоступен)}"
+  case "$act" in
+    reality-xhttp|reality-xhttp2|hy2-wg|hy2o-wg) kv "Живой транспорт" "$act" ;;
+    *) kv "Живой транспорт" "не подтверждён (handshake не показатель)" ;;
+  esac
+  local_target=$(cat "$STATE/route-target" 2>/dev/null || true)
+  expected=$(route_target_for "$act" 2>/dev/null || true)
+  kv "Маршрут VPS-1 (сохранён)" "${local_target:-балансировщик/ещё не синхронизирован}"
+  if [[ -n $expected && -n $local_target && $expected != "$local_target" ]]; then
+    warn "Маршруты VPS-1 и VPS-2 расходятся: выполните rp tunnel sync"
+  fi
   kv "Клиентов WG" "$(client_names | wc -l)"; kv "Выход VPS-2" "$([[ -n $(cf VPS2_IPH) ]] && echo "проверен (адрес не хранится)" || echo "ещё не проверялся: rp test")"; card_end
 }
 cmd_logs() { journalctl -u rp-xray -u rp-hy2 -u rp-hy2o -u rp-net -u wg-quick@wg0 -u wg-quick@wg-exit -n "${1:-80}" --no-pager; }
@@ -3257,7 +3452,7 @@ cmd_uninstall() {
   # по одной: общий «disable --now» со списком обрывается на первой несуществующей службе (rp-hy2o нет в установках 1.0),
   # и остальные, включая rp-xray, продолжают работать
   systemctl stop rp-serve >/dev/null 2>&1   # временный unit без файла: disable для него не сработает
-  local u; for u in rp-serve rp-xray rp-hy2 rp-hy2o rp-echo rp-ru.timer rp-net wg-quick@wg0 wg-quick@wg-exit; do
+  local u; for u in rp-serve rp-xray rp-hy2 rp-hy2o rp-echo rp-ru.timer rp-route-sync.timer rp-route-sync.service rp-net wg-quick@wg0 wg-quick@wg-exit; do
     systemctl disable --now "$u" >/dev/null 2>&1 || true
   done
   fw_close "$(cf LINK_PORT 8444)/tcp"
@@ -3301,13 +3496,29 @@ cmd_tunnel() {
       [[ -n $old ]] || old=auto
       desired=""
       choose desired "Режим обратного туннеля" "$old" "${options[@]}"
-      if [[ $desired == "$old" ]]; then ok "Режим уже выбран: $desired"; return 0; fi
+      if [[ $desired == "$old" ]]; then
+        note "Режим уже выбран; проверяю согласованность маршрута"
+        if route_sync_locked; then
+          ok "Маршрут Xray согласован"
+          return 0
+        fi
+        err "Не удалось подтвердить маршрут: rp tunnel sync"
+        return 1
+      fi
       ;;
     status)
       vps2_read '/usr/local/bin/rp mode status' || { err "VPS-2 не отвечает по SSH"; return 1; }
+      note "Маршрут Xray VPS-1: $(cat "$STATE/route-target" 2>/dev/null || echo не синхронизирован)"
       return 0 ;;
+    sync)
+      if route_sync_locked; then
+        ok "Маршрут VPS-1 согласован с активным транспортом VPS-2"
+        return 0
+      fi
+      err "Состояние VPS-2 не подтверждено, маршрут VPS-1 оставлен без изменений"
+      return 1 ;;
     auto|reality-xhttp|reality-xhttp2|hy2-wg|hy2o-wg) : ;;
-    *) die "rp tunnel [status|select|auto|reality-xhttp2|reality-xhttp|hy2-wg|hy2o-wg]" ;;
+    *) die "rp tunnel [status|select|sync|auto|reality-xhttp2|reality-xhttp|hy2-wg|hy2o-wg]" ;;
   esac
   [[ $desired == auto ]] || tr_has "$desired" || { err "Транспорт $desired не включён в настройках VPS-1"; return 1; }
   if [[ $desired == auto ]]; then
@@ -3321,20 +3532,45 @@ cmd_tunnel() {
     return 1
   fi
   note "VPS-2 проверяет выбранный транспорт T2/T3; соединение SSH может кратковременно прерваться."
-  for ((attempt=1; attempt<=36; attempt++)); do
-    reply=$(vps2_read "/usr/local/bin/rp mode result $req" 2>/dev/null | tail -1 | tr -d '\r' || true)
+  local deadline=$((SECONDS + 300))
+  while ((SECONDS < deadline)); do
+    reply=$(RP_READ_RETRIES=1 vps2_read "/usr/local/bin/rp mode result $req" 2>/dev/null | tail -1 | tr -d '\r' || true)
     case $reply in
       ok)
-        ok "Режим применён. Текущий транспорт:"
-        vps2_read '/usr/local/bin/rp mode status' || true
+        local state now_mode now_active ready=0
+        state=$(vps2_read '/usr/local/bin/rp mode status' 2>/dev/null || true)
+        now_mode=$(sed -n 's/^mode=//p' <<<"$state" | head -1)
+        now_active=$(sed -n 's/^active=//p' <<<"$state" | head -1)
+        if [[ $desired == auto ]]; then
+          [[ $now_mode == auto ]] || { warn "VPS-2 ещё не подтвердил автоматический режим"; sleep 3; continue; }
+        else
+          [[ $now_mode == "manual:$desired" && $now_active == "$desired" ]] || { warn "VPS-2 ещё переключается"; sleep 3; continue; }
+        fi
+        if ! route_sync_locked; then
+          err "VPS-2 изменил режим, но Xray VPS-1 НЕ синхронизирован; повторите rp tunnel sync"
+          return 1
+        fi
+        # The outbound route is now pinned to the confirmed VPS-2 transport.
+        # Give existing TCP connections time to drain before testing a fresh one.
+        for ((ready=1; ready<=12; ready++)); do
+          wait_exit_once && break
+          sleep 3
+        done
+        if ((ready>12)); then
+          warn "Режим согласован, но сквозной выход не подтвердился. Проверьте rp test / rp diag"
+          return 1
+        fi
+        ok "Обе VPS используют один транспорт: ${now_active:-не подтверждён}. Выход проверен."
+        printf '%s\n' "$state"
         return 0 ;;
       fail)
+        route_sync_locked >/dev/null 2>&1 || true
         err "VPS-2 не смог проверить $desired; прежний режим сохранён, предпринята попытка восстановить прежний канал"
         return 1 ;;
     esac
     sleep 3
   done
-  warn "Подтверждение не получено. Состояние могло измениться: rp tunnel status / консоль VPS-2"
+  warn "За 300 с не получено подтверждение операции. Не повторяйте выбор вслепую: rp tunnel status; rp tunnel sync"
   return 1
 }
 
@@ -3458,7 +3694,7 @@ rp $SELF_VERSION — цепочка «клиенты WG → VPS-1 → тунне
   rp test [--long] [--restart]   безопасные T1–T7 (T8 только с --restart)
   rp diag [--fix]          диагностика выхода по участкам; --fix исправляет найденное
   rp transports            транспорты и результаты их проверки на VPS-2
-  rp tunnel [status|select|auto|reality-xhttp2|reality-xhttp|hy2-wg|hy2o-wg]
+  rp tunnel [status|select|sync|auto|reality-xhttp2|reality-xhttp|hy2-wg|hy2o-wg]
                            автоматический режим или фиксация одного транспорта на VPS-2
   rp prune                 ручное исключение транспортов (по умолчанию НЕТ; сторож пробует все)
   rp dns [show|set СЕРВЕРЫ|test]   DoH-серверы через туннель (quad9 cloudflare google adguard)
@@ -3518,6 +3754,7 @@ main() {
     diag) need_root; lock; cmd_diag "$@" ;;
     transports) need_root; cmd_transports ;;
     tunnel) need_root; [[ ${1:-status} == status ]] || lock; cmd_tunnel "$@" ;;
+    _route_sync) need_root; need_vps1; route_sync ;;
     prune) need_root; lock; cmd_prune ;;
     dns) need_root; lock; cmd_dns "$@" ;;
     doctor) need_root; cmd_doctor ;;
@@ -3870,6 +4107,11 @@ def xray_server(cfg):
            "dns": {"tag": "dns-in", "servers": dns_servers, "queryStrategy": "UseIPv4"},
            "inbounds": inb, "outbounds": out, "routing": routing}
     if use_bal:
+        # gRPC control plane: local loopback ONLY; no external firewall port.
+        # VPS-1 mirrors the actual active transport selected by VPS-2, avoiding
+        # an independent leastPing choice during a manual/automatic failover.
+        res["api"] = {"tag": "rp-route-api", "listen": "127.0.0.1:10085",
+                      "services": ["RoutingService"]}
         bals = [{"tag": "exit", "selector": sel, "strategy": {"type": "leastPing"}, "fallbackTag": "block"}]
         if door_tags:
             bals.append({"tag": "rev", "selector": rev_tags, "strategy": {"type": "leastPing"}, "fallbackTag": "block"})
