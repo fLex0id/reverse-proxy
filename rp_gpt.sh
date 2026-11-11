@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # rp — цепочка «клиенты WG → VPS-1 (РФ) → туннель, устойчивый к ТСПУ → VPS-2 (выход)».
-# Локальная сборка 1.1.4-hardened-priority: приоритет XHTTP, гистерезис и fail-closed.
+# Сборка 1.1.5-save-ascii: сохраняемое обновление, ASCII-консоль, XHTTP приоритет и fail-closed.
 # Один файл: роль VPS-1 (сервер, меню, генератор) или VPS-2 (блок на чистом bash, сторож).
 # Образец по структуре и стилю — tt.sh; отступления помечены «ОТСТУПЛЕНИЕ» с причиной.
 # Rocky Linux 9/10. Конфигурация: /etc/rp/rp.conf (единственный источник правды).
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.1.4-hardened-priority"
+SELF_VERSION="1.1.5-save-ascii"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -28,13 +28,132 @@ HY2_PINNED="2.8.2"
 RU_REPO="runetfreedom/russia-v2ray-rules-dat"
 SOCKS_PORT=1080
 # Адрес для установки команды rp и обновления самого скрипта (можно переопределить переменной RP_URL)
-RP_URL="${RP_URL:-https://raw.githubusercontent.com/fLex0id/reverse-proxy/main/rp.sh}"
+RP_URL="${RP_URL:-https://raw.githubusercontent.com/fLex0id/reverse-proxy/main/rp_gpt.sh}"
 
 declare -gA CFG=()
 ASSUME_YES="${ASSUME_YES:-0}"
 
 # ── UI ───────────────────────────────────────────────────────────────────
-if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+# VNC/SPICE text consoles commonly expose TERM=linux and lack Unicode glyphs.
+# RP_ASCII=1 forces the safe text UI; RP_ASCII=0 forces Unicode.
+# The command-line switch --ascii is accepted in main() below.
+RP_ASCII="${RP_ASCII:-auto}"
+case "$RP_ASCII" in
+  1|true|yes) ASCII_MODE=1 ;;
+  0|false|no) ASCII_MODE=0 ;;
+  auto|*) case "${TERM:-dumb}" in
+    linux|dumb|vt100|vt102|cons25|ansi) ASCII_MODE=1 ;;
+    *) if [[ -t 1 && -z "${SSH_TTY:-}${SSH_CONNECTION:-}" ]]; then ASCII_MODE=1; else ASCII_MODE=0; fi ;;
+  esac ;;
+esac
+rp_transliterate() {
+  LC_ALL=C sed \
+    -e 's/Ё/Yo/g' \
+    -e 's/Ж/Zh/g' \
+    -e 's/Х/Kh/g' \
+    -e 's/Ц/Ts/g' \
+    -e 's/Ч/Ch/g' \
+    -e 's/Ш/Sh/g' \
+    -e 's/Щ/Shch/g' \
+    -e 's/Ю/Yu/g' \
+    -e 's/Я/Ya/g' \
+    -e 's/А/A/g' \
+    -e 's/Б/B/g' \
+    -e 's/В/V/g' \
+    -e 's/Г/G/g' \
+    -e 's/Д/D/g' \
+    -e 's/Е/E/g' \
+    -e 's/З/Z/g' \
+    -e 's/И/I/g' \
+    -e 's/Й/Y/g' \
+    -e 's/К/K/g' \
+    -e 's/Л/L/g' \
+    -e 's/М/M/g' \
+    -e 's/Н/N/g' \
+    -e 's/О/O/g' \
+    -e 's/П/P/g' \
+    -e 's/Р/R/g' \
+    -e 's/С/S/g' \
+    -e 's/Т/T/g' \
+    -e 's/У/U/g' \
+    -e 's/Ф/F/g' \
+    -e 's/Ъ//g' \
+    -e 's/Ы/Y/g' \
+    -e 's/Ь//g' \
+    -e 's/Э/E/g' \
+    -e 's/ё/yo/g' \
+    -e 's/ж/zh/g' \
+    -e 's/х/kh/g' \
+    -e 's/ц/ts/g' \
+    -e 's/ч/ch/g' \
+    -e 's/ш/sh/g' \
+    -e 's/щ/shch/g' \
+    -e 's/ю/yu/g' \
+    -e 's/я/ya/g' \
+    -e 's/а/a/g' \
+    -e 's/б/b/g' \
+    -e 's/в/v/g' \
+    -e 's/г/g/g' \
+    -e 's/д/d/g' \
+    -e 's/е/e/g' \
+    -e 's/з/z/g' \
+    -e 's/и/i/g' \
+    -e 's/й/y/g' \
+    -e 's/к/k/g' \
+    -e 's/л/l/g' \
+    -e 's/м/m/g' \
+    -e 's/н/n/g' \
+    -e 's/о/o/g' \
+    -e 's/п/p/g' \
+    -e 's/р/r/g' \
+    -e 's/с/s/g' \
+    -e 's/т/t/g' \
+    -e 's/у/u/g' \
+    -e 's/ф/f/g' \
+    -e 's/ъ//g' \
+    -e 's/ы/y/g' \
+    -e 's/ь//g' \
+    -e 's/э/e/g' \
+    -e 's/✓/OK/g' \
+    -e 's/✗/ERROR/g' \
+    -e 's/●/*/g' \
+    -e 's/◆/==/g' \
+    -e 's/›/>/g' \
+    -e 's/—/-/g' \
+    -e 's/–/-/g' \
+    -e 's/→/->/g' \
+    -e 's/≥/>=/g' \
+    -e 's/≤/<=/g' \
+    -e 's/┌/+/g' \
+    -e 's/└/+/g' \
+    -e 's/─/-/g' \
+    -e 's/│/|/g' \
+    -e 's/·/-/g' \
+    -e 's/⠋/-/g' \
+    -e 's/⠙/-/g' \
+    -e 's/⠹/-/g' \
+    -e 's/⠸/-/g' \
+    -e 's/⠼/-/g' \
+    -e 's/⠴/-/g' \
+    -e 's/⠦/-/g' \
+    -e 's/⠧/-/g' \
+    -e 's/⠇/-/g' \
+    -e 's/⠏/-/g'
+}
+# Console text conversion is deliberately presentation-only, never used for
+# configuration files, command arguments, secrets or machine-readable output.
+ui_printf() {
+  if (( ASCII_MODE )); then
+    if command -v iconv >/dev/null 2>&1; then
+      printf "$@" | rp_transliterate | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null
+    else
+      printf "$@" | rp_transliterate
+    fi
+  else
+    printf "$@"
+  fi
+}
+if [[ -t 1 && -z "${NO_COLOR:-}" && $ASCII_MODE == 0 ]]; then
   c() { printf '\033[38;5;%sm' "$1"; }; R=$'\033[0m'; B=$'\033[1m'
   C_ACC=$(c 39); C_OK=$(c 42); C_WARN=$(c 214); C_ERR=$(c 203); C_DIM=$(c 245)
 else
@@ -42,37 +161,44 @@ else
 fi
 export LC_ALL=C.UTF-8 2>/dev/null || true
 
-ok()   { printf '  %s✓%s %s\n' "$C_OK" "$R" "$*"; }
-note() { printf '  %s%s%s\n' "$C_DIM" "$*" "$R"; }
-warn() { printf '  %s!%s %s\n' "$C_WARN" "$R" "$*" >&2; }
-err()  { printf '  %s✗%s %s\n' "$C_ERR" "$R" "$*" >&2; }
+ok()   { if (( ASCII_MODE )); then ui_printf '  [OK] %s\n' "$*"; else printf '  %s✓%s %s\n' "$C_OK" "$R" "$*"; fi; }
+note() { ui_printf '  %s%s%s\n' "$C_DIM" "$*" "$R"; }
+warn() { if (( ASCII_MODE )); then ui_printf '  [!] %s\n' "$*" >&2; else printf '  %s!%s %s\n' "$C_WARN" "$R" "$*" >&2; fi; }
+err()  { if (( ASCII_MODE )); then ui_printf '  [ERROR] %s\n' "$*" >&2; else printf '  %s✗%s %s\n' "$C_ERR" "$R" "$*" >&2; fi; }
 die()  { err "$*"; exit 1; }
-rule() { printf '%s%s%s\n' "$C_DIM" "────────────────────────────────────────────────────────" "$R"; }
-banner() { printf '\n%s%s◆ %s%s' "$B" "$C_ACC" "$1" "$R"; [[ -n "${2:-}" ]] && printf '  %s%s%s' "$C_DIM" "$2" "$R"; printf '\n'; rule; }
-section() { printf '\n%s%s%s\n' "$B" "$1" "$R"; shift; local l; for l in "$@"; do note "$l"; done; }
+rule() { if (( ASCII_MODE )); then printf '%s\n' '--------------------------------------------------------'; else printf '%s%s%s\n' "$C_DIM" '────────────────────────────────────────────────────────' "$R"; fi; }
+banner() { if (( ASCII_MODE )); then ui_printf '\n== %s ==' "$1"; [[ -n "${2:-}" ]] && ui_printf '  %s' "$2"; printf '\n'; else printf '\n%s%s◆ %s%s' "$B" "$C_ACC" "$1" "$R"; [[ -n "${2:-}" ]] && printf '  %s%s%s' "$C_DIM" "$2" "$R"; printf '\n'; fi; rule; }
+section() { ui_printf '\n%s%s%s\n' "$B" "$1" "$R"; shift; local l; for l in "$@"; do note "$l"; done; }
 cls() { [[ -t 1 ]] && printf '\033[H\033[2J'; return 0; }
-pause() { [[ -t 0 ]] && { printf '\n%s  Любая клавиша — назад%s' "$C_DIM" "$R"; read -rsn1 _ </dev/tty || true; }; return 0; }
+pause() { [[ -t 0 ]] && { ui_printf '\n%s  Любая клавиша - назад%s' "$C_DIM" "$R"; read -rsn1 _ </dev/tty || true; }; return 0; }
 STEP_N=0; STEP_I=0
 steps() { STEP_N=$1; STEP_I=0; }
-step() { STEP_I=$((STEP_I + 1)); printf '\n%s%s%d/%d%s  %s\n' "$B" "$C_ACC" "$STEP_I" "$STEP_N" "$R" "$*"; }
-dot_state() { if systemctl is-active --quiet "$1" 2>/dev/null; then printf '%s●%s работает' "$C_OK" "$R"; else printf '%s●%s остановлена' "$C_ERR" "$R"; fi; }
+step() { STEP_I=$((STEP_I + 1)); ui_printf '\n%s%s%d/%d%s  %s\n' "$B" "$C_ACC" "$STEP_I" "$STEP_N" "$R" "$*"; }
+dot_state() { if systemctl is-active --quiet "$1" 2>/dev/null; then if (( ASCII_MODE )); then printf '[UP] running'; else printf '%s●%s работает' "$C_OK" "$R"; fi; else if (( ASCII_MODE )); then printf '[DOWN] stopped'; else printf '%s●%s остановлена' "$C_ERR" "$R"; fi; fi; }
 
 KV_W=18
-card() { printf '  %s┌─ %s%s\n' "$C_DIM" "$1" "$R"; }
-kv() { printf '  %s│%s %-*s %s\n' "$C_DIM" "$R" "$KV_W" "$1" "$2"; }
-card_line() { printf '  %s│%s %s\n' "$C_DIM" "$R" "$*"; }
-card_end() { printf '  %s└─%s\n' "$C_DIM" "$R"; }
+card() { if (( ASCII_MODE )); then ui_printf '  +-- %s\n' "$1"; else printf '  %s┌─ %s%s\n' "$C_DIM" "$1" "$R"; fi; }
+kv() { if (( ASCII_MODE )); then ui_printf '  | %-*s %s\n' "$KV_W" "$1" "$2"; else printf '  %s│%s %-*s %s\n' "$C_DIM" "$R" "$KV_W" "$1" "$2"; fi; }
+card_line() { if (( ASCII_MODE )); then ui_printf '  | %s\n' "$*"; else printf '  %s│%s %s\n' "$C_DIM" "$R" "$*"; fi; }
+card_end() { if (( ASCII_MODE )); then printf '  +--\n'; else printf '  %s└─%s\n' "$C_DIM" "$R"; fi; }
 
 # run «Что делаем» команда… — вывод в журнал, на экране спиннер и итог.
 run() {
   local what=$1; shift
-  local t0=$SECONDS rc pid i=0 fr=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) off
+  local t0=$SECONDS rc pid i=0 fr=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) aspin=(\ \| / -) off
   mkdir -p "$(dirname "$LOG")"; printf '\n### %s: %s\n' "$(date '+%F %T')" "$what" >>"$LOG"
   off=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
   "$@" >>"$LOG" 2>&1 &
   pid=$!
   if [[ -t 1 ]]; then
-    while kill -0 "$pid" 2>/dev/null; do printf '\r  %s%s%s %s' "$C_ACC" "${fr[i % 10]}" "$R" "$what"; i=$((i + 1)); sleep 0.1; done
+    while kill -0 "$pid" 2>/dev/null; do
+      if (( ASCII_MODE )); then
+        printf '\r  [%s] %s' "${aspin[i % 4]}" "$(ui_printf '%s' "$what")"
+      else
+        printf '\r  %s%s%s %s' "$C_ACC" "${fr[i % 10]}" "$R" "$what"
+      fi
+      i=$((i + 1)); sleep 0.1
+    done
     printf '\r\033[K'
   fi
   wait "$pid"; rc=$?
@@ -93,7 +219,7 @@ ask() {
     [[ -n "$_ud" ]] || die "Нужно значение «$_uq» (нет терминала)"; printf -v "$_un" '%s' "$_ud"; return 0
   fi
   while :; do
-    printf '  %s%s%s%s %s›%s ' "$B" "$_uq" "$R" "${_ud:+ [$_ud]}" "$C_ACC" "$R"
+    ui_printf '  %s%s%s%s %s>%s ' "$B" "$_uq" "$R" "${_ud:+ [$_ud]}" "$C_ACC" "$R"
     read -r _uv </dev/tty || die "Ввод прерван"
     _uv=${_uv:-$_ud}
     if [[ -n "$_uv" ]] && { [[ -z "$_ure" || "$_uv" =~ $_ure ]]; } && { [[ -z "$_uf" ]] || "$_uf" "$_uv"; }; then printf -v "$_un" '%s' "$_uv"; return 0; fi
@@ -105,7 +231,7 @@ yesno() {
   ((ASSUME_YES)) && return 0
   [[ -t 0 ]] || { [[ $d == y ]]; return; }
   while :; do
-    printf '  %s%s%s [%s] %s›%s ' "$B" "$q" "$R" "$([[ $d == y ]] && echo Y/n || echo y/N)" "$C_ACC" "$R"
+    ui_printf '  %s%s%s [%s] %s>%s ' "$B" "$q" "$R" "$([[ $d == y ]] && echo Y/n || echo y/N)" "$C_ACC" "$R"
     read -r a </dev/tty || return 1; a=${a:-$d}
     case ${a,,} in y|yes|д|да) return 0 ;; n|no|н|нет) return 1 ;; esac
   done
@@ -117,13 +243,13 @@ choose() {
   [[ -n "${!_cn:-}" ]] && for it in "${items[@]}"; do [[ ${it%%|*} == "${!_cn}" ]] && return 0; done
   for it in "${items[@]}"; do keys+=("${it%%|*}"); done
   [[ -t 0 ]] || { printf -v "$_cn" '%s' "$_cd"; return 0; }
-  printf '\n  %s%s%s\n' "$B" "$_ct" "$R"
+  ui_printf '\n  %s%s%s\n' "$B" "$_ct" "$R"
   for it in "${items[@]}"; do
     i=$((i + 1)); k=${it%%|*}; e=${it#*|}; n=${e%%|*}; e=${e#"$n"}; e=${e#|}
-    printf '   %s%d%s  %s%s%s%s\n' "$C_ACC" "$i" "$R" "$B" "$n" "$R" "${e:+  ${C_DIM}$e${R}}"
+    ui_printf '   %s%d%s  %s%s%s%s\n' "$C_ACC" "$i" "$R" "$B" "$n" "$R" "${e:+  ${C_DIM}$e${R}}"
   done
   while :; do
-    printf '  Номер %s[%s]%s %s›%s ' "$C_DIM" "$_cd" "$R" "$C_ACC" "$R"; read -r sel </dev/tty || die "Ввод прерван"
+    ui_printf '  Номер %s[%s]%s %s>%s ' "$C_DIM" "$_cd" "$R" "$C_ACC" "$R"; read -r sel </dev/tty || die "Ввод прерван"
     [[ -z "$sel" ]] && { printf -v "$_cn" '%s' "$_cd"; return 0; }
     [[ $sel =~ ^[0-9]+$ ]] && ((sel >= 1 && sel <= ${#keys[@]})) && { printf -v "$_cn" '%s' "${keys[sel-1]}"; return 0; }
     warn "Введите число от 1 до ${#keys[@]}"
@@ -131,16 +257,16 @@ choose() {
 }
 # Меню
 MI_W=34
-mhead() { printf '\n  %s%s%s\n' "$C_DIM" "$1" "$R"; }
-mi() { printf '   %s%2s%s  %-*s %s%s%s\n' "$C_ACC" "$1" "$R" "$MI_W" "$2" "$C_DIM" "${3:-}" "$R"; }
-mpick() { printf '\n  %s›%s ' "$C_ACC" "$R"; read -r "$1" </dev/tty || exit 0; }
+mhead() { ui_printf '\n  %s%s%s\n' "$C_DIM" "$1" "$R"; }
+mi() { ui_printf '   %s%2s%s  %-*s %s%s%s\n' "$C_ACC" "$1" "$R" "$MI_W" "$2" "$C_DIM" "${3:-}" "$R"; }
+mpick() { ui_printf '\n  %s>%s ' "$C_ACC" "$R"; read -r "$1" </dev/tty || exit 0; }
 pick_from() { # pick_from ПЕРЕМЕННАЯ «Заголовок» элементы… (номер или имя; один элемент — Enter)
   local _pn=$1 _pt=$2; shift 2; local -a a=("$@"); local s i
   ((${#a[@]})) || return 1
   if ((${#a[@]} == 1)); then printf -v "$_pn" '%s' "${a[0]}"; return 0; fi
-  printf '\n  %s%s%s\n' "$B" "$_pt" "$R"; for i in "${!a[@]}"; do printf '   %s%d%s  %s\n' "$C_ACC" $((i + 1)) "$R" "${a[i]}"; done
+  ui_printf '\n  %s%s%s\n' "$B" "$_pt" "$R"; for i in "${!a[@]}"; do ui_printf '   %s%d%s  %s\n' "$C_ACC" $((i + 1)) "$R" "${a[i]}"; done
   while :; do
-    printf '  Номер или имя %s›%s ' "$C_ACC" "$R"; read -r s </dev/tty || return 1
+    ui_printf '  Номер или имя %s>%s ' "$C_ACC" "$R"; read -r s </dev/tty || return 1
     [[ $s =~ ^[0-9]+$ ]] && ((s >= 1 && s <= ${#a[@]})) && { printf -v "$_pn" '%s' "${a[s-1]}"; return 0; }
     for i in "${!a[@]}"; do [[ ${a[i]} == "$s" ]] && { printf -v "$_pn" '%s' "$s"; return 0; }; done
     warn "Нет такого элемента"
@@ -872,7 +998,119 @@ ETC=/etc/rp; STATE=/var/lib/rp
 mkdir -p "$STATE"
 VPS1_WG=10.77.0.1
 N=204800
-say() { printf '%s\n' "$*"; }
+rp_plain_console() {
+  case "${RP_ASCII:-auto}" in
+    1|yes|true) return 0 ;;
+    0|no|false) return 1 ;;
+  esac
+  case "${TERM:-}" in linux|dumb|vt100|vt102|cons25|ansi) return 0 ;; esac
+  [[ -t 1 && -z "${SSH_TTY:-}${SSH_CONNECTION:-}" ]]
+}
+rp_transliterate() {
+  LC_ALL=C sed \
+    -e 's/Ё/Yo/g' \
+    -e 's/Ж/Zh/g' \
+    -e 's/Х/Kh/g' \
+    -e 's/Ц/Ts/g' \
+    -e 's/Ч/Ch/g' \
+    -e 's/Ш/Sh/g' \
+    -e 's/Щ/Shch/g' \
+    -e 's/Ю/Yu/g' \
+    -e 's/Я/Ya/g' \
+    -e 's/А/A/g' \
+    -e 's/Б/B/g' \
+    -e 's/В/V/g' \
+    -e 's/Г/G/g' \
+    -e 's/Д/D/g' \
+    -e 's/Е/E/g' \
+    -e 's/З/Z/g' \
+    -e 's/И/I/g' \
+    -e 's/Й/Y/g' \
+    -e 's/К/K/g' \
+    -e 's/Л/L/g' \
+    -e 's/М/M/g' \
+    -e 's/Н/N/g' \
+    -e 's/О/O/g' \
+    -e 's/П/P/g' \
+    -e 's/Р/R/g' \
+    -e 's/С/S/g' \
+    -e 's/Т/T/g' \
+    -e 's/У/U/g' \
+    -e 's/Ф/F/g' \
+    -e 's/Ъ//g' \
+    -e 's/Ы/Y/g' \
+    -e 's/Ь//g' \
+    -e 's/Э/E/g' \
+    -e 's/ё/yo/g' \
+    -e 's/ж/zh/g' \
+    -e 's/х/kh/g' \
+    -e 's/ц/ts/g' \
+    -e 's/ч/ch/g' \
+    -e 's/ш/sh/g' \
+    -e 's/щ/shch/g' \
+    -e 's/ю/yu/g' \
+    -e 's/я/ya/g' \
+    -e 's/а/a/g' \
+    -e 's/б/b/g' \
+    -e 's/в/v/g' \
+    -e 's/г/g/g' \
+    -e 's/д/d/g' \
+    -e 's/е/e/g' \
+    -e 's/з/z/g' \
+    -e 's/и/i/g' \
+    -e 's/й/y/g' \
+    -e 's/к/k/g' \
+    -e 's/л/l/g' \
+    -e 's/м/m/g' \
+    -e 's/н/n/g' \
+    -e 's/о/o/g' \
+    -e 's/п/p/g' \
+    -e 's/р/r/g' \
+    -e 's/с/s/g' \
+    -e 's/т/t/g' \
+    -e 's/у/u/g' \
+    -e 's/ф/f/g' \
+    -e 's/ъ//g' \
+    -e 's/ы/y/g' \
+    -e 's/ь//g' \
+    -e 's/э/e/g' \
+    -e 's/✓/OK/g' \
+    -e 's/✗/ERROR/g' \
+    -e 's/●/*/g' \
+    -e 's/◆/==/g' \
+    -e 's/›/>/g' \
+    -e 's/—/-/g' \
+    -e 's/–/-/g' \
+    -e 's/→/->/g' \
+    -e 's/≥/>=/g' \
+    -e 's/≤/<=/g' \
+    -e 's/┌/+/g' \
+    -e 's/└/+/g' \
+    -e 's/─/-/g' \
+    -e 's/│/|/g' \
+    -e 's/·/-/g' \
+    -e 's/⠋/-/g' \
+    -e 's/⠙/-/g' \
+    -e 's/⠹/-/g' \
+    -e 's/⠸/-/g' \
+    -e 's/⠼/-/g' \
+    -e 's/⠴/-/g' \
+    -e 's/⠦/-/g' \
+    -e 's/⠧/-/g' \
+    -e 's/⠇/-/g' \
+    -e 's/⠏/-/g'
+}
+say() {
+  if rp_plain_console; then
+    if command -v iconv >/dev/null 2>&1; then
+      printf '%s\n' "$*" | rp_transliterate | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null
+    else
+      printf '%s\n' "$*" | rp_transliterate
+    fi
+  else
+    printf '%s\n' "$*"
+  fi
+}
 tr_all() { echo "$TRANSPORT_ORDER"; }
 # usable/results — последний снимок диагностики, а не постоянный запрет транспорта.
 # Иначе временная потеря UDP исключает HY2 навсегда до ручного rp select.
@@ -1117,11 +1355,19 @@ cmd_rollback() {
 }
 menu() {
   while :; do
-    printf '\n◆ rp · VPS-2   транспорт: %s\n  1 Статус\n  2 Перезапуск\n  3 Журнал\n  4 Проверить все транспорты заново\n  5 Починить NAT и пересылку\n  6 Удалить\n  0 Выход\n› ' "$(active)"
+    if rp_plain_console; then
+      say ""
+      say "== rp VPS-2 | transport: $(active) =="
+      say "1 Status | 2 Restart | 3 Logs | 4 Retest | 5 Repair NAT | 6 Remove | 0 Exit"
+      printf '> '
+    else
+      printf '\n◆ rp · VPS-2   транспорт: %s\n  1 Статус\n  2 Перезапуск\n  3 Журнал\n  4 Проверить все транспорты заново\n  5 Починить NAT и пересылку\n  6 Удалить\n  0 Выход\n› ' "$(active)"
+    fi
     read -r c || exit 0
     case $c in 1) cmd_status ;; 2) cmd_restart ;; 3) cmd_logs 60 ;; 4) cmd_select ;; 5) cmd_fixnet ;; 6) cmd_remove ;; 0) exit 0 ;; *) say "Введите число от 0 до 6" ;; esac
   done
 }
+if [[ ${1:-} == --ascii ]]; then RP_ASCII=1; export RP_ASCII; shift; fi
 case ${1:-menu} in
   menu) menu ;; status) cmd_status ;; restart) cmd_restart ;; logs) cmd_logs "${2:-80}" ;; select) cmd_select ;;
   test) t=$(active); t1_check "$t" && t2_check "$t" && t3_check "$t" && say "T1–T3: ок" ;;
@@ -1425,7 +1671,119 @@ RP_BUNDLE_SHA="$(sha256sum "$1" | awk '{print $1}')"
 RP_SAFE="\${RP_SAFE:-0}"
 EOS
   cat <<'EOS'
-rp_fail() { echo "✗ $*" >&2; exit 1; }
+rp_plain_console() {
+  case "${RP_ASCII:-auto}" in
+    1|yes|true) return 0 ;; 0|no|false) return 1 ;;
+  esac
+  case "${TERM:-}" in linux|dumb|vt100|vt102|cons25|ansi) return 0 ;; esac
+  [[ -t 1 && -z "${SSH_TTY:-}${SSH_CONNECTION:-}" ]]
+}
+rp_transliterate() {
+  LC_ALL=C sed \
+    -e 's/Ё/Yo/g' \
+    -e 's/Ж/Zh/g' \
+    -e 's/Х/Kh/g' \
+    -e 's/Ц/Ts/g' \
+    -e 's/Ч/Ch/g' \
+    -e 's/Ш/Sh/g' \
+    -e 's/Щ/Shch/g' \
+    -e 's/Ю/Yu/g' \
+    -e 's/Я/Ya/g' \
+    -e 's/А/A/g' \
+    -e 's/Б/B/g' \
+    -e 's/В/V/g' \
+    -e 's/Г/G/g' \
+    -e 's/Д/D/g' \
+    -e 's/Е/E/g' \
+    -e 's/З/Z/g' \
+    -e 's/И/I/g' \
+    -e 's/Й/Y/g' \
+    -e 's/К/K/g' \
+    -e 's/Л/L/g' \
+    -e 's/М/M/g' \
+    -e 's/Н/N/g' \
+    -e 's/О/O/g' \
+    -e 's/П/P/g' \
+    -e 's/Р/R/g' \
+    -e 's/С/S/g' \
+    -e 's/Т/T/g' \
+    -e 's/У/U/g' \
+    -e 's/Ф/F/g' \
+    -e 's/Ъ//g' \
+    -e 's/Ы/Y/g' \
+    -e 's/Ь//g' \
+    -e 's/Э/E/g' \
+    -e 's/ё/yo/g' \
+    -e 's/ж/zh/g' \
+    -e 's/х/kh/g' \
+    -e 's/ц/ts/g' \
+    -e 's/ч/ch/g' \
+    -e 's/ш/sh/g' \
+    -e 's/щ/shch/g' \
+    -e 's/ю/yu/g' \
+    -e 's/я/ya/g' \
+    -e 's/а/a/g' \
+    -e 's/б/b/g' \
+    -e 's/в/v/g' \
+    -e 's/г/g/g' \
+    -e 's/д/d/g' \
+    -e 's/е/e/g' \
+    -e 's/з/z/g' \
+    -e 's/и/i/g' \
+    -e 's/й/y/g' \
+    -e 's/к/k/g' \
+    -e 's/л/l/g' \
+    -e 's/м/m/g' \
+    -e 's/н/n/g' \
+    -e 's/о/o/g' \
+    -e 's/п/p/g' \
+    -e 's/р/r/g' \
+    -e 's/с/s/g' \
+    -e 's/т/t/g' \
+    -e 's/у/u/g' \
+    -e 's/ф/f/g' \
+    -e 's/ъ//g' \
+    -e 's/ы/y/g' \
+    -e 's/ь//g' \
+    -e 's/э/e/g' \
+    -e 's/✓/OK/g' \
+    -e 's/✗/ERROR/g' \
+    -e 's/●/*/g' \
+    -e 's/◆/==/g' \
+    -e 's/›/>/g' \
+    -e 's/—/-/g' \
+    -e 's/–/-/g' \
+    -e 's/→/->/g' \
+    -e 's/≥/>=/g' \
+    -e 's/≤/<=/g' \
+    -e 's/┌/+/g' \
+    -e 's/└/+/g' \
+    -e 's/─/-/g' \
+    -e 's/│/|/g' \
+    -e 's/·/-/g' \
+    -e 's/⠋/-/g' \
+    -e 's/⠙/-/g' \
+    -e 's/⠹/-/g' \
+    -e 's/⠸/-/g' \
+    -e 's/⠼/-/g' \
+    -e 's/⠴/-/g' \
+    -e 's/⠦/-/g' \
+    -e 's/⠧/-/g' \
+    -e 's/⠇/-/g' \
+    -e 's/⠏/-/g'
+}
+rp_msg() {
+  if rp_plain_console; then
+    if command -v iconv >/dev/null 2>&1; then
+      printf '%s\n' "$*" | rp_transliterate | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null
+    else
+      printf '%s\n' "$*" | rp_transliterate
+    fi
+  else
+    printf '%s\n' "$*"
+  fi
+}
+rp_fail() { rp_msg "ERROR: $*" >&2; exit 1; }
 rp_dl() { local d=2; for _ in 1 2 3 4 5; do curl -fsSL --connect-timeout 10 -m 180 -o "$2" "$1" && [[ -s $2 ]] && return 0; sleep $d; d=$((d * 2)); done; return 1; }
 rp_main() {
   exec </dev/null   # скрипт уже прочитан целиком (rp_main — последняя строка): команды не должны читать остаток потока
@@ -1443,9 +1801,9 @@ rp_main() {
   # 1. бандл: проверка суммы до любых изменений
   rp_bundle | base64 -d >"$tmp/b.tgz" 2>/dev/null || rp_fail "Бандл повреждён (base64)"
   [[ $(sha256sum "$tmp/b.tgz" | awk '{print $1}') == "$RP_BUNDLE_SHA" ]] || rp_fail "SHA256 бандла не совпала — вставьте блок заново целиком"
-  echo "◆ rp: установка VPS-2"
+  rp_msg "rp: установка VPS-2"
   # 2. пакеты
-  echo "· пакеты"
+  rp_msg "Пакеты"
   dnf -y install chrony nftables curl unzip tar >/dev/null 2>&1 || rp_fail "dnf: не поставились базовые пакеты"
   command -v wg >/dev/null || { dnf -y install wireguard-tools >/dev/null 2>&1 || { dnf -y install epel-release >/dev/null 2>&1 && dnf -y install wireguard-tools >/dev/null 2>&1; }; }
   command -v wg >/dev/null || rp_fail "wireguard-tools не установились (нужен EPEL на Rocky 9)"
@@ -1457,7 +1815,7 @@ rp_main() {
     aarch64) xurl=$RP_X_URL_ARM; xsha=$RP_X_SHA_ARM; hurl=$RP_H_URL_ARM64; hsha=$RP_H_SHA_ARM64 ;;
     *) rp_fail "Архитектура $(uname -m) не поддерживается" ;;
   esac
-  echo "· Xray и Hysteria2"
+  rp_msg "Xray и Hysteria2"
   rp_dl "$xurl" "$tmp/x.zip" || rp_fail "не скачался Xray"
   [[ $(sha256sum "$tmp/x.zip" | awk '{print $1}') == "$xsha" ]] || rp_fail "SHA256 Xray не совпала"
   unzip -qo "$tmp/x.zip" xray geoip.dat geosite.dat -d "$tmp/x" || rp_fail "не распаковался Xray"
@@ -1467,7 +1825,7 @@ rp_main() {
   [[ $(sha256sum "$tmp/h" | awk '{print $1}') == "$hsha" ]] || rp_fail "SHA256 Hysteria2 не совпала"
   install -m 755 "$tmp/h" /usr/local/bin/hysteria.new && mv /usr/local/bin/hysteria.new /usr/local/bin/hysteria
   # 4. файлы бандла
-  echo "· конфигурация и юниты"
+  rp_msg "Конфигурация и службы"
   install -d -m 755 /var/lib/rp
   tar -xzf "$tmp/b.tgz" -C / || rp_fail "не распаковался бандл"
   chown root:xray /etc/rp; chmod 750 /etc/rp
@@ -1483,7 +1841,7 @@ rp_main() {
   command -v restorecon >/dev/null && restorecon -R /etc/rp /usr/local/bin /usr/local/lib/rp /usr/local/share/rp 2>/dev/null
   systemctl daemon-reload
   # 5. NAT и пересылка, фаервол (порты наружу не открываются); rp fixnet — единая реализация
-  echo "· NAT и пересылка"
+  rp_msg "NAT и пересылка"
   /usr/local/bin/rp fixnet || rp_fail "не удалось включить NAT/firewalld на VPS-2"
   # 6. SSH: ключ с ограничениями (только с loopback и внутреннего WG-адреса, без форвардинга)
   install -d -m 700 /root/.ssh; touch /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys
@@ -1491,14 +1849,14 @@ rp_main() {
   printf 'from="127.0.0.1,10.77.0.1",no-port-forwarding,no-agent-forwarding,no-X11-forwarding %s rp@vps1\n' "$(grep '^SSH_PUB=' /etc/rp/rp2.conf | cut -d'"' -f2)" >>/root/.ssh/authorized_keys
   systemctl is-active --quiet sshd || systemctl enable --now sshd >/dev/null 2>&1
   local prl; prl=$(sshd -T 2>/dev/null | awk '/^permitrootlogin/{print $2}')
-  [[ $prl == no ]] && echo "! В sshd запрещён вход root (PermitRootLogin no): ключ rp работать не будет"
+  [[ $prl == no ]] && rp_msg "! В sshd запрещён вход root (PermitRootLogin no): ключ rp работать не будет"
   # 7. запуск и проверка транспортов (проверяются все, неработающие исключаются)
   if [[ $RP_SAFE == 1 ]]; then systemd-run --on-active=600 --unit=rp-rollback --description="rp: откат обновления" /usr/local/bin/rp rollback >/dev/null 2>&1; fi
   /usr/local/bin/rp select; local rc=$?
   echo
-  echo "Отпечаток host key этого сервера (сверьте при первом «rp ssh» на VPS-1):"
+  rp_msg "Отпечаток host key (сверьте при первом rp ssh):"
   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null || ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub 2>/dev/null
-  echo "SSH снаружи можно закрыть: доступ с VPS-1 по туннелю сохранится (правило для 10.77.0.1)."
+  rp_msg "SSH снаружи можно закрыть: доступ с VPS-1 по туннелю сохранится (правило для 10.77.0.1)."
   return $rc
 }
 EOS
@@ -1508,31 +1866,126 @@ EOS
 # ── Роль VPS-1 ───────────────────────────────────────────────────────────
 need_vps1() { conf_load; [[ $(cf ROLE) == vps1 ]] || die "Это не VPS-1 (или rp ещё не установлен): выполните «rp install»"; }
 py_install() { mkdir -p "$LIB"; py_source >"$LIB/rp.py.new" && mv "$LIB/rp.py.new" "$LIB/rp.py" && chmod 644 "$LIB/rp.py"; }
-# self_install — команда rp из текущего файла; при запуске через bash <(curl …) файла нет (поток уже прочитан),
-# тогда скрипт скачивает себя по RP_URL
-self_ok() { head -c 300 "$1" 2>/dev/null | grep -q 'rp — цепочка' && bash -n "$1" 2>/dev/null; }
+# A process substitution (bash <(curl ...)) is a pipe, not a regular file.
+# Re-download exactly RP_URL, compare versions, validate, then atomically install.
+# Never report success when a fetched copy differs from the running build.
+self_version_of() { sed -n 's/^SELF_VERSION="\([^"]*\)"$/\1/p' "$1" | head -1; }
+self_ok() {
+  [[ -s $1 ]] && [[ $(head -n 3 "$1") == *'rp — цепочка'* ]] &&
+    [[ $(self_version_of "$1") =~ ^[0-9]+\.[0-9]+\.[0-9]+[-+a-zA-Z0-9.]*$ ]] &&
+    bash -n "$1" >/dev/null 2>&1
+}
+self_source() { # self_source DEST: current regular script, otherwise the configured GitHub URL
+  local dest=$1 current=${BASH_SOURCE[0]}  # inside function BASH_SOURCE[0] is this script
+  if [[ -f $current && -r $current ]] && self_ok "$current"; then
+    cp -- "$current" "$dest" || return 1
+  else
+    note "Исходный код запущен через поток; скачиваю точную копию: $RP_URL"
+    fetch "$RP_URL" "$dest" || return 1
+  fi
+  self_ok "$dest"
+}
+self_install_file() { # pre-validated file, same filesystem atomic rename + backup
+  local from=$1 base stage old_backup="" stamp
+  self_ok "$from" || { err "Неверный файл rp или ошибка bash -n"; return 1; }
+  [[ $(self_version_of "$from") == "$SELF_VERSION" ]] || {
+    err "Версия файла ($(self_version_of "$from")) не совпадает с запущенной ($SELF_VERSION); сохранение отменено"
+    return 1
+  }
+  if [[ -f $SELF_BIN ]] && cmp -s "$from" "$SELF_BIN"; then
+    ok "Команда rp уже соответствует версии $SELF_VERSION"
+    return 0
+  fi
+  mkdir -p "$(dirname "$SELF_BIN")" "$BK_DIR" || return 1
+  chmod 700 "$BK_DIR" 2>/dev/null || true
+  stage=$(mktemp -d "$(dirname "$SELF_BIN")/.rp-stage.XXXXXXXX") || return 1
+  if ! install -m 755 "$from" "$stage/rp" || ! self_ok "$stage/rp"; then
+    rm -rf "$stage"; err "Не удалось подготовить исполняемый файл"; return 1
+  fi
+  if [[ -f $SELF_BIN ]]; then
+    stamp=$(date +%Y%m%d-%H%M%S)
+    old_backup="$BK_DIR/rp-${stamp}-$$.sh"
+    cp -p -- "$SELF_BIN" "$old_backup" || { rm -rf "$stage"; err "Резервная копия не создана"; return 1; }
+    chmod 700 "$old_backup" 2>/dev/null || true
+  fi
+  if ! mv -f -- "$stage/rp" "$SELF_BIN"; then
+    rm -rf "$stage"; err "Атомарная замена $SELF_BIN не удалась"; return 1
+  fi
+  rmdir "$stage" 2>/dev/null || true
+  ok "Сохранено: $SELF_BIN ($(self_version_of "$SELF_BIN"))"
+  [[ -n $old_backup ]] && note "Предыдущая версия: $old_backup"
+  return 0
+}
 self_install() {
-  local tmp
-  if [[ -f $0 && $(readlink -f "$0") != "$SELF_BIN" ]] && self_ok "$0"; then install -m 755 "$0" "$SELF_BIN.new" && mv "$SELF_BIN.new" "$SELF_BIN"; return 0; fi
-  [[ -f $0 ]] && return 0
-  tmp=$(mktemp "${TMPDIR:-/tmp}/rp.XXXXXX") && fetch "$RP_URL" "$tmp" && self_ok "$tmp" && install -m 755 "$tmp" "$SELF_BIN.new" && mv "$SELF_BIN.new" "$SELF_BIN" \
-    || warn "Команда rp не установлена: не удалось скачать $RP_URL"
-  rm -f "${tmp:-}"; return 0
+  local tmp rv
+  # The already-installed script does not need to download itself.
+  [[ -f $SELF_BIN ]] && [[ $(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null) == $(readlink -f "$SELF_BIN" 2>/dev/null) ]] &&
+    [[ $(self_version_of "$SELF_BIN") == "$SELF_VERSION" ]] && return 0
+  tmp=$(mktemp "${TMPDIR:-/tmp}/rp-save.XXXXXXXX") || return 1
+  if ! self_source "$tmp"; then
+    rm -f "$tmp"; err "Невозможно получить исполняемый файл для сохранения"; return 1
+  fi
+  rv=$(self_version_of "$tmp")
+  if [[ $rv != "$SELF_VERSION" ]]; then
+    rm -f "$tmp"
+    err "На GitHub находится версия $rv, а сейчас запущена $SELF_VERSION."
+    err "Обновите rp_gpt.sh в репозитории или запустите скачанный файл как обычный файл."
+    return 1
+  fi
+  self_install_file "$tmp"; rv=$?
+  rm -f "$tmp"
+  return "$rv"
 }
-# upgrade self — новая версия скрипта с GitHub, проверка, установка и rp migrate (обновляет встроенный генератор и службы)
+# Update self from the configured GitHub URL and migrate only after the new
+# executable has passed independent validation. Roll back executable on failure.
 self_upgrade() {
-  [[ $SELF_VERSION == *-fix* || $SELF_VERSION == *-hardened* ]] && die "Это локальная исправленная сборка. rp upgrade self заменит её файлом с GitHub; обновление отключено."
-  local tmp nv; tmp=$(mktemp "${TMPDIR:-/tmp}/rp.XXXXXX")
-  fetch "$RP_URL" "$tmp" && self_ok "$tmp" || { rm -f "$tmp"; die "Не удалось скачать корректный rp.sh с $RP_URL"; }
-  nv=$(sed -n 's/^SELF_VERSION="\(.*\)"/\1/p' "$tmp" | head -1)
-  note "Установлена $SELF_VERSION, на GitHub $nv"
-  [[ $nv == "$SELF_VERSION" ]] && { rm -f "$tmp"; ok "Обновление не требуется"; return 0; }
-  yesno "Обновить rp $SELF_VERSION → $nv?" y || { rm -f "$tmp"; return 0; }
-  cp -p "$SELF_BIN" "$BK_DIR/rp.sh.$SELF_VERSION" 2>/dev/null
-  install -m 755 "$tmp" "$SELF_BIN.new" && mv "$SELF_BIN.new" "$SELF_BIN"; rm -f "$tmp"
-  ok "rp $nv установлен (прежний файл: $BK_DIR/rp.sh.$SELF_VERSION)"
-  "$SELF_BIN" migrate
+  local tmp nv prev old_version rc=0
+  need_root; mkdir -p "$STATE" "$BK_DIR"
+  tmp=$(mktemp "${TMPDIR:-/tmp}/rp-update.XXXXXXXX") || return 1
+  if ! fetch "$RP_URL" "$tmp" || ! self_ok "$tmp"; then
+    rm -f "$tmp"; err "Не удалось скачать и проверить $RP_URL"; return 1
+  fi
+  nv=$(self_version_of "$tmp")
+  old_version=$(self_version_of "$SELF_BIN")
+  if [[ -f $SELF_BIN ]] && cmp -s "$tmp" "$SELF_BIN"; then
+    rm -f "$tmp"; ok "Установлена актуальная сборка: $nv"; return 0
+  fi
+  note "Установлена: ${old_version:-нет}; в репозитории: $nv"
+  [[ $nv != "$old_version" && -n $old_version ]] &&
+    [[ $(printf '%s\n' "${nv%%-*}" "${old_version%%-*}" | sort -V | tail -1) != "${nv%%-*}" ]] &&
+    warn "В репозитории может находиться более старая версия"
+  yesno "Сохранить $nv и выполнить миграцию (VPS-2 затем обновляется отдельно)?" y || { rm -f "$tmp"; return 0; }
+  # self_install_file validates against the current script's version, so a
+  # different release needs its own checked staging path.
+  local stage backup="" stamp
+  stage=$(mktemp -d "$(dirname "$SELF_BIN")/.rp-update.XXXXXXXX") || { rm -f "$tmp"; return 1; }
+  install -m 755 "$tmp" "$stage/rp" && self_ok "$stage/rp" || { rm -rf "$stage"; rm -f "$tmp"; return 1; }
+  if [[ -f $SELF_BIN ]]; then
+    stamp=$(date +%Y%m%d-%H%M%S)
+    backup="$BK_DIR/rp-before-update-${stamp}-$$.sh"
+    cp -p "$SELF_BIN" "$backup" || { rm -rf "$stage"; rm -f "$tmp"; return 1; }
+    chmod 700 "$backup" 2>/dev/null || true
+  fi
+  if ! mv -f "$stage/rp" "$SELF_BIN"; then
+    rm -rf "$stage"; rm -f "$tmp"; err "Установка прервана"; return 1
+  fi
+  rmdir "$stage" 2>/dev/null || true; rm -f "$tmp"
+  # Release the parent CLI lock before the new version acquires it in migrate.
+  flock -u 9 2>/dev/null || true
+  if ! "$SELF_BIN" migrate; then
+    err "Миграция версии $nv не удалась"
+    if [[ -n $backup ]]; then
+      local rb; rb=$(mktemp "$(dirname "$SELF_BIN")/.rp-rollback.XXXXXXXX") || return 1
+      install -m 755 "$backup" "$rb" && mv -f "$rb" "$SELF_BIN" || return 1
+      warn "Исполняемый файл возвращён из $backup (состояние сетевых служб проверьте отдельно)"
+    fi
+    return 1
+  fi
+  ok "Команда rp обновлена до $nv"
+  note "Для обновления VPS-2: rp push; затем rp test"
+  return 0
 }
+
 valid_port() { [[ $1 =~ ^[0-9]+$ ]] && (($1 >= 1 && $1 <= 65535)); }
 transport_label() {
   case $1 in
@@ -1584,7 +2037,8 @@ cmd_migrate() {
   banner "Переход на rp $SELF_VERSION" "с версии 1.0"
   mkdir -p "$STATE"; chmod 755 "$STATE"
   cp -p "$CONF" "$BK_DIR/rp.conf.v1.$(date +%s)" 2>/dev/null || { mkdir -p "$BK_DIR"; cp -p "$CONF" "$BK_DIR/rp.conf.v1.$(date +%s)"; }
-  self_install; py_install
+  self_install || die "Не удалось сохранить исполняемый rp; миграция остановлена"
+  py_install || die "Не удалось установить rp.py"
   conf_migrate
   conf_set TRANSPORT_ORDER "$(tr_sort "$(cf TRANSPORT_ORDER)")"
   # Upgrade existing installations without replacing the user's explicit browser preset.
@@ -1673,7 +2127,7 @@ vps1_install() {
   else note "Выключены"; fi
 
   step "Службы и применение"
-  units_vps1; self_install
+  units_vps1; self_install || die "Не удалось сохранить команду rp"
   systemctl enable --now rp-echo >/dev/null 2>&1
   [[ $ru == y ]] && systemctl enable --now rp-ru.timer >/dev/null 2>&1
   fw_open "$WG_PORT/udp"
@@ -2308,7 +2762,7 @@ menu_dns() {
 menu_upd() {
   local c
   while :; do cls; banner "Обновления" "Xray, Hysteria2, списки"; cmd_upgrade check
-    mhead "Действия"; mi 1 "Обновить Xray"; mi 2 "Обновить Hysteria2"; mi 3 "Обновить списки РФ"; mi 4 "Обновить сам rp.sh (GitHub)"; mi 0 "Назад"; mpick c
+    mhead "Действия"; mi 1 "Обновить Xray"; mi 2 "Обновить Hysteria2"; mi 3 "Обновить списки РФ"; mi 4 "Обновить rp из GitHub (rp_gpt.sh)"; mi 0 "Назад"; mpick c
     case $c in 1) (cmd_upgrade xray); pause ;; 2) (cmd_upgrade hy2); pause ;; 3) (cmd_upgrade ru); pause ;; 4) (cmd_upgrade self); pause ;; 0) return ;; *) warn "Введите число от 0 до 4"; sleep 1 ;; esac
   done
 }
@@ -2339,12 +2793,14 @@ menu_main() {
     mhead "Контроль"
     mi 5 "Проверка T1–T8"; mi 6 "Диагностика выхода (по участкам)"; mi 7 "Сводка (doctor)"; mi 8 "Статус"; mi 9 "Журнал"
     mhead "Обслуживание"
-    mi 10 "Обновления (Xray, Hysteria2) ›"; mi 11 "Перезапуск"; mi 12 "Удалить rp"; mi 0 "Выход"; mpick c
+    mi 10 "Обновления (Xray, Hysteria2) >"; mi 11 "Перезапуск"; mi 12 "Удалить rp"
+    mi 13 "Сохранить эту версию как команду rp"; mi 14 "Обновить rp из GitHub"; mi 0 "Выход"; mpick c
     case $c in
       1) menu_clients ;; 2) menu_tunnel ;; 3) menu_ru ;; 4) menu_dns ;;
       5) (cmd_test); pause ;; 6) (cmd_diag --fix); pause ;; 7) (cmd_doctor); pause ;; 8) (cmd_status); pause ;; 9) (cmd_logs 60); pause ;;
       10) menu_upd ;; 11) (cmd_restart); pause ;; 12) (cmd_uninstall); pause; [[ -d $STATE ]] || exit 0 ;;   # после удаления меню не нужно
-      0) exit 0 ;; *) warn "Введите число от 0 до 12"; sleep 1 ;;
+      13) (self_install); pause ;; 14) (self_upgrade); pause ;;
+      0) exit 0 ;; *) warn "Введите число от 0 до 14"; sleep 1 ;;
     esac
   done
 }
@@ -2360,13 +2816,31 @@ vps2_entry() {
 }
 
 # ── Установка, справка, точка входа ──────────────────────────────────────
+maybe_save_launched_build() {
+  # Runs when an already configured VPS-1 was opened via a separate script.
+  # On /usr/local/bin/rp itself, avoid network and prompts.
+  local current="${BASH_SOURCE[0]}" installed="" here="" src_version=""
+  here=$(readlink -f "$current" 2>/dev/null || true)
+  installed=$(readlink -f "$SELF_BIN" 2>/dev/null || true)
+  [[ -n $here && $here == "$installed" ]] && return 0
+  src_version=$(self_version_of "$SELF_BIN")
+  if [[ $src_version == "$SELF_VERSION" ]] && [[ -f $SELF_BIN ]]; then
+    return 0
+  fi
+  note "Запущен rp $SELF_VERSION, в команде rp установлено: ${src_version:-ничего}"
+  if yesno "Сохранить запущенную версию как команду rp?" y; then
+    self_install || warn "Версия не сохранена; используйте меню 'Сохранить' или проверьте RP_URL"
+  fi
+}
 usage() {
   cat <<EOT
 rp $SELF_VERSION — цепочка «клиенты WG → VPS-1 → туннель, устойчивый к ТСПУ → VPS-2»
 
   rp                       меню (VPS-1) или установка
   rp install               установка; роль VPS-1 / VPS-2 выбирается здесь
-  rp migrate               перейти с версии 1.0 (конфиг, службы, QR-пакеты) и применить
+  rp migrate               применить версию команды rp к текущей установке VPS-1
+  rp save                  сохранить запущенную сборку как /usr/local/bin/rp
+  rp update                скачать rp_gpt.sh из GitHub, установить и выполнить migrate
   VPS-1:
   rp client add|del|list|show [имя]   клиенты WG (конфиг и QR; QR строит сам скрипт)
   rp link [порт]           короткая строка для VPS-2: он сам скачает блок с VPS-1 (одноразовый HTTPS, TTL 30 мин)
@@ -2385,8 +2859,9 @@ rp $SELF_VERSION — цепочка «клиенты WG → VPS-1 → тунне
   rp ru update|on|off|proxy ДОМЕН|direct ДОМЕН|del ДОМЕН|status   списки РФ
   rp sni [хост…]           проверка кандидатов SNI/masquerade
   rp apply | status | logs [N] | restart | uninstall
+  rp --ascii               текстовое оформление для VNC/SPICE Linux-консоли
   rp version | help
-Запуск без установки: bash <(curl -fsSL $RP_URL)
+Запуск с GitHub: bash <(curl -fsSL $RP_URL)
 Настройки: $CONF (после правки — rp apply). Переменная ASSUME_YES=1 — без вопросов.
 EOT
 }
@@ -2398,7 +2873,7 @@ cmd_install() {
     local act=""; choose act "rp уже установлен на этом VPS-1" menu \
       "menu|Открыть управление|" "migrate|Перейти на версию $SELF_VERSION|обновить конфигурацию и службы, ключи сохраняются" \
       "reinstall|Изменить настройки|заново пройти вопросы (ключи клиентов сохранятся)" "update|Обновить списки РФ|только списки"
-    case $act in menu) menu_main; return ;; migrate) cmd_migrate; return ;; update) ru_update --latest; return ;; esac
+    case $act in menu) maybe_save_launched_build; menu_main; return ;; migrate) cmd_migrate; return ;; update) ru_update --latest; return ;; esac
   fi
   banner "rp $SELF_VERSION" "установка"
   choose ROLE_CHOICE "Роль этого сервера" vps1 \
@@ -2411,10 +2886,15 @@ lock() { exec 9>/run/rp.lock; flock -n 9 || die "Другая операция r
 
 main() {
   local cmd=${1:-}; shift || true
+  if [[ $cmd == --ascii ]]; then
+    RP_ASCII=1; ASCII_MODE=1; export RP_ASCII
+    cmd=${1:-}; shift || true
+    R=''; B=''; C_ACC=''; C_OK=''; C_WARN=''; C_ERR=''; C_DIM=''
+  fi
   case $cmd in
-    ""|menu) need_root; conf_load; if [[ $(cf ROLE) == vps1 ]]; then menu_main; else cmd_install; fi ;;
+    ""|menu) need_root; conf_load; if [[ $(cf ROLE) == vps1 ]]; then maybe_save_launched_build; menu_main; else cmd_install; fi ;;
     install) cmd_install ;;
-    install-self) need_root; self_install && ok "Установлено: $SELF_BIN" ;;
+    install-self|save) need_root; self_install ;;
     migrate) need_root; lock; cmd_migrate ;;
     version|-v|--version) echo "rp $SELF_VERSION" ;;
     help|-h|--help) usage ;;
@@ -2432,7 +2912,8 @@ main() {
     dns) need_root; lock; cmd_dns "$@" ;;
     doctor) need_root; cmd_doctor ;;
     rotate) need_root; lock; cmd_rotate ;;
-    upgrade|update) need_root; lock; cmd_upgrade "$@" ;;
+    upgrade) need_root; lock; cmd_upgrade "$@" ;;
+    update) need_root; lock; if (($# == 0)); then self_upgrade; else cmd_upgrade "$@"; fi ;;
     ru) need_root; lock; cmd_ru "$@" ;;
     sni) cmd_sni "$@" ;;
     apply) need_root; need_vps1; lock; vps1_apply && ok "Применено" ;;
