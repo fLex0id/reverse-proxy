@@ -1,838 +1,769 @@
 #!/usr/bin/env bash
-# Что делает: интерактивно разворачивает Teleport Community Edition «с нуля» на Linux-машине
-#             (auth + proxy + ssh в одном процессе, всё на порту 443), получает TLS-сертификат
-#             через ACME с автопродлением, проверяет/меняет DNS (в т.ч. на DoH), выводит данные
-#             для первого входа. При повторном запуске — обновление и служебное меню.
-# Проверено на: Rocky Linux 10.2, Debian 13 (x86_64)
-# Перед запуском задать: ничего — всё спрашивается интерактивно. Запуск от root:
-#             bash deploy-teleport.sh
-# Офлайн/медленная сеть: положите рядом со скриптом teleport-v<версия>-linux-<arch>-bin.tar.gz
-# Переменные (необязательно): TELEPORT_SETUP_VERSION=18.11.8 — поставить конкретную версию;
-#             TELEPORT_SETUP_ACME_STAGING=1 — сертификаты от тестового CA Let's Encrypt (для проверок).
-
+# deploy-teleport.sh v1.1.0 — Teleport Community Edition, single-host cluster
+# Linux + systemd; Bash >= 4; root; interactive. No unattended modifications to existing installs.
+# Deployment: Auth + Proxy + SSH, inbound 443/tcp, internal listeners on loopback.
+# Files and data remain owned by the current installation until explicit uninstall.
+# Optional: TELEPORT_SETUP_VERSION=18.11.10 bash deploy-teleport.sh
+# Optional: TELEPORT_SETUP_ACME_STAGING=1 bash deploy-teleport.sh
 set -o pipefail
-umask 022
+set -o nounset
+umask 077
 
-SCRIPT_VERSION="1.0"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
-
-# ─── пути и источники ──────────────────────────────────────────────────────────
+SCRIPT_VERSION=1.1.0
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR=/usr/local/bin
 CONF=/etc/teleport.yaml
-CERT_DIR=/etc/teleport/certs
+RESOLV_CONF=/etc/resolv.conf
 DATA_DIR=/var/lib/teleport
+ETC_DIR=/etc/teleport
+CERT_DIR=$ETC_DIR/certs
 UNIT=/etc/systemd/system/teleport.service
 STATE_DIR=/var/lib/teleport-setup
-STATE="$STATE_DIR/state.env"
+STATE=$STATE_DIR/state.env
+LOG=/var/log/teleport-setup.log
 CACHE_DIR=/var/cache/teleport-setup
 BACKUP_DIR=/var/backups/teleport
-LOG=/var/log/teleport-setup.log
-
+TP_INDEX=https://apt.releases.teleport.dev/debian/dists/bookworm
+TP_CDN=https://cdn.teleport.dev
 ACME_HOME=/opt/acme.sh
 ACME_CONF=/etc/acme.sh
-ACME_SH_VER=3.1.6
+ACME_VER=3.1.6
 ACME_UNIT=teleport-acme
-
 DOH_VER=2.1.20
 DOH_BIN=/usr/local/bin/dnscrypt-proxy
 DOH_CONF=/etc/dnscrypt-proxy/teleport-setup.toml
-DOH_UNIT="doh-dnscrypt"
+DOH_UNIT=doh-dnscrypt
 DOH_LISTEN=127.0.2.1
-DNS_BACKUP="$STATE_DIR/dns-backup"
+DNS_BACKUP=$STATE_DIR/dns-backup
 RESOLVED_DROPIN=/etc/systemd/resolved.conf.d/90-teleport-setup.conf
 NM_DROPIN=/etc/NetworkManager/conf.d/90-teleport-setup-dns.conf
+TMP_DIR=
+ANSWER=
+CLUSTER=
+NODENAME=
+CERT_MODE=
+ACME_EMAIL=
+ADMIN_USER=
+ADMIN_LOGINS=
+INVITE=
+TP_TARBALL=
+TP_TARGET=
+LAST_BACKUP=
+ARCH=
+PKG=
 
-TP_INDEX=https://apt.releases.teleport.dev/debian/dists/bookworm
-TP_CDN=https://cdn.teleport.dev
+say() { printf '%s\n' "$*"; }
+ok() { printf '  ✔ %s\n' "$*"; }
+info() { printf '  • %s\n' "$*"; }
+warn() { printf '  ! %s\n' "$*" >&2; }
+err() { printf '  ✖ %s\n' "$*" >&2; }
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
+die() { err "$*"; err "Журнал: $LOG"; exit 1; }
+hdr() { printf '\n━━ %s ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' "$*"; }
+cleanup() { if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then rm -rf -- "$TMP_DIR"; fi; }
+trap cleanup EXIT
+trap 'printf "\n"; warn "Прервано пользователем"; exit 130' INT
 
-# ─── оформление ───────────────────────────────────────────────────────────────
-if [ -t 1 ] && [ "$(tput colors 2>/dev/null || echo 0)" -ge 256 ]; then
-  C0=$'\e[0m'; CB=$'\e[1m'; CH=$'\e[38;5;183m'; CL=$'\e[38;5;117m'
-  CG=$'\e[38;5;151m'; CY=$'\e[38;5;223m'; CR=$'\e[38;5;210m'; CD=$'\e[38;5;245m'
-elif [ -t 1 ]; then
-  C0=$'\e[0m'; CB=$'\e[1m'; CH=$'\e[35m'; CL=$'\e[36m'; CG=$'\e[32m'; CY=$'\e[33m'; CR=$'\e[31m'; CD=$'\e[2m'
-else
-  C0=; CB=; CH=; CL=; CG=; CY=; CR=; CD=
-fi
-
-say()  { printf '%s\n' "$*"; }
-info() { printf '  %s•%s %s\n' "$CL" "$C0" "$*"; }
-ok()   { printf '  %s✔%s %s\n' "$CG" "$C0" "$*"; }
-warn() { printf '  %s!%s %s\n' "$CY" "$C0" "$*"; }
-err()  { printf '  %s✖ %s%s\n' "$CR" "$*" "$C0" >&2; }
-die()  { err "$*"; say "  Подробный журнал: $LOG"; exit 1; }
-hdr()  { printf '\n%s%s━━ %s %s%s\n' "$CB" "$CH" "$*" "$(printf '━%.0s' $(seq 1 $((60 - ${#1}))))" "$C0"; }
-log()  { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
-
-# run "описание" команда… — вывод команды в журнал, на экран только итог
+# CRITICAL: return the actual status, not the status of an if without else.
 run() {
-  local desc=$1; shift
-  printf '  %s…%s %s' "$CD" "$C0" "$desc"
+  local desc=$1 rc; shift
   log "RUN: $*"
   if "$@" </dev/null >>"$LOG" 2>&1; then
-    printf '\r\e[K  %s✔%s %s\n' "$CG" "$C0" "$desc"; return 0
+    ok "$desc"; return 0
+  else
+    rc=$?
+    err "$desc (exit $rc)"
+    tail -n 12 "$LOG" | sed 's/^/    /' >&2
+    return "$rc"
   fi
-  local rc=$?
-  printf '\r\e[K  %s✖%s %s (код %s)\n' "$CR" "$C0" "$desc" "$rc"
-  say "${CD}── последние строки журнала ($LOG) ──${C0}"
-  tail -n 12 "$LOG" | sed 's/^/    /'
-  return "$rc"
 }
-
-trap 'printf "\n"; warn "Прервано пользователем (Ctrl+C)."; exit 130' INT
-
-# ─── ввод: терпимый к ошибкам ─────────────────────────────────────────────────
-pad() { local n=$(( $2 - ${#1} )); printf '%s' "$1"; [ $n -gt 0 ] && printf '%*s' $n ''; return 0; }   # по символам, не байтам
-trim() { local s=$1; s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"; printf '%s' "$s"; }
-
-# ask "вопрос" [значение по умолчанию] → $ANSWER (по умолчанию подставлено и редактируется)
 ask() {
-  local a
-  if [ -n "${2-}" ]; then read -r -e -p "  › $1: " -i "$2" a; else read -r -e -p "  › $1: " a; fi || { say; die "Ввод прерван."; }
-  ANSWER=$(trim "$a")
+  local prompt=$1 default=${2-} a
+  if [ -n "$default" ]; then
+    read -r -e -p "  › $prompt: " -i "$default" a || die "Ввод прерван"
+  else
+    read -r -e -p "  › $prompt: " a || die "Ввод прерван"
+  fi
+  ANSWER=$a
 }
-
-# ask_yn "вопрос" y|n → код 0 = да
 ask_yn() {
-  local def=${2:-n} hint a
-  [ "$def" = y ] && hint="Д/н" || hint="д/Н"
-  while true; do
-    read -r -p "  › $1 [$hint]: " a || { say; die "Ввод прерван."; }
-    a=$(trim "${a,,}")
-    [ -z "$a" ] && a=$def
-    case "$a" in
-      y|yes|д|да|ага|ок|ok|1) return 0 ;;
-      n|no|нет|не|т|0) return 1 ;;              # т — «n» в русской раскладке
-    esac
-    warn "Не понял ответ «$a». Введите «да» или «нет» (Enter — $( [ "$def" = y ] && echo да || echo нет))."
+  local prompt=$1 def=${2:-n} a
+  while :; do
+    read -r -p "  › $prompt [$([ "$def" = y ] && echo 'Д/н' || echo 'д/Н')]: " a || die "Ввод прерван"
+    a=${a,,}; [ -n "$a" ] || a=$def
+    case "$a" in y|yes|д|да|1) return 0 ;; n|no|н|нет|0) return 1 ;; esac
+    warn "Ответьте да или нет"
   done
 }
-
-# ask_num "вопрос" максимум [по умолчанию] → $ANSWER (число 0..max)
 ask_num() {
-  local max=$2 def=${3-} a
-  while true; do
-    read -r -p "  › $1${def:+ [$def]}: " a || { say; die "Ввод прерван."; }
-    a=$(trim "$a"); a=${a%[.)]}; [ -z "$a" ] && a=$def
-    if [[ "$a" =~ ^[0-9]+$ ]] && [ "$a" -ge 0 ] && [ "$a" -le "$max" ]; then ANSWER=$((10#$a)); return 0; fi
-    warn "Введите номер пункта от 0 до $max."
+  local prompt=$1 max=$2 def=${3:-0} a
+  while :; do
+    read -r -p "  › $prompt [$def]: " a || die "Ввод прерван"
+    a=${a:-$def}; a=${a%[.)]}
+    if [[ $a =~ ^[0-9]+$ ]] && [ "${#a}" -le 5 ] && [ "$((10#$a))" -le "$max" ]; then
+      ANSWER=$((10#$a)); return 0
+    fi
+    warn "Нужен номер от 0 до $max"
   done
 }
-
 ask_secret() {
   local a
-  while true; do
-    read -r -s -p "  › $1 (ввод скрыт): " a || { say; die "Ввод прерван."; }
-    say; a=$(trim "$a")
-    [ -n "$a" ] && { ANSWER=$a; return 0; }
-    warn "Пустое значение. Вставьте ещё раз (правый клик / Ctrl+Shift+V)."
+  while :; do
+    read -r -s -p "  › $1 (скрытый ввод): " a || die "Ввод прерван"
+    printf '\n'
+    [ -n "$a" ] && { ANSWER=$a; return; }
+    warn "Значение не может быть пустым"
   done
 }
-
-# нормализация домена: убирает https://, путь, порт, точку в конце, пробелы, регистр
-norm_domain() {
-  local d; d=$(trim "$1"); d=${d,,}
-  d=${d#*://}; d=${d%%/*}; d=${d%%\?*}; d=${d%:*}; d=${d%.}; d=${d#\*.}
-  printf '%s' "$d"
+is_ip() {
+  local s=$1 part; local -a parts=()
+  [[ $s =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  local IFS=.; read -r -a parts <<<"$s"
+  for part in "${parts[@]}"; do [ "$part" -le 255 ] || return 1; done
 }
-is_ip() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
-is_domain() { [[ "$1" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$ ]]; }
-
-ask_domain() {   # ask_domain "вопрос" [default]
-  local d raw
-  while true; do
-    ask "$1" "${2-}"; raw=$ANSWER; d=$(norm_domain "$raw")
-    [ -z "$d" ] && { warn "Нужно ввести доменное имя, например teleport.example.com"; continue; }
-    if printf '%s' "$d" | LC_ALL=C grep -q '[^ -~]'; then
-      warn "Кириллические домены нужно вводить в punycode (xn--...). Пример: xn--80ak6aa92e.xn--p1ai"; continue
-    fi
-    if is_ip "$d"; then warn "Это IP-адрес. Teleport и ACME нужно доменное имя (A-запись на этот сервер)."; continue; fi
-    if ! is_domain "$d"; then warn "«$raw» не похоже на доменное имя. Пример: teleport.example.com"; continue; fi
-    [ "$d" != "$raw" ] && info "Принято как: ${CB}$d${C0}"
-    ANSWER=$d; return 0
+is_domain() { [[ $1 =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; }
+ask_domain() {
+  local d
+  while :; do
+    ask "$1" "${2:-}"; d=${ANSWER,,}; d=${d#http://}; d=${d#https://}; d=${d%%/*}; d=${d%.}
+    if is_domain "$d" && [ "${#d}" -le 253 ]; then ANSWER=$d; return; fi
+    warn "Введите FQDN латиницей, например teleport.example.com"
   done
 }
-
 ask_email() {
-  local e
-  while true; do
-    ask "$1" "${2-}"; e=$(trim "${ANSWER,,}"); e=${e#mailto:}; e=${e//[<>]/}
-    if [[ "$e" =~ ^[a-z0-9._%+-]+@([a-z0-9-]+\.)+[a-z]{2,}$ ]]; then
-      [[ "$e" =~ @(example\.(com|org|net)|test\.com)$ ]] && { warn "Let's Encrypt отклоняет адреса на $e — укажите настоящий."; continue; }
-      ANSWER=$e; return 0
-    fi
-    warn "«$ANSWER» не похоже на e-mail. Пример: admin@mydomain.ru"
+  while :; do
+    ask "$1" "${2:-}"
+    if [[ $ANSWER =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then return; fi
+    warn "Некорректный e-mail"
   done
 }
-
 ask_username() {
-  local u
-  while true; do
-    ask "$1" "${2-}"; u=$ANSWER
-    if [[ "$u" =~ ^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$ ]]; then ANSWER=$u; return 0; fi
-    warn "Имя может содержать латиницу, цифры и . _ - @ (без пробелов), до 64 символов."
+  while :; do
+    ask "$1" "${2:-}"
+    if [[ $ANSWER =~ ^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$ ]]; then return; fi
+    warn "Имя: латиница, цифры, . _ @ -; максимум 64 символа"
   done
 }
-
-ask_logins() {   # системные логины, под которыми пользователь сможет входить на серверы
-  local raw l out bad
-  while true; do
-    ask "$1" "${2:-root}"; raw=${ANSWER//[,;]/ }; out=; bad=
-    for l in $raw; do
-      if [[ "$l" =~ ^[a-z_][a-z0-9_.-]{0,31}$ ]]; then [[ ",$out," == *",$l,"* ]] || out="${out:+$out,}$l"; else bad="$bad $l"; fi
+ask_logins() {
+  local s item bad out
+  while :; do
+    ask "$1" "${2:-root}"; s=${ANSWER//[,;]/ }; bad=; out=
+    for item in $s; do
+      if [[ $item =~ ^[a-z_][a-z0-9_.-]{0,31}$ ]]; then
+        [[ ,$out, == *,$item,* ]] || out=${out:+$out,}$item
+      else bad="$bad $item"; fi
     done
-    [ -n "$bad" ] && { warn "Недопустимые логины:$bad (латиница в нижнем регистре, цифры, _ . -)"; continue; }
-    [ -z "$out" ] && { warn "Нужен хотя бы один логин, например root"; continue; }
-    ANSWER=$out; return 0
+    if [ -n "$out" ] && [ -z "$bad" ]; then ANSWER=$out; return; fi
+    warn "Недопустимые логины:$bad"
   done
 }
-
-# ─── состояние ────────────────────────────────────────────────────────────────
-state_get() { [ -f "$STATE" ] && grep -m1 "^$1=" "$STATE" | cut -d= -f2-; }
+state_get() { [ -f "$STATE" ] && grep -m1 "^${1}=" "$STATE" | cut -d= -f2- || :; }
 state_set() {
-  mkdir -p "$STATE_DIR"; touch "$STATE"; chmod 600 "$STATE"
-  grep -v "^$1=" "$STATE" >"$STATE.tmp" 2>/dev/null; printf '%s=%s\n' "$1" "$2" >>"$STATE.tmp"; mv -f "$STATE.tmp" "$STATE"
+  local k=$1 v=$2 tmp
+  mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+  tmp=$(mktemp "$STATE_DIR/.state.XXXXXX") || return 1
+  if [ -f "$STATE" ]; then grep -v "^${k}=" "$STATE" >"$tmp" || :; fi
+  printf '%s=%s\n' "$k" "$v" >>"$tmp"
+  chmod 600 "$tmp"; mv -f "$tmp" "$STATE"
 }
-
-# ─── система ──────────────────────────────────────────────────────────────────
-detect_os() {
-  OS_ID=unknown; OS_PRETTY=$(uname -sr)
-  if [ -r /etc/os-release ]; then
-    OS_ID=$(. /etc/os-release; echo "${ID:-unknown}")
-    OS_PRETTY=$(. /etc/os-release; echo "${PRETTY_NAME:-$OS_ID}")
-  fi
-  PKG=
-  for p in apt-get dnf yum zypper pacman; do command -v $p >/dev/null 2>&1 && { PKG=$p; break; }; done
-  case "$(uname -m)" in
-    x86_64|amd64) ARCH=amd64; DOH_ARCH=x86_64 ;;
-    aarch64|arm64) ARCH=arm64; DOH_ARCH=arm64 ;;
-    armv7*|armv6*) ARCH=arm; DOH_ARCH=arm ;;
-    *) ARCH=; DOH_ARCH= ;;
-  esac
-}
-
-selinux_on() { command -v getenforce >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" = Enforcing ]; }
-fix_context() { selinux_on && command -v restorecon >/dev/null 2>&1 && restorecon -RF "$@" >>"$LOG" 2>&1; return 0; }
+fix_context() { if command -v restorecon >/dev/null 2>&1; then restorecon -RF "$@" >>"$LOG" 2>&1 || :; fi; }
 
 prechecks() {
-  [ "${BASH_VERSINFO[0]}" -ge 4 ] || die "Нужен bash 4 или новее."
-  [ -d /run/systemd/system ] || die "Нужен systemd (на этой системе его нет). Teleport-сервис управляется через systemd."
-  [ -n "$ARCH" ] || die "Архитектура $(uname -m) не поддерживается Teleport (нужна x86_64, aarch64 или armv7)."
-  if ldd --version 2>&1 | grep -qi musl; then die "Система на musl (Alpine и т.п.) — бинарники Teleport требуют glibc."; fi
-  ok "ОС: $OS_PRETTY, архитектура $(uname -m)${PKG:+, пакеты через $PKG}"
-  local mem disk
-  mem=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
-  if [ "$mem" -lt 900 ]; then warn "Памяти ${mem} МБ — Teleport рекомендует от 1 ГБ (лучше 2 ГБ)."; else ok "Память: ${mem} МБ"; fi
-  disk=$(df -Pm /var 2>/dev/null | awk 'NR==2{print $4}')
+  [ "$(id -u)" -eq 0 ] || die "Нужны права root"
+  [ "${BASH_VERSINFO[0]}" -ge 4 ] || die "Нужен Bash >= 4"
+  [ -d /run/systemd/system ] || die "Нужен systemd"
+  case "$(uname -m)" in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; armv7l) ARCH=arm ;; *) die "Архитектура не поддерживается" ;; esac
+  if ldd --version 2>&1 | grep -qi musl; then die "Требуется glibc (не musl)"; fi
+  PKG=
+  for p in apt-get dnf yum zypper pacman; do
+    if command -v "$p" >/dev/null 2>&1; then PKG=$p; break; fi
+  done
+  [ -n "$PKG" ] || die "Не найден пакетный менеджер"
+  info "ОС: $(. /etc/os-release; echo "${PRETTY_NAME:-unknown}"); архитектура: $ARCH"
+  local disk; disk=$(df -Pm /var | awk 'NR==2{print $4}')
   if [ "${disk:-0}" -lt 2500 ]; then
-    warn "Свободно ${disk} МБ в /var — для установки нужно около 2,5 ГБ (архив + распаковка + бинарники)."
-    ask_yn "Продолжить всё равно?" n || exit 1
-  else ok "Свободно на диске: $((disk / 1024)) ГБ"; fi
-  selinux_on && info "SELinux в режиме Enforcing — учтено."
-  [ -z "$PKG" ] && warn "Пакетный менеджер не найден — зависимости придётся ставить вручную, если чего-то не хватит."
+    warn "Свободно в /var: ${disk:-?} МБ — для Teleport и резервных копий мало места"
+    ask_yn "Продолжить?" n || die "Недостаточно места"
+  fi
 }
-
 pkg_install() {
-  [ $# -eq 0 ] && return 0
   case "$PKG" in
-    apt-get) run "Обновление списка пакетов" env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq || return 1
-             run "Установка: $*" env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -qq --no-install-recommends "$@" ;;
-    dnf|yum) run "Установка: $*" "$PKG" -y -q install "$@" ;;
-    zypper)  run "Установка: $*" zypper --non-interactive -q install "$@" ;;
-    pacman)  run "Установка: $*" pacman -Sy --noconfirm --needed "$@" ;;
-    *) err "Не могу установить автоматически: $*"; return 1 ;;
+    apt-get) run "Обновление apt" env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq || return 1
+             run "Установка зависимостей" env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 install -y -qq --no-install-recommends "$@" ;;
+    dnf|yum) run "Установка зависимостей" "$PKG" -y -q install "$@" ;;
+    zypper) run "Установка зависимостей" zypper --non-interactive install "$@" ;;
+    pacman) run "Установка зависимостей" pacman -Sy --noconfirm --needed "$@" ;;
   esac
 }
-
 deps() {
-  local need=() c
-  for c in curl tar gzip openssl ss pkill; do
-    command -v $c >/dev/null 2>&1 && continue
-    case "$c:$PKG" in
+  local cmd; local -a need=()
+  for cmd in curl tar gzip openssl ss pkill flock sha256sum timeout getent; do
+    command -v "$cmd" >/dev/null 2>&1 && continue
+    case "$cmd:$PKG" in
       ss:apt-get) need+=(iproute2) ;; ss:*) need+=(iproute) ;;
-      pkill:apt-get) need+=(procps) ;; pkill:zypper) need+=(procps) ;; pkill:*) need+=(procps-ng) ;;
-      *) need+=("$c") ;;
+      pkill:apt-get) need+=(procps) ;; pkill:*) need+=(procps-ng) ;;
+      flock:*) need+=(util-linux) ;; sha256sum:*) need+=(coreutils) ;;
+      timeout:*) need+=(coreutils) ;; getent:*) need+=(glibc-common) ;;
+      *) need+=("$cmd") ;;
     esac
   done
-  [ -e /etc/ssl/certs/ca-certificates.crt ] || [ -e /etc/pki/tls/certs/ca-bundle.crt ] || [ -e /etc/ssl/ca-bundle.pem ] || need+=(ca-certificates)
-  if [ ${#need[@]} -eq 0 ]; then ok "Все зависимости уже есть (curl, tar, gzip, openssl, ss, pkill)"; return 0; fi
-  info "Не хватает: ${need[*]}"
-  pkg_install "${need[@]}" || die "Не удалось установить зависимости. Проверьте доступ к репозиториям (DNS, время, прокси)."
+  [ "${#need[@]}" -eq 0 ] || pkg_install "${need[@]}" || die "Не удалось поставить зависимости"
 }
-
-# ─── время ────────────────────────────────────────────────────────────────────
 time_synced() { [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ]; }
-
-http_epoch() {   # время по заголовку Date (без TLS — работает даже при сбитых часах)
-  local h d
-  for h in www.google.com www.cloudflare.com ya.ru; do
-    d=$(timeout 6 bash -c "exec 3<>/dev/tcp/$h/80; printf 'HEAD / HTTP/1.1\r\nHost: $h\r\nConnection: close\r\n\r\n' >&3; cat <&3" 2>/dev/null \
-        | tr -d '\r' | sed -n 's/^[Dd]ate: //p' | head -1)
-    [ -n "$d" ] && date -d "$d" +%s 2>/dev/null && return 0
-  done
-  return 1
-}
-
-time_fix() {
+time_check() {
   if time_synced; then ok "Время синхронизировано: $(date '+%F %T %Z')"; return 0; fi
-  warn "Часы не синхронизированы ($(date '+%F %T %Z')). Для TLS, ACME и Teleport это критично."
-  if command -v chronyc >/dev/null 2>&1 && systemctl is-active -q chronyd chrony 2>/dev/null; then
-    chronyc -a 'burst 4/4' >>"$LOG" 2>&1; sleep 6; run "chrony: принудительная коррекция (makestep)" chronyc -a makestep
-  elif systemctl list-unit-files systemd-timesyncd.service >/dev/null 2>&1; then
-    timedatectl set-ntp true >>"$LOG" 2>&1; run "Перезапуск systemd-timesyncd" systemctl restart systemd-timesyncd
-  fi
-  local i; for i in $(seq 1 15); do time_synced && break; sleep 2; done
-  if time_synced; then ok "Время синхронизировано: $(date '+%F %T %Z')"; return 0; fi
-  local web now diff
-  web=$(http_epoch) || { warn "NTP не отвечает и проверить время по сети не удалось. Продолжаю как есть."; return 0; }
-  now=$(date +%s); diff=$((web - now)); [ $diff -lt 0 ] && diff=$((-diff))
-  if [ $diff -gt 30 ]; then
-    warn "Часы расходятся с реальным временем на $diff с."
-    if ask_yn "Установить время по сети сейчас?" y; then
-      date -s "@$web" >>"$LOG" 2>&1 && hwclock --systohc >>"$LOG" 2>&1
-      ok "Время установлено: $(date '+%F %T %Z')"
+  warn "NTP пока не синхронизирован: $(date '+%F %T %Z')"
+  if ! command -v chronyc >/dev/null 2>&1 &&
+     [ "$(timedatectl show -p CanNTP --value 2>/dev/null)" != yes ]; then
+    warn "Служба NTP не найдена: пробую установить chrony"
+    if pkg_install chrony; then
+      systemctl enable --now chronyd >>"$LOG" 2>&1 ||
+        systemctl enable --now chrony >>"$LOG" 2>&1 || :
     fi
-  else ok "Отклонение $diff с — допустимо (NTP досинхронизирует сам)."; fi
-}
-
-ensure_ntp() {   # после установки зависимостей: должна быть включена служба NTP
-  [ "$(timedatectl show -p NTP --value 2>/dev/null)" = yes ] && return 0
-  if [ "$(timedatectl show -p CanNTP --value 2>/dev/null)" = yes ]; then
-    run "Включение синхронизации времени (NTP)" timedatectl set-ntp true; return 0
   fi
-  pkg_install chrony && { systemctl enable --now chronyd >>"$LOG" 2>&1 || systemctl enable --now chrony >>"$LOG" 2>&1; } \
-    && ok "Установлен и включён chrony" || warn "Службу NTP включить не удалось — следите за временем вручную."
+  if command -v chronyc >/dev/null 2>&1; then
+    chronyc -a 'burst 4/4' >>"$LOG" 2>&1 || :
+    chronyc -a makestep >>"$LOG" 2>&1 || :
+  fi
+  if timedatectl show -p CanNTP --value 2>/dev/null | grep -qx yes; then
+    timedatectl set-ntp true >>"$LOG" 2>&1 || :
+  fi
+  local i; for i in 1 2 3 4 5 6 7 8; do time_synced && { ok "NTP синхронизирован"; return 0; }; sleep 2; done
+  warn "NTP не подтверждён. Проверьте дату перед ACME и Teleport. Время по HTTP не устанавливается."
 }
 
-# ─── DNS ──────────────────────────────────────────────────────────────────────
-DNS_TEST_HOSTS="cdn.teleport.dev apt.releases.teleport.dev acme-v02.api.letsencrypt.org github.com"
-
+# DNS management is optional, transactionally reversible and namespaced to this script.
 dns_manager() {
-  if systemctl is-active -q systemd-resolved 2>/dev/null && readlink /etc/resolv.conf 2>/dev/null | grep -q systemd/resolve; then echo resolved
-  elif systemctl is-active -q NetworkManager 2>/dev/null; then echo nm
+  if systemctl is-active -q systemd-resolved && readlink "$RESOLV_CONF" 2>/dev/null | grep -q systemd/resolve; then echo resolved
+  elif systemctl is-active -q NetworkManager; then echo nm
   else echo file; fi
 }
-
-dns_show() {
-  local m; m=$(dns_manager)
-  case "$m" in
-    resolved) info "DNS управляет systemd-resolved: $(resolvectl dns 2>/dev/null | awk -F': ' '$2!=""{print $2}' | xargs | tr ' ' ',')" ;;
-    nm) info "DNS управляет NetworkManager; сейчас: $(awk '/^nameserver/{print $2}' /etc/resolv.conf | xargs | tr ' ' ',')" ;;
-    file) info "DNS из /etc/resolv.conf: $(awk '/^nameserver/{print $2}' /etc/resolv.conf | xargs | tr ' ' ',')" ;;
-  esac
-  systemctl is-active -q "$DOH_UNIT" 2>/dev/null && info "Включён DoH-прокси ($DOH_UNIT, ${DOH_LISTEN}:53)."
-  [ -d "$DNS_BACKUP" ] && info "DNS изменён этим скриптом — в меню DNS доступен откат."
-}
-
-dns_test() {   # → число неудачных разрешений; печатает результат по каждому имени
-  local h t0 ms fails=0
-  for h in $DNS_TEST_HOSTS; do
-    t0=$(date +%s%N)
-    if timeout 6 getent ahostsv4 "$h" >/dev/null 2>&1; then ms=$(( ($(date +%s%N) - t0) / 1000000 )); ok "$h — ${ms} мс"
-    else err "$h — не разрешается"; fails=$((fails + 1)); fi
+dns_test() {
+  local h bad=0
+  for h in cdn.teleport.dev apt.releases.teleport.dev acme-v02.api.letsencrypt.org github.com; do
+    if timeout 8 getent ahostsv4 "$h" >/dev/null 2>&1; then ok "DNS $h"; else err "DNS $h"; bad=1; fi
   done
-  return $fails
+  return "$bad"
 }
-
-local_ips() { ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | xargs; }
-public_ip() {
-  local u ip
-  for u in https://api.ipify.org https://ifconfig.me/ip https://icanhazip.com; do
-    ip=$(curl -fs -m5 "$u" 2>/dev/null | tr -d '[:space:]'); is_ip "$ip" && { echo "$ip"; return 0; }
-  done; return 1
-}
-public_a() {   # A-записи домена в публичном DNS (через DoH, мимо локального резолвера)
-  local r
-  r=$(curl -fs -m6 -H 'accept: application/dns-json' "https://cloudflare-dns.com/dns-query?name=$1&type=A" 2>/dev/null) \
-    || r=$(curl -fs -m6 "https://dns.google/resolve?name=$1&type=A" 2>/dev/null)
-  grep -oE '"data": ?"[0-9.]+"' <<<"$r" | grep -oE '[0-9.]{7,}' | xargs
-}
-
-dns_check_domain() {   # dns_check_domain домен режим_сертификата
-  local d=$1 mode=$2 loc pub lips pip
-  hdr "Проверка DNS для $d"
-  loc=$(getent ahostsv4 "$d" 2>/dev/null | awk '{print $1}' | sort -u | xargs)
-  pub=$(public_a "$d"); lips=$(local_ips); pip=$(public_ip)
-  info "Адреса этой машины: ${lips:-?}; внешний IP: ${pip:-не определён}"
-  if [ -n "$loc" ]; then ok "Локально $d → $loc"; else warn "Локальный DNS не знает $d"; fi
-  if [ -n "$pub" ]; then ok "Публичный DNS: $d → $pub"; else warn "В публичном DNS записи $d нет"; fi
-  if [ "$mode" = acme-teleport ]; then
-    if [ -z "$pub" ]; then
-      warn "Встроенному ACME Teleport нужна ПУБЛИЧНАЯ A-запись $d → ${pip:-внешний IP} и доступный из интернета порт 443."
-      warn "Без этого сертификат не выпустится (Teleport будет работать, но с ошибкой TLS)."
-    elif [ -n "$pip" ] && [[ " $pub " != *" $pip "* ]]; then
-      warn "Публичная запись ($pub) не совпадает с внешним IP ($pip). Проверьте A-запись и проброс 443."
-    else ok "Публичная запись совпадает с внешним IP — встроенный ACME должен сработать (если 443 открыт снаружи)."; fi
-  else
-    if [ -z "$loc" ]; then
-      warn "Клиенты должны находить $d. Добавьте A-запись $d → ${lips%% *} в DNS (роутер/локальный DNS/регистратор)"
-      warn "или строку «${lips%% *} $d» в hosts на клиентских машинах."
-    elif ! grep -qw -- "${loc%% *}" <<<"$lips $pip"; then
-      warn "$d указывает на ${loc%% *}, а у этой машины адреса $lips. Если это не NAT/проброс — исправьте запись."
-    fi
-  fi
-}
-
-# DNS-провайдеры: имя | обычные адреса | DoH-хост (пусто — DoH нет)
-DNS_PROVIDERS=(
-  "Cloudflare|1.1.1.1 1.0.0.1|cloudflare-dns.com"
-  "Google|8.8.8.8 8.8.4.4|dns.google"
-  "Quad9|9.9.9.9 149.112.112.112|dns.quad9.net"
-  "AdGuard (без фильтрации)|94.140.14.140 94.140.14.141|unfiltered.adguard-dns.com"
-  "Яндекс|77.88.8.8 77.88.8.1|common.dot.dns.yandex.net"
-)
-
-dns_backup() {
+dns_backup_once() {
   [ -d "$DNS_BACKUP" ] && return 0
-  mkdir -p "$DNS_BACKUP"; dns_manager >"$DNS_BACKUP/manager"
-  cp -P /etc/resolv.conf "$DNS_BACKUP/resolv.conf" 2>/dev/null
-  log "DNS backup saved to $DNS_BACKUP"
+  [ ! -e "$RESOLVED_DROPIN" ] || { err "Чужой файл $RESOLVED_DROPIN"; return 1; }
+  [ ! -e "$NM_DROPIN" ] || { err "Чужой файл $NM_DROPIN"; return 1; }
+  [ ! -e "/etc/systemd/system/$DOH_UNIT.service" ] || { err "Чужой сервис $DOH_UNIT"; return 1; }
+  [ ! -e "$DOH_CONF" ] || { err "Чужой конфиг $DOH_CONF"; return 1; }
+  mkdir -p "$DNS_BACKUP"; chmod 700 "$DNS_BACKUP"
+  dns_manager >"$DNS_BACKUP/manager"
+  if ! cp -a "$RESOLV_CONF" "$DNS_BACKUP/resolv.conf"; then rm -rf "$DNS_BACKUP"; return 1; fi
 }
-
-write_resolv() {   # write_resolv "ip ip"
-  local keep; keep=$(grep -E '^(search|domain)[[:space:]]' "$DNS_BACKUP/resolv.conf" 2>/dev/null || grep -E '^(search|domain)[[:space:]]' /etc/resolv.conf 2>/dev/null)
-  rm -f /etc/resolv.conf.tmp
-  {
-    echo "# Создано deploy-teleport.sh $(date '+%F %T'). Откат: меню скрипта → DNS → вернуть исходные."
-    [ -n "$keep" ] && echo "$keep"
-    for ip in $1; do echo "nameserver $ip"; done
-    echo "options timeout:2 attempts:2"
-  } >/etc/resolv.conf.tmp
-  [ -L /etc/resolv.conf ] && rm -f /etc/resolv.conf
-  mv -f /etc/resolv.conf.tmp /etc/resolv.conf; chmod 644 /etc/resolv.conf; fix_context /etc/resolv.conf
+dns_set_resolv() {
+  local list=$1 keep tmp
+  keep=$(grep -E '^(search|domain)[[:space:]]' "$RESOLV_CONF" 2>/dev/null || :)
+  tmp=$(mktemp "$(dirname "$RESOLV_CONF")/.teleport-resolv.XXXXXX") || return 1
+  { printf '# Managed by deploy-teleport.sh; restore from menu\n'; [ -z "$keep" ] || printf '%s\n' "$keep"
+    for ip in $list; do printf 'nameserver %s\n' "$ip"; done
+    printf 'options timeout:2 attempts:2\n'; } >"$tmp"
+  chmod 644 "$tmp"
+  rm -f "$RESOLV_CONF"
+  mv -f "$tmp" "$RESOLV_CONF"
+  fix_context "$RESOLV_CONF"
 }
-
-dns_point_to() {   # направить системный резолвер на адреса "ip ip"
-  local m; m=$(cat "$DNS_BACKUP/manager" 2>/dev/null || dns_manager)
-  case "$m" in
+dns_apply_resolver() {
+  local addresses=$1 manager
+  manager=$(cat "$DNS_BACKUP/manager")
+  case "$manager" in
     resolved)
       mkdir -p "${RESOLVED_DROPIN%/*}"
-      printf '# deploy-teleport.sh — откат: удалить файл и перезапустить systemd-resolved\n[Resolve]\nDNS=%s\nFallbackDNS=\nDomains=~.\nDNSOverTLS=no\n' "$1" >"$RESOLVED_DROPIN"
+      printf '[Resolve]\nDNS=%s\nFallbackDNS=\nDomains=~.\nDNSOverTLS=no\n' "$addresses" >"$RESOLVED_DROPIN"
       systemctl restart systemd-resolved >>"$LOG" 2>&1 ;;
     nm)
-      printf '# deploy-teleport.sh — NetworkManager не трогает resolv.conf\n[main]\ndns=none\n' >"$NM_DROPIN"
-      systemctl reload NetworkManager >>"$LOG" 2>&1 || systemctl restart NetworkManager >>"$LOG" 2>&1
-      write_resolv "$1" ;;
-    *) write_resolv "$1" ;;
+      # Explicit opt-in is required: NetworkManager's global DNS plugin will be changed.
+      mkdir -p "${NM_DROPIN%/*}"
+      printf '[main]\ndns=none\n' >"$NM_DROPIN"
+      systemctl reload NetworkManager >>"$LOG" 2>&1 || return 1
+      dns_set_resolv "$addresses" ;;
+    file) dns_set_resolv "$addresses" ;;
+    *) return 1 ;;
   esac
 }
-
 dns_restore() {
-  [ -d "$DNS_BACKUP" ] || { info "DNS этим скриптом не менялся — откатывать нечего."; return 0; }
-  local m; m=$(cat "$DNS_BACKUP/manager")
+  [ -d "$DNS_BACKUP" ] || { info "DNS не изменён этим скриптом"; return 0; }
+  local manager; manager=$(cat "$DNS_BACKUP/manager")
+  # First restore resolver; only then stop the DoH backend.
   rm -f "$RESOLVED_DROPIN" "$NM_DROPIN"
-  if systemctl list-unit-files "$DOH_UNIT.service" >/dev/null 2>&1; then
-    systemctl disable --now "$DOH_UNIT" >>"$LOG" 2>&1; rm -f "/etc/systemd/system/$DOH_UNIT.service"; systemctl daemon-reload
-  fi
-  rm -f "$DOH_BIN" "$DOH_CONF"; rmdir "${DOH_CONF%/*}" 2>/dev/null
-  if [ -e "$DNS_BACKUP/resolv.conf" ] || [ -L "$DNS_BACKUP/resolv.conf" ]; then rm -f /etc/resolv.conf; cp -P "$DNS_BACKUP/resolv.conf" /etc/resolv.conf; fix_context /etc/resolv.conf; fi
-  case "$m" in
-    resolved) systemctl restart systemd-resolved >>"$LOG" 2>&1 ;;
-    nm) systemctl reload NetworkManager >>"$LOG" 2>&1 || systemctl restart NetworkManager >>"$LOG" 2>&1 ;;
+  local restore_tmp="$(dirname "$RESOLV_CONF")/.teleport-resolv-restore.$$"
+  rm -f "$restore_tmp"
+  cp -a "$DNS_BACKUP/resolv.conf" "$restore_tmp" || { err "Не удалось подготовить восстановление resolv.conf"; return 1; }
+  mv -Tf "$restore_tmp" "$RESOLV_CONF" || { err "Не удалось вернуть resolv.conf"; return 1; }
+  fix_context "$RESOLV_CONF"
+  case "$manager" in
+    resolved) systemctl restart systemd-resolved >>"$LOG" 2>&1 || warn "Не удалось перезапустить resolved" ;;
+    nm) systemctl reload NetworkManager >>"$LOG" 2>&1 || warn "Не удалось перечитать NetworkManager" ;;
   esac
-  rm -rf "$DNS_BACKUP"
-  ok "Исходные настройки DNS восстановлены."
-}
-
-doh_stamp() {   # DoH-штамп dnscrypt без пиннинга сертификата: адрес, хост, путь
-  _lp() { printf "\\x$(printf %02x ${#1})%s" "$1"; }
-  { printf '\x02\x00\x00\x00\x00\x00\x00\x00\x00'; _lp "$1"; printf '\x00'; _lp "$2"; _lp "$3"; } | base64 -w0 | tr '+/' '-_' | tr -d '='
-}
-
-doh_install() {   # doh_install "ip ip" хост
-  if [ ! -x "$DOH_BIN" ]; then
-    [ -n "$DOH_ARCH" ] || { err "Для этой архитектуры DoH-прокси не поддерживается."; return 1; }
-    local f="dnscrypt-proxy-linux_${DOH_ARCH}-${DOH_VER}.tar.gz" tmp="$CACHE_DIR/doh"
-    rm -rf "$tmp"; mkdir -p "$tmp"
-    run "Загрузка dnscrypt-proxy $DOH_VER" curl -fsSL --retry 3 -m 180 -o "$tmp/$f" "https://github.com/DNSCrypt/dnscrypt-proxy/releases/download/$DOH_VER/$f" || return 1
-    tar xzf "$tmp/$f" -C "$tmp" || return 1
-    install -m 0755 "$tmp/linux-${DOH_ARCH}/dnscrypt-proxy" "$DOH_BIN" && fix_context "$DOH_BIN"; rm -rf "$tmp"
+  systemctl disable --now "$DOH_UNIT.service" >>"$LOG" 2>&1 || :
+  rm -f "/etc/systemd/system/$DOH_UNIT.service" "$DOH_CONF"
+  [ ! -f "$DNS_BACKUP/doh_binary_owned" ] || rm -f "$DOH_BIN"
+  rmdir "${DOH_CONF%/*}" 2>/dev/null || :
+  systemctl daemon-reload >>"$LOG" 2>&1 || :
+  if dns_test; then
+    rm -rf -- "$DNS_BACKUP"
+    ok "Исходный DNS восстановлен и проверен"
+  else
+    warn "Конфигурация возвращена, но DNS-проверка не прошла. Резервная копия сохранена: $DNS_BACKUP"
+    return 1
   fi
-  if ss -Hlnu 2>/dev/null | awk '{print $4}' | grep -qE "^(0\.0\.0\.0|\*|\[::\]|${DOH_LISTEN//./\\.}):53$"; then
-    err "Порт 53 на ${DOH_LISTEN} или на всех адресах уже занят: $(ss -Hlnup 'sport = :53' | awk '{print $NF}' | head -1)"; return 1
-  fi
-  local names='' static='' i=0 ip
-  for ip in $1; do
-    i=$((i + 1)); names="${names:+$names, }'s$i'"
-    static+="[static.s$i]"$'\n'"stamp = 'sdns://$(doh_stamp "$ip" "$2" /dns-query)'"$'\n'
+}
+# DNS stamp: sdns://Ag... for DNS-over-HTTPS (DNSCrypt specification).
+doh_stamp() {
+  local ip=$1 host=$2 path=/dns-query
+  { printf '\x02\x00\x00\x00\x00\x00\x00\x00\x00'
+    printf '%b%s' "$(printf '\\x%02x' "${#ip}")" "$ip"
+    printf '\x00'
+    printf '%b%s' "$(printf '\\x%02x' "${#host}")" "$host"
+    printf '%b%s' "$(printf '\\x%02x' "${#path}")" "$path"
+  } | openssl base64 -A | tr '+/' '-_' | tr -d '='
+}
+doh_install_bin() {
+  [ -x "$DOH_BIN" ] && return 0
+  local da=$ARCH name file dir
+  [ "$ARCH" != amd64 ] || da=x86_64
+  name="dnscrypt-proxy-linux_${da}-${DOH_VER}.tar.gz"
+  dir=$(mktemp -d "$TMP_DIR/doh.XXXXXX") || return 1
+  file="$dir/$name"
+  run "Загрузка dnscrypt-proxy" curl -fsSL --retry 3 -m 180 -o "$file" "https://github.com/DNSCrypt/dnscrypt-proxy/releases/download/$DOH_VER/$name" || return 1
+  tar -xzf "$file" -C "$dir" "linux-${da}/dnscrypt-proxy" >>"$LOG" 2>&1 || { err "Архив dnscrypt-proxy не подходит"; return 1; }
+  install -m 0755 "$dir/linux-${da}/dnscrypt-proxy" "$DOH_BIN" || return 1
+  touch "$DNS_BACKUP/doh_binary_owned"
+  fix_context "$DOH_BIN"
+}
+doh_configure() {
+  local ips=$1 host=$2 ip i=0 name stamp names=; local -a entries=()
+  for ip in $ips; do
+    i=$((i + 1)); name="server$i"; names="${names:+$names, }'$name'"
+    stamp=$(doh_stamp "$ip" "$host") || return 1
+    entries+=("[static.$name]" "stamp = 'sdns://$stamp'")
   done
   mkdir -p "${DOH_CONF%/*}"
-  cat >"$DOH_CONF" <<EOF
-# deploy-teleport.sh — DoH-прокси ($2). Откат: меню скрипта → DNS → вернуть исходные.
-listen_addresses = ['${DOH_LISTEN}:53']
-ipv4_servers = true
-ipv6_servers = false
-dnscrypt_servers = false
-doh_servers = true
-odoh_servers = false
-server_names = [$names]
-lb_strategy = 'first'
-timeout = 3000
-keepalive = 30
-cache = true
-cache_size = 4096
-netprobe_timeout = -1
-netprobe_address = '${1%% *}:443'
-ignore_system_dns = true
-bootstrap_resolvers = ['${1%% *}:53']
-log_level = 2
-
-[static]
-$static
-EOF
+  {
+    printf 'listen_addresses = [\x27%s:53\x27]\n' "$DOH_LISTEN"
+    printf 'ipv4_servers = true\nipv6_servers = false\ndnscrypt_servers = false\ndoh_servers = true\nodoh_servers = false\n'
+    printf 'server_names = [%s]\nlb_strategy = \x27first\x27\ntimeout = 3000\nkeepalive = 30\ncache = true\ncache_size = 4096\n' "$names"
+    printf 'netprobe_timeout = 15\nnetprobe_address = \x27%s:443\x27\nignore_system_dns = true\n' "${ips%% *}"
+    printf 'bootstrap_resolvers = [\x27%s:53\x27]\nlog_level = 2\n\n[static]\n' "${ips%% *}"
+    printf '%s\n' "${entries[@]}"
+  } >"$DOH_CONF"
+  chmod 600 "$DOH_CONF"
+  "$DOH_BIN" -config "$DOH_CONF" -check >>"$LOG" 2>&1 || return 1
   cat >"/etc/systemd/system/$DOH_UNIT.service" <<EOF
 [Unit]
-Description=DNS-over-HTTPS proxy (dnscrypt-proxy, deploy-teleport.sh)
+Description=Teleport setup local DoH resolver
 After=network-online.target
-Wants=network-online.target nss-lookup.target
-Before=nss-lookup.target
-
+Wants=network-online.target
 [Service]
 ExecStart=$DOH_BIN -config $DOH_CONF
-Restart=always
+Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
-
 [Install]
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  run "Проверка конфигурации DoH" "$DOH_BIN" -config "$DOH_CONF" -check || return 1
-  run "Запуск DoH-прокси" systemctl enable --now "$DOH_UNIT" || return 1
-  local _; for _ in $(seq 1 10); do "$DOH_BIN" -config "$DOH_CONF" -resolve example.com >>"$LOG" 2>&1 && return 0; sleep 1; done
-  err "DoH-прокси запустился, но не отвечает (провайдер недоступен по HTTPS?)."; return 1
+  if systemctl is-active -q "$DOH_UNIT.service"; then
+    run "Перезапуск DoH" systemctl restart "$DOH_UNIT.service"
+  else
+    run "Запуск DoH" systemctl enable --now "$DOH_UNIT.service"
+  fi || return 1
+  "$DOH_BIN" -config "$DOH_CONF" -resolve example.com >>"$LOG" 2>&1
 }
-
+DNS_PROVIDERS=(
+  'Cloudflare|1.1.1.1 1.0.0.1|cloudflare-dns.com'
+  'Google|8.8.8.8 8.8.4.4|dns.google'
+  'Quad9|9.9.9.9 149.112.112.112|dns.quad9.net'
+  'AdGuard без фильтра|94.140.14.140 94.140.14.141|unfiltered.adguard-dns.com'
+  'Яндекс|77.88.8.8 77.88.8.1|common.dot.dns.yandex.net'
+)
 dns_change() {
-  hdr "Замена DNS-серверов"
-  local i p name ips doh
-  for i in "${!DNS_PROVIDERS[@]}"; do
-    IFS='|' read -r name ips doh <<<"${DNS_PROVIDERS[$i]}"
-    printf '   %s%d)%s %s %s\n' "$CL" $((i + 1)) "$C0" "$(pad "$name" 26)" "$CD$ips${doh:+ · DoH: $doh}$C0"
+  local n label ips host mode=plain i p manager snapshot chk
+  hdr "Изменение DNS (необязательная функция)"
+  i=0; for n in "${DNS_PROVIDERS[@]}"; do i=$((i+1)); IFS='|' read -r label ips host <<<"$n"; say "  $i) $label — $ips"; done
+  say "  $((i+1))) Свои IPv4-адреса"; say "  0) Отмена"
+  ask_num "DNS-провайдер" "$((i+1))" 0; p=$ANSWER
+  [ "$p" -ne 0 ] || return 0
+  if [ "$p" -le "${#DNS_PROVIDERS[@]}" ]; then
+    IFS='|' read -r label ips host <<<"${DNS_PROVIDERS[$((p-1))]}"
+  else
+    ask "IPv4 через пробел (DoH для своих IP недоступен)" ""; ips=$ANSWER; host=
+    [ -n "$ips" ] || { err "Нужен адрес"; return 1; }
+    for n in $ips; do is_ip "$n" || { err "Некорректный IPv4: $n"; return 1; }; done
+  fi
+  if [ -n "$host" ]; then say "  1) Обычный DNS   2) DNS-over-HTTPS"; ask_num "Режим" 2 1; [ "$ANSWER" -eq 2 ] && mode=doh; [ "$ANSWER" -eq 0 ] && return 0; fi
+  manager=$(dns_manager)
+  warn "Изменение DNS может прервать SSH/VPN и локальное разрешение имён (*.lan)."
+  [ "$manager" != nm ] || warn "NetworkManager: будет временно изменён способ управления resolv.conf."
+  ask_yn "Продолжить изменение DNS?" n || return 0
+  # Store current managed state for rollback on every switch, without touching original backup.
+  snapshot=$(mktemp -d "$TMP_DIR/dns-snapshot.XXXXXX") || return 1
+  cp -a "$RESOLV_CONF" "$snapshot/resolv.conf" || return 1
+  for n in "$RESOLVED_DROPIN" "$NM_DROPIN" "$DOH_CONF" "/etc/systemd/system/$DOH_UNIT.service"; do
+    [ ! -e "$n" ] || { mkdir -p "$snapshot$(dirname "$n")"; cp -a "$n" "$snapshot$n"; }
   done
-  printf '   %s%d)%s Свои адреса DNS-серверов\n   %s0)%s Отмена\n' "$CL" $(( ${#DNS_PROVIDERS[@]} + 1 )) "$C0" "$CL" "$C0"
-  ask_num "Провайдер" $(( ${#DNS_PROVIDERS[@]} + 1 )) 1; p=$ANSWER
-  [ "$p" -eq 0 ] && return 0
-  local mode=plain
-  if [ "$p" -le ${#DNS_PROVIDERS[@]} ]; then
-    IFS='|' read -r name ips doh <<<"${DNS_PROVIDERS[$((p - 1))]}"
-    if [ -n "$doh" ]; then
-      say "   ${CL}1)${C0} Обычный DNS (порт 53)   ${CL}2)${C0} DNS-over-HTTPS (шифрованный, через локальный прокси dnscrypt-proxy)"
-      ask_num "Режим" 2 2; [ "$ANSWER" -eq 2 ] && mode=doh; [ "$ANSWER" -eq 0 ] && return 0
-    fi
-  else
-    while true; do
-      ask "IP-адреса DNS-серверов через пробел или запятую" ""
-      ips=; local bad=; for i in ${ANSWER//[,;]/ }; do if is_ip "$i"; then ips="${ips:+$ips }$i"; else bad="$bad $i"; fi; done
-      [ -n "$bad" ] && { warn "Не IPv4-адреса:$bad"; continue; }
-      [ -n "$ips" ] && break; warn "Нужен хотя бы один адрес."
-    done; name="свои ($ips)"
-  fi
-  local cur; cur=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf)
-  [ "$(dns_manager)" = resolved ] && cur=$(resolvectl dns 2>/dev/null | awk -F': ' '$2!=""{print $2; exit}' | awk '{print $1}')
-  if [ ! -d "$DNS_BACKUP" ] && [[ "$cur" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.) ]]; then
-    warn "Сейчас DNS — локальный сервер $cur (обычно роутер). Если он резолвит локальные имена (*.lan),"
-    warn "блокирует рекламу или маршрутизирует по доменам (podkop, VPN по спискам) — после замены это перестанет работать."
-    ask_yn "Всё равно заменить?" n || return 0
-  fi
-  local fresh=0; [ -d "$DNS_BACKUP" ] || fresh=1
-  dns_backup
+  local was_doh=0 had_backup=0
+  systemctl is-active -q "$DOH_UNIT" && was_doh=1
+  [ -d "$DNS_BACKUP" ] && had_backup=1
+  dns_backup_once || return 1
+  chk=0
   if [ "$mode" = doh ]; then
-    if ! doh_install "$ips" "$doh"; then
-      warn "DoH не включён. Системные DNS остались прежними."
-      systemctl disable --now "$DOH_UNIT" >>"$LOG" 2>&1; [ $fresh = 1 ] && rm -rf "$DNS_BACKUP"; return 1
-    fi
-    dns_point_to "$DOH_LISTEN"
+    doh_install_bin && doh_configure "$ips" "$host" && dns_apply_resolver "$DOH_LISTEN" && dns_test || chk=1
   else
-    dns_point_to "$ips"
+    dns_apply_resolver "$ips" && dns_test || chk=1
   fi
-  info "Проверка после замены:"
-  if dns_test; then ok "DNS переключён: $name$( [ "$mode" = doh ] && echo " (DNS-over-HTTPS)")"; state_set DNS_MODE "$name/$mode"
-  else
-    warn "С новыми DNS не всё разрешается."
-    if ask_yn "Вернуть исходные настройки DNS?" y; then dns_restore; fi
+  if [ "$chk" -eq 0 ]; then
+    if [ "$mode" = plain ]; then systemctl disable --now "$DOH_UNIT" >>"$LOG" 2>&1 || :; fi
+    state_set DNS_MODE "$label/$mode"
+    ok "DNS переключён: $label ($mode)"; return 0
   fi
-}
-
-dns_step() {   # шаг установки: проверить DNS, предложить замену
-  dns_show
-  if [ -d "$DNS_BACKUP" ] && ask_yn "DNS ранее изменён этим скриптом. Вернуть исходные настройки?" n; then dns_restore; fi
-  if dns_test; then
-    ok "DNS работает."
-    ask_yn "Заменить DNS на публичные серверы (можно с шифрованием DoH)? Необязательно." n && dns_change
-  else
-    warn "Часть адресов не разрешается — установка может не пройти."
-    ask_yn "Заменить DNS на публичные серверы сейчас?" y && dns_change
+  err "DNS не прошёл проверку, восстанавливаю предыдущую конфигурацию"
+  if cp -a "$snapshot/resolv.conf" "$(dirname "$RESOLV_CONF")/.teleport-dns-rollback.$$"; then
+    mv -Tf "$(dirname "$RESOLV_CONF")/.teleport-dns-rollback.$$" "$RESOLV_CONF" || :
   fi
-}
-
-# ─── Teleport: версии, загрузка, бинарники ────────────────────────────────────
-tp_installed() { [ -x "$BIN_DIR/teleport" ] || command -v teleport >/dev/null 2>&1 || [ -f "$UNIT" ] || [ -f /lib/systemd/system/teleport.service ] || [ -f /usr/lib/systemd/system/teleport.service ]; }
-tp_version() { teleport version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 | tr -d v; }
-tp_pkg_managed() {   # установлен пакетом (deb/rpm) или teleport-update (/opt/teleport)?
-  local p; p=$(readlink -f "$(command -v teleport 2>/dev/null)" 2>/dev/null)
-  [[ "$p" == /opt/teleport/* ]] && return 0
-  rpm -q teleport >/dev/null 2>&1 || rpm -q teleport-ent >/dev/null 2>&1 && return 0
-  dpkg -s teleport >/dev/null 2>&1 && return 0
+  for n in "$RESOLVED_DROPIN" "$NM_DROPIN" "$DOH_CONF" "/etc/systemd/system/$DOH_UNIT.service"; do
+    rm -f "$n"
+    if [ -e "$snapshot$n" ]; then mkdir -p "$(dirname "$n")"; cp -a "$snapshot$n" "$n"; fi
+  done
+  systemctl daemon-reload >>"$LOG" 2>&1 || :
+  case "$manager" in resolved) systemctl restart systemd-resolved >>"$LOG" 2>&1 || : ;; nm) systemctl reload NetworkManager >>"$LOG" 2>&1 || : ;; esac
+  if [ "$was_doh" -eq 1 ]; then systemctl restart "$DOH_UNIT" >>"$LOG" 2>&1 || :; else systemctl disable --now "$DOH_UNIT" >>"$LOG" 2>&1 || :; fi
+  if [ "$had_backup" -eq 0 ]; then rm -rf "$DNS_BACKUP"; fi
+  dns_test || warn "DNS всё ещё не работает: проверьте сеть вручную"
   return 1
 }
+dns_step() {
+  if dns_test; then ok "Системный DNS работает"; else warn "Некоторые имена не разрешаются"; fi
+  ask_yn "Изменить системный DNS? (не обязательно)" n && dns_change || :
+}
+
+# Advisory only: a valid local FQDN resolution does not prove public reachability.
+dns_check_domain() {
+  local name=$1 mode=$2 resolved publicip
+  hdr "Домен и доступность"
+  resolved=$(getent ahostsv4 "$name" 2>/dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' || :)
+  if [ -z "$resolved" ]; then
+    warn "$name не разрешается локальным DNS. Клиентам понадобится корректная A-запись/hosts."
+  else
+    info "$name → $resolved"
+  fi
+  publicip=$(curl -fsSL --max-time 7 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || :)
+  if is_ip "$publicip"; then info "Публичный IPv4 (по ipify): $publicip"; fi
+  if [ "$mode" = acme-teleport ]; then
+    warn "Встроенный ACME требует публичный DNS и доступ к TCP/443 из интернета."
+    if [ -n "$resolved" ] && is_ip "$publicip" && [[ " $resolved " != *" $publicip "* ]]; then
+      warn "Текущая DNS-резолюция не совпадает с публичным IP (NAT/split DNS допустимы)."
+    fi
+  elif [ -z "$resolved" ]; then
+    warn "При DNS-01 сертификат выпустится, но клиенты не найдут этот сервер без DNS/hosts."
+  fi
+}
+
+# Installation: conservative by design. Neither packages nor /opt/teleport are overwritten.
+tp_installed() {
+  [ -f "$UNIT" ] || [ -f /lib/systemd/system/teleport.service ] || [ -f /usr/lib/systemd/system/teleport.service ] ||
+  [ -x "$BIN_DIR/teleport" ] || command -v teleport >/dev/null 2>&1
+}
+tp_owned() {
+  [ -f "$STATE" ] && [ -f "$UNIT" ] && [ -x "$BIN_DIR/teleport" ] || return 1
+  local p
+  p=$(readlink -f "$BIN_DIR/teleport")
+  [[ $p == "$BIN_DIR/teleport" ]] || return 1
+  if command -v rpm >/dev/null 2>&1 && rpm -qf "$p" >/dev/null 2>&1; then return 1; fi
+  if command -v dpkg-query >/dev/null 2>&1 && dpkg-query -S "$p" >/dev/null 2>&1; then return 1; fi
+  return 0
+}
+tp_version() { "$BIN_DIR/teleport" version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 | tr -d v || :; }
 tp_majors() {
-  curl -fsSL -m 25 "$TP_INDEX/Release" 2>>"$LOG" | awk '/^Components:/{for(i=2;i<=NF;i++) if($i ~ /^stable\/v[0-9]+$/){v=substr($i,9); if(v+0<900) print v}}' | sort -n
+  curl -fsSL --retry 2 -m 25 "$TP_INDEX/Release" 2>>"$LOG" |
+    awk '/^Components:/{for(i=2;i<=NF;i++)if($i~/^stable\/v[0-9]+$/){v=$i;sub(/^stable\/v/,"",v);print v}}' | sort -n
 }
 tp_latest_in() {
-  curl -fsSL -m 40 "$TP_INDEX/stable/v$1/binary-amd64/Packages.gz" 2>>"$LOG" | gzip -dc 2>/dev/null \
-    | awk '/^Package: /{p=($2=="teleport")} p&&/^Version: /{print $2}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
+  curl -fsSL --retry 2 -m 40 "$TP_INDEX/stable/v$1/binary-amd64/Packages.gz" 2>>"$LOG" |
+    gzip -dc 2>>"$LOG" |
+    awk '/^Package: /{p=($2=="teleport")}p&&/^Version: /{print $2}' |
+    grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
 }
-ver_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" = "$1" ]; }
-
-local_tarball() {   # найти заранее скачанный архив; $1 — версия или пусто (любая)
-  local f
-  for f in "$SCRIPT_DIR"/teleport-v${1:-*}-linux-"$ARCH"-bin.tar.gz "$PWD"/teleport-v${1:-*}-linux-"$ARCH"-bin.tar.gz; do
-    [ -f "$f" ] && { echo "$f"; return 0; }
-  done; return 1
+local_tarball() {
+  local v=$1 f name
+  for f in "$(pwd)"/teleport-v"$v"-linux-"$ARCH"-bin.tar.gz \
+           "$SCRIPT_DIR"/teleport-v"$v"-linux-"$ARCH"-bin.tar.gz; do
+    [ ! -f "$f" ] || { echo "$f"; return 0; }
+  done
+  return 1
 }
-
-tp_pick_version() {   # → $TP_TARGET
-  TP_TARGET=; local majors last lt
-  if [[ "${TELEPORT_SETUP_VERSION#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    TP_TARGET=${TELEPORT_SETUP_VERSION#v}; info "Версия задана через TELEPORT_SETUP_VERSION: $TP_TARGET"; return 0
+tp_pick_version() {
+  local majors last v
+  TP_TARGET=
+  if [[ ${TELEPORT_SETUP_VERSION:-} =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    TP_TARGET=${TELEPORT_SETUP_VERSION#v}; info "Версия задана: $TP_TARGET"; return 0
   fi
-  printf '  %s…%s Определяю последнюю версию Teleport' "$CD" "$C0"
-  majors=$(tp_majors); last=$(echo "$majors" | tail -1)
-  [ -n "$last" ] && TP_TARGET=$(tp_latest_in "$last")
-  printf '\r\e[K'
-  if [ -n "$TP_TARGET" ]; then ok "Последняя версия Teleport: $TP_TARGET"; return 0; fi
-  warn "Не удалось получить список версий с apt.releases.teleport.dev."
-  if lt=$(local_tarball ""); then
-    TP_TARGET=$(basename "$lt" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+'); info "Найден локальный архив: $lt"
-    ask_yn "Установить из него версию $TP_TARGET?" y && return 0
-  fi
-  while true; do
-    ask "Введите версию вручную (например 18.11.8)" ""
-    [[ "${ANSWER#v}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && { TP_TARGET=${ANSWER#v}; return 0; }
-    warn "Формат версии: X.Y.Z"
+  majors=$(tp_majors); last=$(tail -1 <<<"$majors")
+  if [ -n "$last" ]; then TP_TARGET=$(tp_latest_in "$last"); fi
+  if [ -n "$TP_TARGET" ]; then ok "Доступна версия $TP_TARGET"; return 0; fi
+  warn "Список версий недоступен. Можно указать версию вручную."
+  while :; do
+    ask "Точная версия X.Y.Z" "18.11.10"; v=${ANSWER#v}
+    [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && { TP_TARGET=$v; return 0; }
+    warn "Некорректная версия"
   done
 }
-
-tp_fetch() {   # tp_fetch версия → $TP_TARBALL (проверенный архив)
-  local v=$1 f="teleport-v$1-linux-$ARCH-bin.tar.gz" sum='' lf try
-  sum=$(curl -fsSL -m 20 "$TP_CDN/$f.sha256" 2>>"$LOG" | awk '{print $1}')
-  if lf=$(local_tarball "$v"); then
-    info "Использую локальный архив: $lf"
-    if [ -z "$sum" ]; then
-      warn "Контрольную сумму с сайта получить не удалось — проверить архив нельзя."
-      ask_yn "Использовать архив без проверки?" n || return 1
-      TP_TARBALL=$lf; return 0
+tp_fetch() {
+  local v=$1 file="teleport-v$1-linux-$ARCH-bin.tar.gz" sum f attempt expected localfile
+  localfile=$(local_tarball "$v") || localfile=
+  sum=$(curl -fsSL --retry 2 -m 25 "$TP_CDN/$file.sha256" 2>>"$LOG" | awk 'NR==1{print $1}')
+  if ! [[ $sum =~ ^[[:xdigit:]]{64}$ ]] && [ -n "$localfile" ] && [ -s "$localfile.sha256" ]; then
+    # Offline distribution: checksum file must have been fetched from a trusted source.
+    sum=$(awk 'NR==1{print $1}' "$localfile.sha256")
+    warn "Использую локальный SHA256. Подлинность самого файла .sha256 необходимо проверить отдельно."
+  fi
+  [[ $sum =~ ^[[:xdigit:]]{64}$ ]] || { err "Нет достоверного SHA256 для $file"; return 1; }
+  f=$localfile
+  [ -n "$f" ] || f="$CACHE_DIR/$file"
+  mkdir -p "$CACHE_DIR"
+  for attempt in 1 2 3; do
+    if [ -f "$f" ]; then
+      expected=$(sha256sum "$f" | awk '{print $1}')
+      if [ "${expected,,}" = "${sum,,}" ]; then TP_TARBALL=$f; ok "SHA256 $file подтверждён"; return 0; fi
+      [ "$attempt" -eq 1 ] && warn "Локальный/кешированный архив не совпадает с SHA256"
     fi
-    if [ "$(sha256sum "$lf" | awk '{print $1}')" = "$sum" ]; then ok "Контрольная сумма совпадает"; TP_TARBALL=$lf; return 0; fi
-    warn "Локальный архив повреждён (sha256 не совпадает) — скачаю заново."
+    # Keep .part between retries and resume reliably.
+    f="$CACHE_DIR/$file"
+    [ -f "$f" ] && mv -f "$f" "$f.part" || :
+    if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 900 -C - \
+       --progress-bar -o "$f.part" "$TP_CDN/$file"; then
+      warn "Загрузка не завершена, будет повторена"
+      continue
+    fi
+    expected=$(sha256sum "$f.part" | awk '{print $1}')
+    if [ "${expected,,}" = "${sum,,}" ]; then
+      mv -f "$f.part" "$f"; TP_TARBALL=$f; ok "SHA256 $file подтверждён"; return 0
+    fi
+    # Incompatible partial download; next attempt must start from zero.
+    rm -f "$f.part"; warn "Контрольная сумма не совпала (попытка $attempt)"
+  done
+  err "Не удалось загрузить проверенный Teleport $v"; return 1
+}
+tp_install_bins() {
+  local dest b staged; local -a bins=(teleport tctl tsh tbot fdpass-teleport)
+  dest=$(mktemp -d "$TMP_DIR/teleport-extract.XXXXXX") || return 1
+  tar -tzf "$TP_TARBALL" >/dev/null 2>>"$LOG" || return 1
+  tar -xzf "$TP_TARBALL" -C "$dest" \
+    teleport/teleport teleport/tctl teleport/tsh teleport/tbot teleport/fdpass-teleport \
+    >>"$LOG" 2>&1 || return 1
+  mkdir -p "$BIN_DIR" "$DATA_DIR"
+  chmod 700 "$DATA_DIR"
+  for b in "${bins[@]}"; do
+    [ -f "$dest/teleport/$b" ] || { err "Бинарник $b отсутствует в архиве"; return 1; }
+    staged="$BIN_DIR/.$b.teleport-setup.$$"
+    install -m 0755 "$dest/teleport/$b" "$staged" || return 1
+  done
+  for b in "${bins[@]}"; do
+    mv -f "$BIN_DIR/.$b.teleport-setup.$$" "$BIN_DIR/$b" || return 1
+  done
+  fix_context "$BIN_DIR/teleport" "$BIN_DIR/tctl" "$BIN_DIR/tsh" "$BIN_DIR/tbot" "$BIN_DIR/fdpass-teleport"
+  hash -r; ok "Бинарники Teleport $(tp_version) установлены"
+}
+
+# Full, verified, offline backup. Caller stops Teleport first for a consistent data snapshot.
+tp_backup() {
+  local label=$1 p dir size free archive; local -a paths=()
+  mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
+  archive="$BACKUP_DIR/teleport-$label-$(date +%Y%m%d-%H%M%S)-$$.tar.gz"
+  for p in "$CONF" "$ETC_DIR" "$DATA_DIR" "$UNIT" "$STATE_DIR" \
+           "$BIN_DIR/teleport" "$BIN_DIR/tctl" "$BIN_DIR/tsh" "$BIN_DIR/tbot" "$BIN_DIR/fdpass-teleport"; do
+    [ ! -e "$p" ] || paths+=("${p#/}")
+  done
+  [ "${#paths[@]}" -gt 0 ] || { err "Нет файлов для резервного копирования"; return 1; }
+  size=$(du -sm "$DATA_DIR" 2>/dev/null | awk '{print $1}')
+  free=$(df -Pm "$BACKUP_DIR" | awk 'NR==2{print $4}')
+  if [ -n "$size" ] && [ "$free" -lt "$((size+200))" ]; then
+    err "Для надёжного backup недостаточно места (${free} МБ свободно; данных ${size} МБ)"; return 1
   fi
-  [ -n "$sum" ] || { err "Нет доступа к $TP_CDN. Скачайте $f вручную и положите рядом со скриптом."; return 1; }
-  mkdir -p "$CACHE_DIR"; TP_TARBALL="$CACHE_DIR/$f"
-  for try in 1 2; do
-    if [ -f "$TP_TARBALL" ] && [ "$(sha256sum "$TP_TARBALL" | awk '{print $1}')" = "$sum" ]; then ok "Архив уже скачан и проверен"; return 0; fi
-    rm -f "$TP_TARBALL"
-    info "Загрузка $f (~230 МБ, докачка поддерживается):"
-    curl -fL --retry 5 --retry-delay 3 --connect-timeout 20 -C - --progress-bar -o "$TP_TARBALL.part" "$TP_CDN/$f" \
-      || curl -fL --retry 3 --connect-timeout 20 -C - --progress-bar -o "$TP_TARBALL.part" "$TP_CDN/$f"
-    [ -f "$TP_TARBALL.part" ] && mv -f "$TP_TARBALL.part" "$TP_TARBALL"
-    if [ -f "$TP_TARBALL" ] && [ "$(sha256sum "$TP_TARBALL" | awk '{print $1}')" = "$sum" ]; then ok "Загружено, sha256 совпадает"; return 0; fi
-    warn "Архив не скачался целиком или повреждён (попытка $try)."
+  if ! run "Создание резервной копии" tar -czf "$archive.part" -C / "${paths[@]}"; then
+    rm -f "$archive.part"; return 1
+  fi
+  if ! gzip -t "$archive.part" || ! tar -tzf "$archive.part" >/dev/null; then
+    rm -f "$archive.part"; err "Архив не проходит проверку"; return 1
+  fi
+  chmod 600 "$archive.part"; mv -f "$archive.part" "$archive"
+  LAST_BACKUP=$archive
+  ok "Проверенная резервная копия: $archive"
+}
+backup_prune() {
+  local -a backups=(); local i
+  mapfile -t backups < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'teleport-*.tar.gz' -printf '%T@ %p\n' | sort -rn | cut -d' ' -f2-)
+  for ((i=3; i<${#backups[@]}; i++)); do rm -f -- "${backups[$i]}"; done
+}
+tp_restore() {
+  local archive=$1 p
+  [ -f "$archive" ] && gzip -t "$archive" && tar -tzf "$archive" >/dev/null || { err "Резервная копия недоступна/повреждена"; return 1; }
+  systemctl stop teleport >>"$LOG" 2>&1 || :
+  # Remove only script-owned paths. Backup includes all node data, binaries, certificates, unit and state.
+  for p in "$CONF" "$ETC_DIR" "$DATA_DIR" "$UNIT" "$STATE_DIR" \
+           "$BIN_DIR/teleport" "$BIN_DIR/tctl" "$BIN_DIR/tsh" "$BIN_DIR/tbot" "$BIN_DIR/fdpass-teleport"; do
+    rm -rf -- "$p" || return 1
   done
-  rm -f "$TP_TARBALL" "$TP_TARBALL.part"
-  err "Не удалось скачать $f. Если сеть медленная — скачайте файл другим способом и положите рядом со скриптом:"
-  err "$TP_CDN/$f"; return 1
+  run "Восстановление данных из копии" tar -xzf "$archive" -C / || return 1
+  fix_context "$DATA_DIR" "$CONF" "$ETC_DIR" "$UNIT"
+  systemctl daemon-reload
+  systemctl enable --now teleport >>"$LOG" 2>&1 || return 1
+  wait_healthy
 }
 
-tp_install_bins() {   # распаковать нужные бинарники и атомарно заменить в $BIN_DIR
-  local tmp="$CACHE_DIR/extract" b
-  rm -rf "$tmp"; mkdir -p "$tmp" "$BIN_DIR" "$DATA_DIR"
-  run "Распаковка" tar xzf "$TP_TARBALL" -C "$tmp" teleport/teleport teleport/tctl teleport/tsh teleport/tbot teleport/fdpass-teleport || { rm -rf "$tmp"; return 1; }
-  for b in teleport tctl tsh tbot fdpass-teleport; do
-    install -m 0755 "$tmp/teleport/$b" "$BIN_DIR/.$b.new" && mv -f "$BIN_DIR/.$b.new" "$BIN_DIR/$b" || { rm -rf "$tmp"; return 1; }
-  done
-  rm -rf "$tmp"; fix_context "$BIN_DIR"/teleport "$BIN_DIR"/tctl "$BIN_DIR"/tsh "$BIN_DIR"/tbot "$BIN_DIR"/fdpass-teleport
-  hash -r; ok "Установлено: $("$BIN_DIR/teleport" version 2>/dev/null | head -1)"
-  case "$TP_TARBALL" in "$CACHE_DIR"/*) rm -f "$TP_TARBALL" ;; esac
-}
-
-# ─── сертификаты ──────────────────────────────────────────────────────────────
-ACME_PROVIDERS=(
-  "Cloudflare|dns_cf|CF_Token:s|API-токен: dash.cloudflare.com → My Profile → API Tokens → шаблон «Edit zone DNS» для нужной зоны."
-  "reg.ru|dns_regru|REGRU_API_Username REGRU_API_Password:s|Логин reg.ru и альтернативный пароль API (ЛК → Настройки → API); IP этой машины добавьте в разрешённые."
-  "Timeweb Cloud|dns_timeweb|TW_Token:s|API-токен: панель Timeweb Cloud → API и Terraform."
-  "Beget|dns_beget|Beget_Username Beget_Password:s|Логин Beget и пароль API (ЛК → API → включить доступ к API)."
-  "DuckDNS|dns_duckdns|DuckDNS_Token:s|Токен со страницы duckdns.org (домен должен быть *.duckdns.org)."
-)
-
+# TLS certificate handling: secrets are never passed to run() or printed into logs.
 acme_sh() { "$ACME_HOME/acme.sh" --home "$ACME_HOME" --config-home "$ACME_CONF" "$@"; }
-
-acme_sh_install() {
+acme_install() {
   [ -x "$ACME_HOME/acme.sh" ] && return 0
-  local tmp="$CACHE_DIR/acme"; rm -rf "$tmp"; mkdir -p "$tmp"
-  run "Загрузка acme.sh $ACME_SH_VER" curl -fsSL --retry 3 -m 120 -o "$tmp/a.tgz" "https://github.com/acmesh-official/acme.sh/archive/refs/tags/$ACME_SH_VER.tar.gz" || return 1
-  tar xzf "$tmp/a.tgz" -C "$tmp" || return 1
-  ( cd "$tmp/acme.sh-$ACME_SH_VER" && ./acme.sh --install --home "$ACME_HOME" --config-home "$ACME_CONF" --cert-home "$ACME_CONF/certs" \
-      --accountemail "$ACME_EMAIL" --nocron --noprofile ) >>"$LOG" 2>&1 || { rm -rf "$tmp"; err "Установка acme.sh не удалась."; return 1; }
-  rm -rf "$tmp"; fix_context "$ACME_HOME"; ok "acme.sh $ACME_SH_VER установлен в $ACME_HOME"
+  local t="$CACHE_DIR/acme"; mkdir -p "$t"
+  run "Загрузка acme.sh $ACME_VER" curl -fsSL --retry 3 -m 120 \
+    -o "$t/acme.tar.gz" "https://github.com/acmesh-official/acme.sh/archive/refs/tags/$ACME_VER.tar.gz" || return 1
+  tar -xzf "$t/acme.tar.gz" -C "$t" >>"$LOG" 2>&1 || return 1
+  ( cd "$t/acme.sh-$ACME_VER" && ./acme.sh --install --home "$ACME_HOME" \
+    --config-home "$ACME_CONF" --cert-home "$ACME_CONF/certs" \
+    --accountemail "$ACME_EMAIL" --nocron --noprofile ) >>"$LOG" 2>&1 || return 1
+  chmod 700 "$ACME_HOME" "$ACME_CONF" 2>/dev/null || :
+  fix_context "$ACME_HOME"; ok "acme.sh установлен"
 }
-
 acme_timer_install() {
   cat >"/etc/systemd/system/$ACME_UNIT.service" <<EOF
 [Unit]
-Description=Продление сертификата Teleport (acme.sh)
+Description=Teleport ACME certificate renewal
 After=network-online.target
 Wants=network-online.target
-
 [Service]
 Type=oneshot
 ExecStart=$ACME_HOME/acme.sh --cron --home $ACME_HOME --config-home $ACME_CONF
 EOF
   cat >"/etc/systemd/system/$ACME_UNIT.timer" <<EOF
 [Unit]
-Description=Проверка/продление сертификата Teleport дважды в сутки
-
+Description=Check Teleport certificate renewal twice a day
 [Timer]
 OnCalendar=*-*-* 04,16:20:00
 RandomizedDelaySec=45min
 Persistent=true
-
 [Install]
 WantedBy=timers.target
 EOF
-  systemctl daemon-reload && run "Таймер автопродления ($ACME_UNIT.timer)" systemctl enable --now "$ACME_UNIT.timer"
+  systemctl daemon-reload
+  run "Таймер продления сертификатов" systemctl enable --now "$ACME_UNIT.timer"
 }
-
-# получить сертификат через acme.sh (DNS-01); ставит $CERT_DOMAINS
-cert_acme_dns() {
-  local i name hook vars hint p v vname secret
-  hdr "Сертификат через acme.sh (DNS-01)"
-  say "  DNS-01 подтверждает владение доменом через API DNS-провайдера: открытые порты и"
-  say "  публичный IP не нужны — подходит и для серверов в локальной сети."
-  for i in "${!ACME_PROVIDERS[@]}"; do
-    IFS='|' read -r name hook vars hint <<<"${ACME_PROVIDERS[$i]}"; printf '   %s%d)%s %s\n' "$CL" $((i + 1)) "$C0" "$name"
-  done
-  printf '   %s%d)%s Другой провайдер (любой из ~150, поддерживаемых acme.sh)\n' "$CL" $(( ${#ACME_PROVIDERS[@]} + 1 )) "$C0"
-  ask_num "DNS-провайдер вашего домена" $(( ${#ACME_PROVIDERS[@]} + 1 )) 1; p=$ANSWER
-  [ "$p" -eq 0 ] && return 1
-  local -a envs=()
-  if [ "$p" -le ${#ACME_PROVIDERS[@]} ]; then
-    IFS='|' read -r name hook vars hint <<<"${ACME_PROVIDERS[$((p - 1))]}"
-    info "$hint"
-    for v in $vars; do
-      vname=${v%:s}
-      if [[ "$v" == *:s ]]; then ask_secret "$vname"; else ask "$vname" ""; while [ -z "$ANSWER" ]; do warn "Не может быть пустым."; ask "$vname" ""; done; fi
-      envs+=("$vname=$ANSWER")
-    done
-  else
-    info "Список провайдеров и их переменных: https://github.com/acmesh-official/acme.sh/wiki/dnsapi"
-    while true; do
-      ask "Имя модуля (например dns_gd, dns_aws, dns_yc)" ""; hook=${ANSWER,,}; hook=${hook%.sh}; [[ "$hook" == dns_* ]] || hook="dns_$hook"
-      [[ "$hook" =~ ^dns_[a-z0-9_]+$ ]] && break; warn "Имя модуля — латиница/цифры, вида dns_xxx"
-    done
-    say "  Введите переменные модуля по одной в виде ИМЯ=значение. Пустая строка — закончить."
-    while true; do
-      read -r -p "  › " v || break; v=$(trim "$v"); [ -z "$v" ] && { [ ${#envs[@]} -gt 0 ] && break; warn "Нужна хотя бы одна переменная."; continue; }
-      v=${v#export }; vname=${v%%=*}; secret=${v#*=}; secret=${secret#[\"\']}; secret=${secret%[\"\']}
-      [[ "$v" == *=* && "$vname" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { warn "Формат: ИМЯ=значение"; continue; }
-      envs+=("$vname=$secret")
-    done
-  fi
-  CERT_DOMAINS="$CLUSTER"
-  ask_yn "Добавить в сертификат *.$CLUSTER (wildcard — нужен для доступа к веб-приложениям через Teleport)?" y && CERT_DOMAINS="$CLUSTER *.$CLUSTER"
-
-  acme_sh_install || return 1
-  local server=letsencrypt; [ "${TELEPORT_SETUP_ACME_STAGING:-0}" = 1 ] && { server=letsencrypt_test; warn "Тестовый режим: сертификат от staging CA (браузеры ему не доверяют)."; }
-  run "CA по умолчанию: Let's Encrypt" acme_sh --set-default-ca --server "$server" || return 1
-  run "Регистрация ACME-аккаунта ($ACME_EMAIL)" acme_sh --register-account -m "$ACME_EMAIL" --server "$server" || return 1
-  local dargs=() d; for d in $CERT_DOMAINS; do dargs+=(-d "$d"); done
-  info "Выпуск сертификата: DNS-запись, ожидание распространения, проверка — обычно 1–3 минуты."
-  printf '  %s…%s Запрос сертификата для %s' "$CD" "$C0" "$CERT_DOMAINS"; log "RUN: acme.sh --issue --dns $hook ${dargs[*]}"
-  env "${envs[@]}" "$ACME_HOME/acme.sh" --home "$ACME_HOME" --config-home "$ACME_CONF" --issue --server "$server" --dns "$hook" "${dargs[@]}" --keylength ec-256 </dev/null >>"$LOG" 2>&1
-  local rc=$?
-  if [ $rc -ne 0 ] && [ $rc -ne 2 ]; then
-    printf '\r  %s✖%s Сертификат не выпущен (код %s)\n' "$CR" "$C0" "$rc"
-    grep -E 'error|Error|invalid|denied|Unauthorized|Please' "$LOG" | grep -vE "_error_level|_stopRenewOnError|di='" | tail -n 6 | sed 's/^/    /'
-    warn "Частые причины: неверный токен/пароль, у токена нет прав на зону, домен не в этом аккаунте провайдера."
-    return 1
-  fi
-  printf '\r  %s✔%s Сертификат выпущен для %s\n' "$CG" "$C0" "$CERT_DOMAINS"
-  mkdir -p "$CERT_DIR"; chmod 700 "$CERT_DIR"
-  run "Установка сертификата в $CERT_DIR" acme_sh --install-cert -d "$CLUSTER" --ecc \
-      --key-file "$CERT_DIR/tls.key" --fullchain-file "$CERT_DIR/tls.crt" \
-      --reloadcmd "systemctl try-reload-or-restart teleport.service" || return 1
-  chmod 600 "$CERT_DIR/tls.key"; fix_context "$CERT_DIR"
-  acme_timer_install
-  state_set ACME_DOMAINS "$CERT_DOMAINS"
+cert_check_files() {
+  local crt=$1 key=$2 domain=$3 a b
+  [ -s "$crt" ] && [ -s "$key" ] || return 1
+  openssl x509 -in "$crt" -noout -checkend 604800 >/dev/null 2>&1 || { err "Сертификат истекает менее чем через 7 дней"; return 1; }
+  openssl x509 -in "$crt" -noout -checkhost "$domain" 2>/dev/null | grep -q 'does match' || { err "SAN не содержит $domain"; return 1; }
+  a=$(openssl x509 -in "$crt" -noout -pubkey 2>/dev/null | openssl sha256)
+  b=$(openssl pkey -in "$key" -pubout 2>/dev/null | openssl sha256)
+  [ -n "$a" ] && [ "$a" = "$b" ] || { err "Закрытый ключ не соответствует сертификату"; return 1; }
 }
-
-cert_files() {   # свой сертификат (например, его привозит центральный ACME-сервер)
-  local crt key
-  hdr "Свой сертификат"
-  while true; do
-    ask "Путь к сертификату (fullchain, PEM)" ""; crt=$ANSWER
-    ask "Путь к закрытому ключу (PEM)" ""; key=$ANSWER
-    [ -r "$crt" ] && [ -r "$key" ] || { warn "Файл не найден или не читается."; ask_yn "Попробовать ещё раз?" y && continue; return 1; }
-    openssl x509 -in "$crt" -noout 2>/dev/null || { warn "$crt — не PEM-сертификат."; continue; }
-    if [ "$(openssl x509 -in "$crt" -noout -pubkey 2>/dev/null | sha256sum)" != "$(openssl pkey -in "$key" -pubout 2>/dev/null | sha256sum)" ]; then
-      warn "Ключ не подходит к сертификату."; continue
-    fi
-    openssl x509 -in "$crt" -noout -checkend 0 >/dev/null || warn "Сертификат уже просрочен!"
-    openssl x509 -in "$crt" -noout -checkhost "$CLUSTER" 2>/dev/null | grep -q 'does match' || warn "Сертификат не выдан на $CLUSTER — браузеры будут ругаться."
-    break
-  done
+cert_install_pair() {
+  local crt=$1 key=$2 d
+  cert_check_files "$crt" "$key" "$CLUSTER" || return 1
   mkdir -p "$CERT_DIR"; chmod 700 "$CERT_DIR"
-  [ "$(readlink -f "$crt")" != "$CERT_DIR/tls.crt" ] && install -m 0644 "$crt" "$CERT_DIR/tls.crt"
-  [ "$(readlink -f "$key")" != "$CERT_DIR/tls.key" ] && install -m 0600 "$key" "$CERT_DIR/tls.key"
+  d=$(mktemp -d "$CERT_DIR/.staging.XXXXXX") || return 1
+  install -m 0600 "$key" "$d/tls.key" || return 1
+  install -m 0644 "$crt" "$d/tls.crt" || return 1
+  mv -f "$d/tls.key" "$CERT_DIR/tls.key"
+  mv -f "$d/tls.crt" "$CERT_DIR/tls.crt"
+  rmdir "$d" || :
   fix_context "$CERT_DIR"
-  ok "Сертификат установлен. Для продления просто заменяйте $CERT_DIR/tls.{crt,key} — Teleport перечитывает их каждый час."
 }
-
-choose_cert_mode() {   # → $CERT_MODE
-  say "  Как получать TLS-сертификат для веб-интерфейса и подключений:"
-  say "   ${CL}1)${C0} acme.sh, DNS-01 — Let's Encrypt через API DNS-провайдера. ${CG}Работает и в локальной сети${C0}, можно wildcard."
-  say "   ${CL}2)${C0} Встроенный ACME Teleport — проще всего, но нужен публичный домен и порт 443, открытый из интернета."
-  say "   ${CL}3)${C0} Свой сертификат из файлов (например, его доставляет ваш ACME-сервер)."
-  say "   ${CL}4)${C0} Самоподписанный — только для теста: браузер предупредит, tsh нужен --insecure."
-  ask_num "Способ" 4 "${1:-1}"
-  case "$ANSWER" in 1) CERT_MODE=acme-dns ;; 2) CERT_MODE=acme-teleport ;; 3) CERT_MODE=files ;; 4) CERT_MODE=self ;; 0) choose_cert_mode "$@" ;; esac
+acme_providers=(
+  'Cloudflare|dns_cf|CF_Token'
+  'reg.ru|dns_regru|REGRU_API_Username REGRU_API_Password'
+  'Timeweb Cloud|dns_timeweb|TW_Token'
+  'Beget|dns_beget|Beget_Username Beget_Password'
+  'DuckDNS|dns_duckdns|DuckDNS_Token'
+)
+cert_acme_dns() {
+  local n provider hook keys k server=letsencrypt out; local -a envs=() domains=()
+  hdr "ACME DNS-01"
+  n=0; for provider in "${acme_providers[@]}"; do n=$((n+1)); say "  $n) ${provider%%|*}"; done
+  say "  $((n+1))) Другой DNS-провайдер"; say "  0) Отмена"
+  ask_num "Провайдер" "$((n+1))" 1
+  [ "$ANSWER" -ne 0 ] || return 1
+  if [ "$ANSWER" -le "${#acme_providers[@]}" ]; then
+    IFS='|' read -r provider hook keys <<<"${acme_providers[$((ANSWER-1))]}"
+    for k in $keys; do ask_secret "$k"; envs+=("$k=$ANSWER"); done
+  else
+    ask "Модуль acme.sh (например dns_aws)" ""
+    hook=$ANSWER
+    [[ $hook =~ ^dns_[A-Za-z0-9_]+$ ]] || { err "Некорректный модуль"; return 1; }
+    info "Переменные DNS-провайдеров: https://github.com/acmesh-official/acme.sh/wiki/dnsapi"
+    while :; do
+      ask "Переменная ИМЯ=значение (пусто — закончить)" ""
+      [ -n "$ANSWER" ] || break
+      k=${ANSWER%%=*}
+      [[ $ANSWER == *=* && $k =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { warn "Неверный формат"; continue; }
+      envs+=("$ANSWER")
+    done
+    [ "${#envs[@]}" -gt 0 ] || return 1
+  fi
+  domains=(-d "$CLUSTER")
+  ask_yn "Добавить wildcard *.$CLUSTER?" y && domains+=(-d "*.$CLUSTER")
+  acme_install || return 1
+  [ "${TELEPORT_SETUP_ACME_STAGING:-0}" != 1 ] || server=letsencrypt_test
+  run "CA Let's Encrypt" acme_sh --set-default-ca --server "$server" || return 1
+  run "Регистрация ACME-аккаунта" acme_sh --register-account -m "$ACME_EMAIL" --server "$server" || return 1
+  info "Получение сертификата; секреты не записываются в журнал команд"
+  local rc=0
+  env "${envs[@]}" "$ACME_HOME/acme.sh" --home "$ACME_HOME" --config-home "$ACME_CONF" \
+      --issue --server "$server" --dns "$hook" "${domains[@]}" --keylength ec-256 \
+      </dev/null >>"$LOG" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
+    err "Не удалось выпустить сертификат (код $rc; подробности в $LOG)"; return 1
+  fi
+  mkdir -p "$CERT_DIR"; chmod 700 "$CERT_DIR"
+  # acme.sh controls its managed target files on renew. Teleport periodically reloads them.
+  if ! run "Установка сертификата" acme_sh --install-cert -d "$CLUSTER" --ecc \
+      --key-file "$CERT_DIR/tls.key" --fullchain-file "$CERT_DIR/tls.crt" \
+      --reloadcmd 'systemctl try-restart teleport.service'; then return 1; fi
+  if [ "$server" = letsencrypt ]; then
+    cert_check_files "$CERT_DIR/tls.crt" "$CERT_DIR/tls.key" "$CLUSTER" || return 1
+  else
+    warn "Staging-сертификат не доверен браузером — только для теста"
+  fi
+  chmod 600 "$CERT_DIR/tls.key"
+  acme_timer_install || return 1
+  ok "DNS-01: сертификат установлен"
 }
-
-cert_apply() {   # выполнить выбранный способ; при неудаче предложить другой
-  while true; do
-    case "$CERT_MODE" in
-      acme-dns) cert_acme_dns && return 0 ;;
-      files) cert_files && return 0 ;;
-      acme-teleport|self) return 0 ;;
-    esac
-    warn "Сертификат получить не удалось."
-    say "   ${CL}1)${C0} Попробовать снова   ${CL}2)${C0} Выбрать другой способ   ${CL}3)${C0} Пока самоподписанный (сменить можно потом в меню)"
-    ask_num "Что делаем" 3 1
-    case "$ANSWER" in 2) choose_cert_mode ;; 3) CERT_MODE=self; return 0 ;; esac
-  done
+cert_from_files() {
+  local crt key
+  hdr "Свой PEM-сертификат"
+  ask "Абсолютный путь fullchain PEM" ""; crt=$ANSWER
+  ask "Абсолютный путь private key PEM" ""; key=$ANSWER
+  [ -r "$crt" ] && [ -r "$key" ] || { err "Файлы не читаются"; return 1; }
+  cert_install_pair "$crt" "$key" || return 1
+  ok "Сертификат установлен"
 }
-
-cert_live_info() {   # что реально отдаёт порт 443
-  local out; out=$(timeout 8 openssl s_client -connect 127.0.0.1:443 -servername "$1" </dev/null 2>/dev/null | openssl x509 -noout -subject -issuer -enddate 2>/dev/null)
-  [ -z "$out" ] && { warn "На 443 сертификат не получен (Teleport ещё запускается или ACME не выпустил сертификат)."; return 1; }
-  info "Сертификат на 443: $(sed -n 's/^subject=//p' <<<"$out" | sed 's/^ *//')"
-  info "Выдан: $(sed -n 's/^issuer=//p' <<<"$out" | sed 's/^ *//')"
-  info "Действует до: $(date -d "$(sed -n 's/^notAfter=//p' <<<"$out")" '+%F %H:%M' 2>/dev/null)"
-}
-
-# ─── конфигурация и служба ────────────────────────────────────────────────────
-write_config() {
-  local tls=
-  case "$CERT_MODE" in
-    acme-teleport) tls=$(printf '  acme:\n    enabled: "yes"\n    email: "%s"' "$ACME_EMAIL") ;;
-    acme-dns) tls=$(printf '  https_keypairs:\n  - key_file: %s/tls.key\n    cert_file: %s/tls.crt\n  https_keypairs_reload_interval: 0s' "$CERT_DIR" "$CERT_DIR") ;;
-    files) tls=$(printf '  https_keypairs:\n  - key_file: %s/tls.key\n    cert_file: %s/tls.crt\n  https_keypairs_reload_interval: 1h' "$CERT_DIR" "$CERT_DIR") ;;
-    self) tls='  # сертификат самоподписанный (генерирует Teleport)' ;;
+choose_cert() {
+  say "  1) acme.sh DNS-01 (рекомендуется, в том числе для LAN)"
+  say "  2) Встроенный ACME Teleport (публичный 443/tcp и FQDN)"
+  say "  3) Свой PEM-сертификат"
+  say "  4) Самоподписанный (только тест)"
+  ask_num "Режим TLS" 4 "${1:-1}"
+  case "$ANSWER" in
+    1) CERT_MODE=acme-dns ;; 2) CERT_MODE=acme-teleport ;;
+    3) CERT_MODE=files ;; 4) CERT_MODE=self ;; 0) return 1 ;;
   esac
-  [ -f "$CONF" ] && cp -p "$CONF" "$CONF.bak-$(date +%Y%m%d-%H%M%S)"
-  cat >"$CONF" <<EOF
-# Создано deploy-teleport.sh $SCRIPT_VERSION — $(date '+%F %T')
-# Один процесс: auth + proxy + ssh. Веб-интерфейс, tsh и агенты — всё через порт 443.
+}
+cert_apply() {
+  case "$CERT_MODE" in
+    acme-dns) cert_acme_dns ;;
+    files) cert_from_files ;;
+    acme-teleport|self) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+write_config_to() {
+  local dest=$1
+  cat >"$dest" <<EOF
+# deploy-teleport.sh $SCRIPT_VERSION
 version: v3
 teleport:
   nodename: "$NODENAME"
@@ -840,436 +771,429 @@ teleport:
   log:
     output: stderr
     severity: INFO
-    format:
-      output: text
 
 auth_service:
   enabled: "yes"
-  listen_addr: 0.0.0.0:3025
+  listen_addr: 127.0.0.1:3025
   cluster_name: "$CLUSTER"
   proxy_listener_mode: multiplex
 
 ssh_service:
   enabled: "yes"
+  listen_addr: 127.0.0.1:3022
 
 proxy_service:
   enabled: "yes"
   web_listen_addr: 0.0.0.0:443
   public_addr: "$CLUSTER:443"
-$tls
 EOF
-  chmod 600 "$CONF"
+  case "$CERT_MODE" in
+    acme-teleport)
+      printf '  acme:\n    enabled: "yes"\n    email: "%s"\n' "$ACME_EMAIL" >>"$dest" ;;
+    files|acme-dns)
+      cat >>"$dest" <<EOF
+  https_keypairs:
+  - key_file: $CERT_DIR/tls.key
+    cert_file: $CERT_DIR/tls.crt
+  https_keypairs_reload_interval: 1h
+EOF
+      ;;
+  esac
+  chmod 600 "$dest"
 }
-
-validate_config() {
-  run "Проверка конфигурации (teleport configure --test)" "$BIN_DIR/teleport" configure --test "$CONF" && return 0
-  local last; last=$(ls -1t "$CONF".bak-* 2>/dev/null | head -1)
-  if [ -n "$last" ]; then cp -p "$last" "$CONF"; warn "Конфигурация отклонена — восстановлена предыдущая ($last)."; fi
-  return 1
+validate_config() { run "Проверка teleport.yaml" "$BIN_DIR/teleport" configure --test "$1"; }
+config_apply() {
+  local new
+  new=$(mktemp /etc/.teleport.yaml.XXXXXX) || return 1
+  write_config_to "$new" || return 1
+  validate_config "$new" || { rm -f "$new"; return 1; }
+  mv -f "$new" "$CONF"
+  fix_context "$CONF"
 }
-
-cert_label() { case "$1" in acme-dns) echo "acme.sh DNS-01 (Let's Encrypt)";; acme-teleport) echo "встроенный ACME Teleport";; files) echo "свой из файлов";; self) echo "самоподписанный";; *) echo "${1:-?}";; esac; }
-
 write_unit() {
   cat >"$UNIT" <<EOF
 [Unit]
-Description=Teleport Service
+Description=Teleport Community (deploy-teleport.sh)
 After=network-online.target
 Wants=network-online.target
-
 [Service]
 Type=simple
-Restart=always
+Restart=on-failure
 RestartSec=5
 EnvironmentFile=-/etc/default/teleport
-ExecStart=$BIN_DIR/teleport start --config $CONF --pid-file=/run/teleport.pid
-ExecReload=/bin/sh -c "exec pkill -HUP -L -F /run/teleport.pid"
-PIDFile=/run/teleport.pid
+ExecStart=$BIN_DIR/teleport start --config=$CONF
 LimitNOFILE=524288
-
+NoNewPrivileges=true
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl daemon-reload
+  chmod 644 "$UNIT"; systemctl daemon-reload
 }
-
-firewall_open() {
-  if systemctl is-active -q firewalld 2>/dev/null; then
-    if firewall-cmd -q --query-service=https 2>/dev/null || firewall-cmd -q --query-port=443/tcp 2>/dev/null; then ok "firewalld: 443/tcp уже открыт"
-    else run "firewalld: открыть 443/tcp" sh -c 'firewall-cmd -q --permanent --add-service=https && firewall-cmd -q --reload'; fi
-  elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
-    run "ufw: открыть 443/tcp" ufw allow 443/tcp
-  else
-    info "Фаервол (firewalld/ufw) не активен — если есть другой, откройте входящий 443/tcp."
+port_check() {
+  local conflict
+  conflict=$(ss -Hltnp '( sport = :443 )' 2>/dev/null || :)
+  if [ -n "$conflict" ] && ! systemctl is-active -q teleport; then
+    err "443/tcp занят другим процессом. Ничего не останавливаю автоматически:"
+    say "$conflict"; return 1
   fi
 }
-
-port443_check() {
-  local who; who=$(ss -Hltnp 'sport = :443' 2>/dev/null | grep -v teleport | grep -oE 'users:\(\("[^"]+' | cut -d'"' -f2 | sort -u | xargs)
-  [ -z "$who" ] && return 0
-  warn "Порт 443 уже занят: $who. Teleport должен слушать 443 сам."
-  ask_yn "Остановить и отключить $who?" n && { for s in $who; do systemctl disable --now "$s" >>"$LOG" 2>&1 && ok "Остановлен $s"; done; return 0; }
-  ask_yn "Продолжить без этого (Teleport не запустится, пока порт занят)?" n || exit 1
+firewall_open() {
+  if systemctl is-active -q firewalld; then
+    local iface zone
+    iface=$(ip -4 route show default 2>/dev/null | awk '/^default /{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')
+    zone=
+    [ -z "$iface" ] || zone=$(firewall-cmd --get-zone-of-interface="$iface" 2>/dev/null || :)
+    [ -n "$zone" ] || zone=$(firewall-cmd --get-default-zone 2>/dev/null) || return 1
+    if firewall-cmd --zone="$zone" -q --query-service=https || firewall-cmd --zone="$zone" -q --query-port=443/tcp; then
+      ok "firewalld/$zone: 443/tcp уже доступен"; return 0
+    fi
+    run "Открытие 443/tcp в firewalld/$zone" firewall-cmd --permanent --zone="$zone" --add-service=https || return 1
+    run "Перечитать firewalld" firewall-cmd --reload || return 1
+    state_set FIREWALL_CHANGED "firewalld/$zone"
+  elif command -v ufw >/dev/null 2>&1 && ufw status | grep -q 'Status: active'; then
+    run "Открытие 443/tcp в UFW" ufw allow 443/tcp || return 1
+    state_set FIREWALL_CHANGED ufw
+  else
+    warn "Не найден активный firewalld/UFW: самостоятельно ограничьте входящие порты, разрешив 443/tcp"
+  fi
 }
-
+proxy_health() {
+  # Insecure TLS validation is used ONLY for probing the local web endpoint;
+  # public certificate verification is a separate concern.
+  curl -kfsS --max-time 6 --resolve "$CLUSTER:443:127.0.0.1" \
+    "https://$CLUSTER/webapi/ping" >/dev/null 2>&1
+}
 wait_healthy() {
   local i
-  printf '  %s…%s Ожидание запуска Teleport' "$CD" "$C0"
-  for i in $(seq 1 60); do
-    if systemctl is-active -q teleport && tctl status >/dev/null 2>&1; then printf '\r  %s✔%s Teleport запущен и отвечает (%s с)\n' "$CG" "$C0" $((i * 2)); return 0; fi
+  for i in $(seq 1 45); do
+    if systemctl is-active -q teleport && "$BIN_DIR/tctl" status >/dev/null 2>&1 && proxy_health; then
+      ok "Teleport: Auth и HTTPS Proxy отвечают локально"; return 0
+    fi
     sleep 2
   done
-  printf '\r  %s✖%s Teleport не поднялся за 2 минуты\n' "$CR" "$C0"
-  journalctl -u teleport -n 25 --no-pager 2>/dev/null | sed 's/^/    /'
+  err "Teleport (Auth/Proxy) не отвечает за 90 секунд"
+  journalctl -u teleport -n 30 --no-pager >&2 || :
   return 1
 }
 
-tp_backup() {   # tp_backup метка [full] → $LAST_BACKUP
-  mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
-  LAST_BACKUP="$BACKUP_DIR/teleport-$1-$(date +%Y%m%d-%H%M%S).tar.gz"
-  local ex=(--exclude="${DATA_DIR#/}/log")
-  [ "${2-}" = full ] && ex=()
-  run "Резервная копия → $LAST_BACKUP" tar czf "$LAST_BACKUP" "${ex[@]}" -C / \
-      $(for p in "${CONF#/}" etc/teleport "${DATA_DIR#/}" "${BIN_DIR#/}/teleport" "${BIN_DIR#/}/tctl" "${BIN_DIR#/}/tsh" "${BIN_DIR#/}/tbot" "${BIN_DIR#/}/fdpass-teleport"; do [ -e "/$p" ] && echo "$p"; done) || return 1
-  ls -1t "$BACKUP_DIR"/teleport-*.tar.gz 2>/dev/null | tail -n +4 | xargs -r rm -f   # храним 3 последние
+live_tls() {
+  local out
+  out=$(timeout 10 openssl s_client -connect 127.0.0.1:443 -servername "$CLUSTER" </dev/null 2>/dev/null |
+    openssl x509 -noout -subject -issuer -enddate 2>/dev/null) || return 1
+  [ -n "$out" ] && { info "TLS: $out"; return 0; }
+  return 1
 }
-
-# ─── пользователи ─────────────────────────────────────────────────────────────
-invite_url() { grep -oE 'https://[^ ]+/web/(invite|reset)/[A-Za-z0-9]+' <<<"$1" | head -1; }
-
-user_exists() { tctl get "user/$1" >/dev/null 2>&1; }
-
-create_admin() {   # create_admin имя логины → $INVITE
-  local out i
-  for i in 1 2 3 4 5; do
-    out=$(tctl users add "$1" --roles=editor,access --logins="$2" 2>&1) && break
-    grep -q 'already exists' <<<"$out" && break; sleep 3
+create_admin() {
+  local user=$1 logins=$2 output i
+  for i in 1 2 3; do
+    if output=$("$BIN_DIR/tctl" users add "$user" --roles=editor,access --logins="$logins" 2>&1); then break; fi
+    if grep -qi 'already exists' <<<"$output"; then
+      warn "Пользователь $user уже существует"
+      ask_yn "Создать ссылку сброса его пароля и MFA?" n || return 1
+      output=$("$BIN_DIR/tctl" users reset "$user" 2>&1) || { err "$output"; return 1; }
+      break
+    fi
+    sleep 2
   done
-  log "tctl users add $1: $(sed -E 's#/web/invite/[A-Za-z0-9]+#/web/invite/***#' <<<"$out")"
-  if grep -q 'already exists' <<<"$out"; then
-    warn "Пользователь $1 уже существует."
-    ask_yn "Сбросить ему пароль и 2FA (получить новую ссылку)?" y || return 1
-    out=$(tctl users reset "$1" 2>&1)
-  fi
-  INVITE=$(invite_url "$out")
-  [ -n "$INVITE" ] || { err "Не удалось получить ссылку: $out"; return 1; }
+  # Never persist invitation URLs in logs.
+  INVITE=$(grep -oE 'https://[^ ]+/web/(invite|reset)/[A-Za-z0-9_-]+' <<<"$output" | head -1 || :)
+  [ -n "$INVITE" ] || { err "Не удалось получить ссылку приглашения: ${output:0:180}"; return 1; }
   INVITE=${INVITE/:443\//\/}
 }
-
-# ─── итоговая информация ──────────────────────────────────────────────────────
-final_summary() {   # final_summary пользователь ссылка
-  local url="https://$CLUSTER" ins=
-  [ "$CERT_MODE" = self ] && ins=" --insecure"
-  say
-  say "${CB}${CH}╔══════════════════════════════════════════════════════════════════════╗${C0}"
-  say "${CB}${CH}║                   Teleport готов к работе                            ║${C0}"
-  say "${CB}${CH}╚══════════════════════════════════════════════════════════════════════╝${C0}"
-  say
-  say "  ${CL}Веб-интерфейс:${C0}   ${CB}$url${C0}"
-  say "  ${CL}Пользователь:${C0}    ${CB}$1${C0} (роли editor + access — полный администратор)"
-  say "  ${CL}Версия:${C0}          Teleport $(tp_version)"
-  say
-  say "  ${CB}Первый вход — ссылка-приглашение (действует 1 час):${C0}"
-  say "  ${CG}$2${C0}"
-  say
-  say "  1. Откройте ссылку в браузере и задайте пароль."
-  say "  2. Настройте второй фактор: отсканируйте QR-код приложением (Google Authenticator,"
-  say "     Яндекс Ключ, Aegis и т.п.) или зарегистрируйте ключ безопасности / passkey."
-  say "  3. Войдите на $url — сервер «$NODENAME» уже виден в списке Resources."
-  [ "$CERT_MODE" = self ] && say "  ${CY}Сертификат самоподписанный: браузер покажет предупреждение — это ожидаемо.${C0}"
-  [ "$CERT_MODE" = acme-teleport ] && say "  ${CY}Сертификат Let's Encrypt выпустится при первом обращении к $url (нужен доступ из интернета).${C0}"
-  say
-  say "  ${CB}Подключение из терминала (tsh):${C0}"
-  say "    установить клиент: https://goteleport.com/download/ (раздел Teleport Community, «tsh»)"
-  say "    ${CD}tsh login --proxy=$CLUSTER:443 --user=$1$ins${C0}"
-  say "    ${CD}tsh ls${C0}                      — список серверов"
-  say "    ${CD}tsh ssh root@$NODENAME${C0}"
-  say
-  say "  ${CB}Полезное:${C0}"
-  say "    Ссылка истекла / забыли пароль — запустите скрипт снова → «Сбросить пароль»."
-  say "    Добавить сервер — скрипт → «Токен для подключения сервера»."
-  case "$CERT_MODE" in
-    acme-dns) say "    Сертификат продлевается автоматически: таймер $ACME_UNIT.timer (acme.sh в $ACME_HOME)." ;;
-    files) say "    Сертификат: заменяйте $CERT_DIR/tls.{crt,key} — Teleport перечитывает их каждый час." ;;
-  esac
-  say "    Конфигурация: $CONF · данные: $DATA_DIR · журнал скрипта: $LOG"
-  say "    Логи Teleport: journalctl -u teleport -f"
-  say
+load_state() {
+  CLUSTER=$(state_get CLUSTER); NODENAME=$(state_get NODENAME)
+  CERT_MODE=$(state_get CERT_MODE); ACME_EMAIL=$(state_get ACME_EMAIL)
+  ADMIN_USER=$(state_get ADMIN_USER); ADMIN_LOGINS=$(state_get ADMIN_LOGINS)
+  [ -n "$CLUSTER" ] && [ -n "$NODENAME" ] || die "Файл состояния неполон: $STATE"
 }
 
-# ─── установка с нуля ─────────────────────────────────────────────────────────
 collect_params() {
-  hdr "Параметры"
-  say "  Домен — адрес, по которому пользователи будут открывать Teleport (A-запись на этот сервер)."
-  say "  ${CY}Важно: домен становится именем кластера, сменить его потом нельзя без переустановки.${C0}"
-  ask_domain "Домен Teleport (например teleport.example.com)" "${CLUSTER-}"; CLUSTER=$ANSWER
-  local hn; hn=$(hostname -s 2>/dev/null); [[ -z "$hn" || "$hn" == localhost* ]] && hn=teleport
-  while true; do
-    ask "Имя этого сервера в Teleport" "${NODENAME:-$hn}"; NODENAME=$ANSWER
-    [[ "$NODENAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] && break; warn "Латиница, цифры, точка, дефис, подчёркивание; без пробелов."
-  done
-  say; choose_cert_mode "$( case "${CERT_MODE-}" in acme-teleport) echo 2;; files) echo 3;; self) echo 4;; *) echo 1;; esac )"
-  if [ "$CERT_MODE" = acme-dns ] || [ "$CERT_MODE" = acme-teleport ]; then
-    say "  E-mail нужен Let's Encrypt для уведомлений о сертификате."
-    ask_email "E-mail для Let's Encrypt" "${ACME_EMAIL-}"; ACME_EMAIL=$ANSWER
-  fi
-  say
-  ask_username "Имя первого администратора Teleport" "${ADMIN_USER:-admin}"; ADMIN_USER=$ANSWER
-  say "  Системные логины — под какими учётками Linux администратор сможет входить на серверы."
-  ask_logins "Логины через запятую" "${ADMIN_LOGINS:-root}"; ADMIN_LOGINS=$ANSWER
+  local h
+  ask_domain "Домен и имя кластера" "$CLUSTER"; CLUSTER=$ANSWER
+  h=$(hostname -s 2>/dev/null || echo teleport)
+  ask "Имя локального сервера Teleport" "${NODENAME:-$h}"; NODENAME=$ANSWER
+  [[ $NODENAME =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$ ]] || { err "Некорректное имя"; return 1; }
+  choose_cert 1 || return 1
+  if [[ $CERT_MODE == acme-* ]]; then ask_email "E-mail ACME" "$ACME_EMAIL"; ACME_EMAIL=$ANSWER; fi
+  ask_username "Имя первого администратора" "${ADMIN_USER:-admin}"; ADMIN_USER=$ANSWER
+  ask_logins "Linux-логины для доступа" "${ADMIN_LOGINS:-root}"; ADMIN_LOGINS=$ANSWER
 }
-
-show_params() {
-  local m; m=$(cert_label "$CERT_MODE")
-  hdr "Проверьте параметры"
-  say "  ${CL}Домен (кластер):${C0}  $CLUSTER"
-  say "  ${CL}Имя сервера:${C0}      $NODENAME"
-  say "  ${CL}Сертификат:${C0}       $m"
-  [ -n "${ACME_EMAIL-}" ] && [[ "$CERT_MODE" == acme-* ]] && say "  ${CL}E-mail:${C0}           $ACME_EMAIL"
-  say "  ${CL}Администратор:${C0}    $ADMIN_USER (логины: $ADMIN_LOGINS)"
-}
-
 fresh_install() {
-  hdr "1/8 Проверка системы";  prechecks
-  hdr "2/8 Время";             time_fix
-  hdr "3/8 Зависимости";       deps; ensure_ntp
-  hdr "4/8 DNS";               dns_step
+  hdr "Предварительные проверки"
   if [ -d "$DATA_DIR" ] && [ -n "$(ls -A "$DATA_DIR" 2>/dev/null)" ]; then
-    warn "В $DATA_DIR остались данные прежней установки Teleport."
-    if ask_yn "Удалить их (будет создана резервная копия)?" y; then tp_backup old-data full && rm -rf "${DATA_DIR:?}"/*; fi
+    die "В $DATA_DIR уже есть данные Teleport. Автоматическое удаление запрещено: разберите старую установку вручную."
   fi
-  while true; do
-    collect_params
-    dns_check_domain "$CLUSTER" "$CERT_MODE"
-    show_params
-    ask_yn "Всё верно, начинаем установку?" y && break
-    say "  Хорошо, пройдём параметры ещё раз (введённые значения подставлены)."
+  if [ -e "$CONF" ]; then die "Существует $CONF; чужую конфигурацию не перезаписываю."; fi
+  local b
+  for b in teleport tctl tsh tbot fdpass-teleport; do
+    [ ! -e "$BIN_DIR/$b" ] && [ ! -L "$BIN_DIR/$b" ] || die "Обнаружен чужой бинарник: $BIN_DIR/$b"
   done
-  port443_check
-  hdr "5/8 Установка Teleport"
+  deps
+  port_check || return 1
+  time_check; dns_step
+  collect_params || return 1
+  hdr "Параметры"
+  info "Кластер: $CLUSTER, узел: $NODENAME"
+  info "TLS: $CERT_MODE, первый пользователь: $ADMIN_USER ($ADMIN_LOGINS)"
+  dns_check_domain "$CLUSTER" "$CERT_MODE"
+  warn "Teleport будет публично слушать 443/tcp; 3022 и 3025 ограничены loopback"
+  ask_yn "Начать установку?" n || return 0
+  port_check || return 1
+  local b
+  for b in teleport tctl tsh tbot fdpass-teleport; do
+    if [ -e "$BIN_DIR/$b" ] || [ -L "$BIN_DIR/$b" ]; then
+      err "Файл $BIN_DIR/$b уже существует. Не заменяю чужой бинарник без переноса/очистки."
+      return 1
+    fi
+  done
+  [ ! -e "$CONF" ] || { err "Существует $CONF. Нельзя перезаписывать чужую конфигурацию."; return 1; }
   tp_pick_version
-  tp_fetch "$TP_TARGET" || die "Установка прервана: архив Teleport не получен."
-  tp_install_bins || die "Не удалось установить бинарники Teleport."
-  hdr "6/8 Сертификат"
-  cert_apply
-  hdr "7/8 Настройка и запуск"
-  write_config; ok "Конфигурация: $CONF"
-  validate_config || die "Сгенерированная конфигурация не прошла проверку (подробности выше)."
-  write_unit; ok "Служба: $UNIT"
-  firewall_open
-  run "Запуск teleport.service" systemctl enable --now teleport || true
-  wait_healthy || die "Teleport не запустился. Проверьте: journalctl -u teleport -n 100"
-  state_set CLUSTER "$CLUSTER"; state_set NODENAME "$NODENAME"; state_set CERT_MODE "$CERT_MODE"
-  state_set ACME_EMAIL "${ACME_EMAIL-}"; state_set ADMIN_USER "$ADMIN_USER"; state_set INSTALLED "$(date '+%F %T')"
-  hdr "8/8 Администратор"
-  create_admin "$ADMIN_USER" "$ADMIN_LOGINS" || die "Teleport работает, но пользователя создать не удалось. Запустите скрипт снова → «Создать администратора»."
-  ok "Пользователь $ADMIN_USER создан"
-  [ "$CERT_MODE" != acme-teleport ] && cert_live_info "$CLUSTER"
+  tp_fetch "$TP_TARGET" || return 1
+  if ! cert_apply; then
+    err "TLS-сертификат не получен; Teleport ещё не установлен"; return 1
+  fi
+  if ! tp_install_bins; then
+    rm -f "$BIN_DIR"/{teleport,tctl,tsh,tbot,fdpass-teleport} "$BIN_DIR"/.*.teleport-setup.$$
+    return 1
+  fi
+  if ! config_apply || ! write_unit; then
+    rm -f "$BIN_DIR"/{teleport,tctl,tsh,tbot,fdpass-teleport}
+    rm -f "$CONF" "$UNIT"
+    return 1
+  fi
+  # Mark ownership before starting service to allow recovery after failure.
+  state_set SCRIPT_VERSION "$SCRIPT_VERSION"
+  state_set CLUSTER "$CLUSTER"; state_set NODENAME "$NODENAME"
+  state_set CERT_MODE "$CERT_MODE"; state_set ACME_EMAIL "$ACME_EMAIL"
+  state_set ADMIN_USER "$ADMIN_USER"; state_set ADMIN_LOGINS "$ADMIN_LOGINS"
+  firewall_open || warn "Проверьте фаервол вручную"
+  run "Запуск teleport.service" systemctl enable --now teleport || die "systemd не запустил Teleport"
+  wait_healthy || die "Teleport не запустился. Данные сохранены; проверьте журнал."
+  create_admin "$ADMIN_USER" "$ADMIN_LOGINS" || { warn "Teleport работает, но приглашение не создано. Используйте меню администратора."; return 1; }
   final_summary "$ADMIN_USER" "$INVITE"
 }
-
-# ─── служебное меню ───────────────────────────────────────────────────────────
-load_state() {
-  CLUSTER=$(state_get CLUSTER); NODENAME=$(state_get NODENAME); CERT_MODE=$(state_get CERT_MODE); ACME_EMAIL=$(state_get ACME_EMAIL)
-  [ -z "$CLUSTER" ] && [ -f "$CONF" ] && CLUSTER=$(sed -n 's/^ *cluster_name: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$CONF" | head -1)
-  [ -z "$NODENAME" ] && [ -f "$CONF" ] && NODENAME=$(sed -n 's/^ *nodename: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$CONF" | head -1)
-  if [ -z "$CERT_MODE" ] && [ -f "$CONF" ]; then
-    if grep -A2 '^  acme:' "$CONF" | grep -q 'enabled: "yes"'; then CERT_MODE=acme-teleport
-    elif grep -q https_keypairs: "$CONF"; then CERT_MODE=files; else CERT_MODE=self; fi
+final_summary() {
+  hdr "Teleport установлен"
+  say "  Веб-интерфейс: https://$CLUSTER"
+  say "  Пользователь: $1 (роли editor + access; права аудита назначаются отдельно)"
+  say "  Первая ссылка (срок ограничен): $2"
+  say "  tsh login --proxy=$CLUSTER:443 --user=$1$([ "$CERT_MODE" = self ] && printf ' --insecure' || :)"
+  say "  tsh ls; tsh ssh ${ADMIN_LOGINS%%,*}@$NODENAME"
+  say "  Проверка из другой сети: curl -fsS https://$CLUSTER/webapi/ping"
+  if [ "$CERT_MODE" != self ] && ! curl -fsS --max-time 8 \
+     --resolve "$CLUSTER:443:127.0.0.1" "https://$CLUSTER/webapi/ping" >/dev/null 2>&1; then
+    warn "Проверка доверия TLS не прошла: проверьте SAN/fullchain, ACME и системные CA"
   fi
+  say "  Журнал: journalctl -u teleport -f; действия: bash deploy-teleport.sh"
+  [ "$CERT_MODE" != self ] || warn "Самоподписанный TLS — не используйте в production"
 }
 
-status_header() {
-  local v st
-  v=$(tp_version); st=$(systemctl is-active teleport 2>/dev/null)
-  hdr "Teleport уже установлен"
-  info "Версия: ${CB}${v:-?}${C0}   служба: $( [ "$st" = active ] && echo "${CG}работает${C0}" || echo "${CR}${st:-нет}${C0}" )"
-  info "Кластер: ${CLUSTER:-?}   сервер: ${NODENAME:-?}   сертификат: $(cert_label "$CERT_MODE")"
-  tp_pkg_managed && info "Установлен пакетом/teleport-update — обновление через пакетный менеджер."
-}
-
+# In-place update: backup after stopping, revalidate and restore on any failure.
 menu_update() {
-  hdr "Обновление Teleport"
-  local cur majors cm next target
-  cur=$(tp_version); [ -n "$cur" ] || { err "Не удалось определить текущую версию."; return 1; }
-  if tp_pkg_managed; then
-    info "Teleport установлен пакетом — обновляю штатно через $PKG (в пределах текущей ветки v${cur%%.*})."
-    case "$PKG" in
-      apt-get) run "apt: обновление teleport" sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --only-upgrade "teleport*"' ;;
-      dnf|yum) run "$PKG: обновление teleport" "$PKG" -y -q upgrade 'teleport*' ;;
-      zypper) run "zypper: обновление teleport" zypper --non-interactive update 'teleport*' ;;
-    esac
-    systemctl try-restart teleport; wait_healthy; ok "Версия: $(tp_version)"
-    info "Переход на следующую мажорную версию — сменой ветки репозитория (stable/vNN) по документации Teleport."
-    return 0
+  deps
+  local current latest majors cm next target backup
+  current=$(tp_version); [ -n "$current" ] || { err "Версия Teleport не определена"; return 1; }
+  cm=${current%%.*}; next=$((cm+1))
+  majors=$(tp_majors)
+  [ -n "$majors" ] || { err "Не удалось проверить ветки версий"; return 1; }
+  if grep -qx "$next" <<<"$majors"; then
+    latest=$(tp_latest_in "$next")
+  else
+    latest=$(tp_latest_in "$cm")
   fi
-  printf '  %s…%s Проверяю доступные версии' "$CD" "$C0"
-  majors=$(tp_majors); cm=${cur%%.*}; next=$((cm + 1)); printf '\r\e[K'
-  [ -n "$majors" ] || { err "Список версий недоступен (apt.releases.teleport.dev). Проверьте DNS/сеть."; return 1; }
-  if grep -qx "$next" <<<"$majors"; then target=$(tp_latest_in "$next"); else target=$(tp_latest_in "$cm"); fi
-  [ -n "$target" ] || { err "Не удалось определить целевую версию."; return 1; }
-  info "Установлена: $cur   доступна: $target"
-  if ! ver_gt "$target" "$cur"; then ok "Обновление не требуется — установлена актуальная версия."; return 0; fi
-  [ "${target%%.*}" != "$cm" ] && warn "Мажорное обновление v$cm → v${target%%.*}. Teleport обновляют по одной мажорной версии за раз."
-  [ "$(echo "$majors" | tail -1)" -gt "$next" ] 2>/dev/null && info "После этого обновления запустите его ещё раз — есть и более новые ветки."
-  ask_yn "Обновить $cur → $target?" y || return 0
+  [ -n "$latest" ] || { err "Нет версии для обновления"; return 1; }
+  if [ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)" != "$latest" ] || [ "$latest" = "$current" ]; then
+    ok "Обновлений нет ($current)"; return 0
+  fi
+  target=$latest
+  info "Обновление $current → $target; допускается переход не более чем на одну major"
+  warn "Агенты Teleport также должны быть совместимы. Планируйте окно обслуживания."
+  ask_yn "Остановить Teleport для offline-бэкапа и обновления?" n || return 0
   tp_fetch "$target" || return 1
-  run "Остановка Teleport" systemctl stop teleport
-  tp_backup "$cur" || { systemctl start teleport; err "Резервная копия не создана — обновление отменено."; return 1; }
-  local bak=$LAST_BACKUP
-  if tp_install_bins && run "Запуск Teleport" systemctl start teleport && wait_healthy; then
-    ok "Обновлено до $(tp_version). Резервная копия: $bak"; return 0
+  run "Остановка Teleport" systemctl stop teleport || return 1
+  if ! tp_backup "before-v$target"; then
+    run "Возврат Teleport в работу" systemctl start teleport && wait_healthy ||
+      err "Не удалось вернуть Teleport в работу после сбоя backup"
+    return 1
   fi
-  err "После обновления Teleport не работает."
-  if ask_yn "Откатить на $cur из резервной копии?" y; then
-    systemctl stop teleport
-    find "${DATA_DIR:?}" -mindepth 1 -maxdepth 1 ! -name log -exec rm -rf {} +   # журнал аудита (log/) не в копии — сохраняем
-    tar xzf "$bak" -C / && systemctl start teleport && wait_healthy && ok "Откат выполнен: $(tp_version)"
+  backup=$LAST_BACKUP
+  if tp_install_bins && validate_config "$CONF" && run "Запуск обновлённого Teleport" systemctl start teleport && wait_healthy && [ "$(tp_version)" = "$target" ]; then
+    ok "Teleport обновлён до $target"; backup_prune; return 0
   fi
+  err "Обновление не удалось. Выполняется автоматический rollback на $current"
+  if tp_restore "$backup"; then warn "Восстановлена версия $(tp_version) из $backup"; else
+    err "Автовосстановление не удалось. Не удаляйте резервную копию: $backup"
+  fi
+  return 1
 }
-
-menu_add_admin() {
-  hdr "Новый администратор"
-  ask_username "Имя пользователя" ""; local u=$ANSWER
-  ask_logins "Системные логины через запятую" root
-  create_admin "$u" "$ANSWER" || return 1
-  ok "Готово. Ссылка для $u (действует 1 час):"; say "  ${CG}$INVITE${C0}"
+menu_admin() {
+  local u logins
+  ask_username "Новый администратор" ""; u=$ANSWER
+  ask_logins "Linux-логины" root; logins=$ANSWER
+  create_admin "$u" "$logins" || return 1
+  ok "Приглашение $u (срок ограничен): $INVITE"
 }
-
 menu_reset() {
-  hdr "Сброс пароля и второго фактора"
-  tctl users ls 2>/dev/null | sed 's/^/  /'
-  local u out
-  ask_username "Кому сбросить" "$(state_get ADMIN_USER)"; u=$ANSWER
-  user_exists "$u" || { err "Пользователя $u нет."; return 1; }
-  out=$(tctl users reset "$u" 2>&1); INVITE=$(invite_url "$out"); INVITE=${INVITE/:443\//\/}
-  [ -n "$INVITE" ] || { err "$out"; return 1; }
-  ok "Пароль и 2FA сброшены. Ссылка для $u (действует 8 часов): "; say "  ${CG}$INVITE${C0}"
+  local u output
+  "$BIN_DIR/tctl" users ls || :
+  ask_username "Пользователь для сброса пароля/MFA" "$ADMIN_USER"; u=$ANSWER
+  "$BIN_DIR/tctl" get "user/$u" >/dev/null 2>&1 || { err "Пользователя нет"; return 1; }
+  output=$("$BIN_DIR/tctl" users reset "$u" 2>&1) || { err "Сброс не удался"; return 1; }
+  INVITE=$(grep -oE 'https://[^ ]+/web/reset/[A-Za-z0-9_-]+' <<<"$output" | head -1 || :)
+  [ -n "$INVITE" ] || { err "В ответе нет ссылки"; return 1; }
+  info "Ссылка сброса (ограниченное время): ${INVITE/:443\//\/}"
 }
-
-menu_users() { hdr "Пользователи"; tctl users ls 2>&1 | sed 's/^/  /'; }
-
 menu_token() {
-  hdr "Подключение нового сервера (узла)"
-  local out tok
-  out=$(tctl tokens add --type=node --ttl=1h --format=text 2>&1) || { err "$out"; return 1; }
-  tok=$(tail -1 <<<"$out" | tr -d '[:space:]')
-  ok "Токен (действует 1 час): ${CB}$tok${C0}"
-  say "  На подключаемом сервере (нужен только исходящий доступ к $CLUSTER:443):"
-  say "    ${CD}curl -fsSL https://cdn.teleport.dev/install.sh | bash -s $(tp_version) oss${C0}"
-  say "    ${CD}teleport node configure --output=file --proxy=$CLUSTER:443 --token=$tok${C0}"
-  say "    ${CD}systemctl enable --now teleport${C0}"
-  say "  Если install.sh не знает вашу ОС — поставьте бинарники так же, как этот скрипт (tar.gz с cdn.teleport.dev)."
+  local token
+  # In Teleport 18, --format=text writes only the token, which can be stored as a file.
+  token=$("$BIN_DIR/tctl" tokens add --type=node --ttl=1h --format=text 2>>"$LOG") || {
+    err "Не удалось создать токен"; return 1;
+  }
+  token=${token//$'\r'/}
+  token=${token//$'\n'/}
+  [[ $token =~ ^[A-Za-z0-9_-]{16,256}$ ]] || { err "Неожиданный формат токена; секрет не отображён"; return 1; }
+  say "  Токен (1 час): $token"
+  say "  На новом сервере установите Teleport версии, совместимой с $(tp_version)."
+  say "  Сохраните токен в файле /root/teleport-token (chmod 600), затем:"
+  say "    teleport node configure --output=file --proxy=$CLUSTER:443 --token=/root/teleport-token"
+  say "    systemctl enable --now teleport"
+  warn "Не вставляйте токен в shell-команду: он попадёт в историю."
 }
-
 menu_cert() {
-  hdr "Сертификат"
-  cert_live_info "$CLUSTER"
-  info "Способ: $(cert_label "$CERT_MODE")"
-  [ "$CERT_MODE" = acme-dns ] && info "Автопродление: $(systemctl list-timers "$ACME_UNIT.timer" --no-pager 2>/dev/null | awk 'NR==2{print "следующая проверка "$1" "$2" "$3}')"
-  say "   ${CL}1)${C0} Продлить сейчас (только acme.sh)   ${CL}2)${C0} Сменить способ получения   ${CL}0)${C0} Назад"
-  ask_num "Действие" 2 0
+  local oldmode oldemail dir oldtimer=0 rc=0
+  live_tls || warn "TLS на 443 не отвечает"
+  info "Текущий TLS: $CERT_MODE"
+  say "  1) Проверить/продлить acme.sh"
+  say "  2) Изменить способ TLS"
+  say "  0) Назад"
+  ask_num "Выбор" 2 0
   case "$ANSWER" in
-    1) [ "$CERT_MODE" = acme-dns ] || { warn "Доступно только для способа acme.sh."; return 0; }
-       run "Принудительное продление" acme_sh --renew -d "$CLUSTER" --ecc --force && cert_live_info "$CLUSTER" ;;
-    2) choose_cert_mode
-       if [[ "$CERT_MODE" == acme-* ]]; then ask_email "E-mail для Let's Encrypt" "$ACME_EMAIL"; ACME_EMAIL=$ANSWER; fi
-       cert_apply
-       write_config; validate_config || return 1
-       state_set CERT_MODE "$CERT_MODE"; state_set ACME_EMAIL "$ACME_EMAIL"
-       [ "$CERT_MODE" != acme-dns ] && systemctl disable --now "$ACME_UNIT.timer" >>"$LOG" 2>&1
-       run "Перезапуск Teleport" systemctl restart teleport && wait_healthy && sleep 2 && cert_live_info "$CLUSTER" ;;
+    0) return 0 ;;
+    1)
+      [ "$CERT_MODE" = acme-dns ] || { warn "Только для acme-dns"; return 1; }
+      run "Принудительное продление" acme_sh --renew -d "$CLUSTER" --ecc --force || return 1
+      cert_check_files "$CERT_DIR/tls.crt" "$CERT_DIR/tls.key" "$CLUSTER" ;;
+    2)
+      oldmode=$CERT_MODE; oldemail=$ACME_EMAIL
+      dir=$(mktemp -d "$CACHE_DIR/tls-rollback.XXXXXX") || return 1
+      cp -a "$CONF" "$dir/config" || return 1
+      [ ! -d "$CERT_DIR" ] || cp -a "$CERT_DIR" "$dir/certs"
+      systemctl is-enabled -q "$ACME_UNIT.timer" && oldtimer=1
+      if ! choose_cert 1; then CERT_MODE=$oldmode; return 0; fi
+      if [[ $CERT_MODE == acme-* ]]; then ask_email "E-mail ACME" "$ACME_EMAIL"; ACME_EMAIL=$ANSWER; fi
+      if cert_apply && config_apply && run "Перезапуск Teleport" systemctl restart teleport && wait_healthy; then
+        state_set CERT_MODE "$CERT_MODE"; state_set ACME_EMAIL "$ACME_EMAIL"
+        if [ "$CERT_MODE" != acme-dns ]; then systemctl disable --now "$ACME_UNIT.timer" >>"$LOG" 2>&1 || :; fi
+        ok "Сертификат и конфигурация переключены"; return 0
+      fi
+      err "TLS-изменение не прошло: восстанавливаю предыдущие файлы"
+      cp -a "$dir/config" "$CONF" || rc=1
+      rm -rf "$CERT_DIR"
+      [ ! -d "$dir/certs" ] || cp -a "$dir/certs" "$CERT_DIR" || rc=1
+      CERT_MODE=$oldmode; ACME_EMAIL=$oldemail
+      if [ "$oldtimer" -eq 1 ]; then
+        systemctl enable --now "$ACME_UNIT.timer" >>"$LOG" 2>&1 || :
+      else
+        systemctl disable --now "$ACME_UNIT.timer" >>"$LOG" 2>&1 || :
+      fi
+      run "Возврат прежнего Teleport" systemctl restart teleport && wait_healthy || rc=1
+      return 1 ;;
   esac
 }
-
 menu_dns() {
-  while true; do
-    hdr "DNS"; dns_show
-    say "   ${CL}1)${C0} Проверить   ${CL}2)${C0} Заменить на публичные / DoH   ${CL}3)${C0} Вернуть исходные   ${CL}4)${C0} Проверить домен $CLUSTER   ${CL}0)${C0} Назад"
-    ask_num "Действие" 4 0
-    case "$ANSWER" in 1) dns_test ;; 2) dns_change ;; 3) dns_restore ;; 4) dns_check_domain "$CLUSTER" "$CERT_MODE" ;; 0) return 0 ;; esac
+  local choice
+  while :; do
+    hdr "DNS"
+    info "Текущие nameserver: $(grep -E '^nameserver' "$RESOLV_CONF" | tr '\n' ' ')"
+    say '  1) Проверить   2) Изменить   3) Вернуть исходный   0) Назад'
+    ask_num "Действие" 3 0; choice=$ANSWER
+    case "$choice" in
+      1) dns_test || : ;; 2) dns_change || : ;; 3) dns_restore || : ;; 0) return 0 ;;
+    esac
   done
 }
-
 menu_status() {
-  hdr "Состояние"
-  systemctl status teleport --no-pager -n 0 2>&1 | sed -n '1,5p' | sed 's/^/  /'
-  tctl status 2>&1 | head -2 | sed 's/^/  /'
-  info "Серверов в кластере: $(tctl nodes ls --format=json 2>/dev/null | grep -c '"hostname"')   пользователей: $(tctl users ls 2>/dev/null | tail -n +3 | grep -c .)"
-  say "  ${CD}── журнал (последние 15 строк, полностью: journalctl -u teleport) ──${C0}"
-  journalctl -u teleport -n 15 --no-pager -o short 2>/dev/null | sed -E 's/ [0-9T:.+-]{25,} / /' | cut -c1-200 | sed 's/^/  /'
-  ask_yn "Перезапустить Teleport?" n && run "Перезапуск" systemctl restart teleport && wait_healthy
+  hdr "Teleport status"
+  systemctl --no-pager status teleport | head -n 12 || :
+  "$BIN_DIR/tctl" status || :
+  info "Публичные listeners:"
+  ss -Hlntp '( sport = :443 or sport = :3022 or sport = :3025 )' || :
+  info "Последние события:"
+  journalctl -u teleport -n 15 --no-pager || :
+  ask_yn "Перезапустить Teleport?" n && { run "Перезапуск" systemctl restart teleport && wait_healthy; } || :
 }
-
 menu_uninstall() {
-  hdr "Удаление Teleport"
-  warn "Будут удалены служба и бинарники Teleport. Перед удалением создаётся полная резервная копия."
-  ask_yn "Точно удалить Teleport?" n || return 0
-  local keepdata=1; ask_yn "Удалить также данные и конфигурацию ($DATA_DIR, $CONF, /etc/teleport)?" n && keepdata=0
-  systemctl stop teleport >>"$LOG" 2>&1
-  tp_backup uninstall full || { ask_yn "Резервная копия не создана. Всё равно удалить?" n || return 1; }
-  systemctl disable teleport >>"$LOG" 2>&1; rm -f "$UNIT"
-  rm -f "$BIN_DIR"/{teleport,tctl,tsh,tbot,fdpass-teleport}
-  if [ $keepdata = 0 ]; then rm -rf "${DATA_DIR:?}" "$CONF" "$CONF".bak-* /etc/teleport; fi
-  if [ -f "/etc/systemd/system/$ACME_UNIT.timer" ]; then
-    systemctl disable --now "$ACME_UNIT.timer" >>"$LOG" 2>&1; rm -f "/etc/systemd/system/$ACME_UNIT".{timer,service}
-    ask_yn "Удалить acme.sh и его настройки ($ACME_HOME, $ACME_CONF — там токен DNS-провайдера)?" y && rm -rf "$ACME_HOME" "$ACME_CONF"
+  local remove=0 backup
+  hdr "Удаление только этой установки"
+  warn "Сначала offline-бэкап; общие утилиты и сторонние файлы не удаляются."
+  ask_yn "Удалить Teleport?" n || return 0
+  ask_yn "Удалить также конфигурацию, сертификаты и данные кластера?" n && remove=1 || :
+  run "Остановка Teleport" systemctl stop teleport || return 1
+  if ! tp_backup uninstall; then
+    run "Возврат сервиса" systemctl start teleport || :
+    err "Без успешного backup удаление запрещено"; return 1
   fi
-  systemctl daemon-reload; rm -f "$STATE"
-  ok "Teleport удалён.${LAST_BACKUP:+ Резервная копия: $LAST_BACKUP}"
-  [ -d "$DNS_BACKUP" ] && info "Настройки DNS не трогал — откат через этот скрипт («DNS» при новой установке) или вручную."
-  info "Правило фаервола для 443/tcp оставлено."
+  backup=$LAST_BACKUP
+  systemctl disable teleport >>"$LOG" 2>&1 || :
+  rm -f "$UNIT"
+  local b; for b in teleport tctl tsh tbot fdpass-teleport; do rm -f "$BIN_DIR/$b"; done
+  if [ "$remove" -eq 1 ]; then rm -rf -- "$DATA_DIR" "$CONF" "$ETC_DIR"; fi
+  systemctl disable --now "$ACME_UNIT.timer" >>"$LOG" 2>&1 || :
+  rm -f "/etc/systemd/system/$ACME_UNIT.timer" "/etc/systemd/system/$ACME_UNIT.service"
+  systemctl daemon-reload
+  [ ! -d "$DNS_BACKUP" ] || dns_restore || warn "DNS нуждается в ручном восстановлении"
+  rm -f "$STATE"
+  info "acme.sh и секреты сохранены в $ACME_HOME и $ACME_CONF — удаляйте отдельно после проверки."
+  info "Правило 443/tcp в фаерволе оставлено, чтобы не нарушить другие сервисы."
+  ok "Удалено. Резервная копия: $backup"
   exit 0
 }
-
 menu_installed() {
   load_state
-  while true; do
-    status_header
-    say
-    say "   ${CL}1)${C0} Проверить и установить обновление"
-    say "   ${CL}2)${C0} Создать администратора"
-    say "   ${CL}3)${C0} Сбросить пароль / 2FA пользователя"
-    say "   ${CL}4)${C0} Список пользователей"
-    say "   ${CL}5)${C0} Токен для подключения нового сервера"
-    say "   ${CL}6)${C0} Сертификат: состояние, продление, смена способа"
-    say "   ${CL}7)${C0} DNS: проверка, замена (в т.ч. DoH), откат"
-    say "   ${CL}8)${C0} Время: проверка синхронизации"
-    say "   ${CL}9)${C0} Состояние и журнал Teleport"
-    say "  ${CL}10)${C0} Удалить Teleport"
-    say "   ${CL}0)${C0} Выход"
-    ask_num "Выберите действие" 10 0
+  while :; do
+    hdr "Teleport $(tp_version) | $CLUSTER | $(systemctl is-active teleport 2>/dev/null || :)"
+    say "  1) Обновить Teleport"
+    say "  2) Создать пользователя-администратора"
+    say "  3) Сбросить пароль и MFA"
+    say "  4) Список пользователей"
+    say "  5) Создать токен узла"
+    say "  6) Сертификат и продление"
+    say "  7) DNS и DoH"
+    say "  8) Проверка времени"
+    say "  9) Состояние и журнал"
+    say " 10) Удалить Teleport"
+    say "  0) Выход"
+    ask_num "Действие" 10 0
     case "$ANSWER" in
-      1) menu_update ;; 2) menu_add_admin ;; 3) menu_reset ;; 4) menu_users ;; 5) menu_token ;;
-      6) menu_cert ;; 7) menu_dns ;; 8) hdr "Время"; time_fix ;; 9) menu_status ;; 10) menu_uninstall ;;
-      0) exit 0 ;;
+      1) menu_update || : ;; 2) menu_admin || : ;; 3) menu_reset || : ;;
+      4) "$BIN_DIR/tctl" users ls || : ;; 5) menu_token || : ;;
+      6) menu_cert || : ;; 7) menu_dns || : ;; 8) time_check || : ;;
+      9) menu_status || : ;; 10) menu_uninstall || : ;; 0) return 0 ;;
     esac
-    say; read -r -p "  ${CD}Enter — вернуться в меню${C0} " _ || exit 0
+    read -r -p '  Enter — продолжить...' _ || return 0
   done
 }
-
-# ─── точка входа ──────────────────────────────────────────────────────────────
 main() {
-  [ "$(id -u)" -eq 0 ] || { echo "Запустите от root: sudo bash $0"; exit 1; }
-  if [ ! -t 0 ]; then
-    if [ -r /dev/tty ]; then exec </dev/tty; else echo "Скрипт интерактивный — нужен терминал."; exit 1; fi
-  fi
-  mkdir -p "${LOG%/*}" "$STATE_DIR"; touch "$LOG"; chmod 600 "$LOG"
-  if [ "$(locale charmap 2>/dev/null)" != UTF-8 ]; then   # иначе кириллица считается байтами
-    for l in C.UTF-8 C.utf8 en_US.UTF-8 ru_RU.UTF-8; do locale -a 2>/dev/null | grep -qix "${l/UTF-8/utf8}" && { export LC_CTYPE=$l; break; }; done
-  fi
-  log "=== deploy-teleport.sh $SCRIPT_VERSION start ==="
+  [ "$(id -u)" -eq 0 ] || { err "Запустите от root"; exit 1; }
+  if [ ! -t 0 ]; then [ -r /dev/tty ] && exec </dev/tty || die "Нужен интерактивный терминал"; fi
+  mkdir -p "${LOG%/*}" "$STATE_DIR" "$CACHE_DIR"
+  chmod 700 "$STATE_DIR" "$CACHE_DIR"
+  touch "$LOG"; chmod 600 "$LOG"
+  command -v flock >/dev/null 2>&1 || die "Нужен flock (util-linux)"
+  mkdir -p /run/lock
+  exec 9>/run/lock/deploy-teleport.lock
+  flock -n 9 || die "Другой экземпляр deploy-teleport.sh уже работает"
+  TMP_DIR=$(mktemp -d "$CACHE_DIR/session.XXXXXX") || die "Нет временного каталога"
   export PATH="$BIN_DIR:$PATH"
-  detect_os
-  say "${CB}${CH}Teleport Community Edition — установка и обслуживание${C0} ${CD}(deploy-teleport.sh $SCRIPT_VERSION)${C0}"
+  log "=== deploy-teleport.sh $SCRIPT_VERSION ==="
+  prechecks
+  if [ "${1:-}" = dns-restore ]; then dns_restore; return $?; fi
+  hdr "Teleport Community — deploy-teleport.sh $SCRIPT_VERSION"
   if tp_installed; then
+    if ! tp_owned; then die "Найдена сторонняя/неполная установка Teleport. Автоматическое принятие под управление запрещено."; fi
     menu_installed
   else
-    say "  Teleport на этой машине не найден — начнём установку с нуля."
-    say "  ${CD}Ответы можно редактировать стрелками; Enter принимает значение по умолчанию; Ctrl+C — выход.${C0}"
     fresh_install
   fi
 }
-
-[ "${BASH_SOURCE[0]}" = "$0" ] && main "$@"   # при source (для тестов) только функции
-
+[ "${BASH_SOURCE[0]}" != "$0" ] || main "$@"
