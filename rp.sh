@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # rp — клиенты WG → VPS-1 (РФ) → туннель (XHTTP/HY2) → VPS-2 (выход).
+# 1.2.8: audit fixes (backup perms, early rollback timer, confirm checks, menu locks, rp.sh URL, stale files).
 # 1.2.7: RU-list download fallbacks/resume, fast observatory, SSH-door wait in rp test, exact probe byte counts.
 # 1.2.6: complete SNI + all transport validation, Xray 26.4.25-compatible DNS, strict RU lists.
 # 1.2.3: DNS routing consistency, fail-closed name resolution and verified geosite updates.
@@ -10,7 +11,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.7-stability-fixes"
+SELF_VERSION="1.2.8-audit-fixes"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -33,7 +34,7 @@ RU_REPO="runetfreedom/russia-v2ray-rules-dat"
 # Set RU_REF to a known numeric tag (e.g. 202611111121) in rp.conf for pinned updates.
 SOCKS_PORT=1080
 # Адрес для установки команды rp и обновления самого скрипта (можно переопределить переменной RP_URL)
-RP_URL="${RP_URL:-https://raw.githubusercontent.com/fLex0id/reverse-proxy/main/rp_gpt.sh}"
+RP_URL="${RP_URL:-https://raw.githubusercontent.com/fLex0id/reverse-proxy/main/rp.sh}"
 
 declare -gA CFG=()
 ASSUME_YES="${ASSUME_YES:-0}"
@@ -1515,7 +1516,15 @@ diag() {
     t3) say "    ${detail:-ошибка передачи}; причины: таймаут, XHTTP-режим, сеть или фильтрация. Логи: rp logs" ;;
   esac
 }
+# Прерывание (Ctrl-C / SIGTERM) не должно оставлять VPS-2 без сторожа
 cmd_select() {
+  local rc
+  trap 'systemctl enable --now rp-watch >/dev/null 2>&1; exit 130' INT TERM
+  cmd_select_body "$@"; rc=$?
+  trap - INT TERM
+  return $rc
+}
+cmd_select_body() {
   # Проверяются ВСЕ транспорты; рабочие попадают в usable, неработающие исключаются (VPS-1 уберёт их командой rp prune)
   local t first="" res tmpu=() ok_n=0 bad="" target="" last_checked="" current_mode="" pinned=""
   local -a scan_order=()
@@ -1759,7 +1768,7 @@ cmd_logs() { journalctl -u rp-watch -u rp-hy2 -u rp-hy2o -u 'rp-xray@*' -u wg-qu
 cmd_restart() { local t; t=$(active); [[ -n $t ]] || { say "Транспорт не выбран: rp select"; return 1; }; tr_start "$t"; say "Перезапущено: $t"; }
 cmd_remove() {
   read -rp "Удалить rp с VPS-2 (туннель, конфиги, ключ SSH)? [y/N] " a; [[ ${a,,} == y ]] || return 0
-  systemctl disable --now rp-watch rp-nat rp-rollback.timer >/dev/null 2>&1; tr_stop_all
+  systemctl disable --now rp-watch rp-nat >/dev/null 2>&1; systemctl stop rp-rollback-run.timer rp-rollback.timer >/dev/null 2>&1; rm -f /root/.rp-push.sh; tr_stop_all
   rm -f /etc/systemd/system/rp-*.service /etc/systemd/system/rp-*.timer /etc/wireguard/rp-wg.conf /usr/local/lib/rp/watch.sh
   rm -rf /etc/systemd/system/rp-* /usr/local/share/rp "$ETC" "$STATE"
   [[ -f /root/.ssh/authorized_keys ]] && sed -i '/ rp@vps1$/d' /root/.ssh/authorized_keys
@@ -1772,8 +1781,11 @@ cmd_remove() {
   systemctl daemon-reload; say "Удалено. Бинарники /usr/local/bin/{xray,hysteria,rp} оставлены; rm — вручную."
 }
 cmd_confirm() {
-  systemctl stop rp-rollback.timer >/dev/null 2>&1 || true
-  rm -f "$STATE/backup.tgz" "$STATE/mode.before-identity" "$STATE/active.before-identity" "$STATE/since.before-identity"
+  systemctl stop rp-rollback-run.timer rp-rollback.timer >/dev/null 2>&1 || true
+  if systemctl is-active --quiet rp-rollback-run.timer || systemctl is-active --quiet rp-rollback.timer; then
+    say "Таймер отката не остановлен: обновление НЕ подтверждено" >&2; return 1
+  fi
+  rm -f /root/.rp-push.sh "$STATE/backup.tgz" "$STATE/mode.before-identity" "$STATE/active.before-identity" "$STATE/since.before-identity"
   say "Обновление подтверждено, откат отменён"
 }
 cmd_rollback() {
@@ -1786,6 +1798,8 @@ cmd_rollback() {
     fi
   done
   systemctl daemon-reload && cmd_restart || return 1
+  systemctl stop rp-rollback-run.timer rp-rollback.timer >/dev/null 2>&1 || true
+  rm -f /root/.rp-push.sh
   say "Возврат к прежним параметрам выполнен"
 }
 menu() {
@@ -2309,11 +2323,26 @@ rp_main() {
   tmp=$(mktemp -d) || rp_fail "mktemp"
   mkdir -p /var/lib/rp; rm -f /var/lib/rp/push.rc
   # код завершения читает VPS-1 (rp push ждёт его, прежде чем подтвердить обновление)
-  trap 'rc=$?; rm -rf "$tmp"; echo "$rc" >/var/lib/rp/push.rc' EXIT
-  # 0. копия для отката (обновление по SSH с таймером)
+  rp_mutated=0
+  # При ошибке после начала изменений (RP_SAFE=1) откатываемся сразу, не дожидаясь таймера.
+  trap 'rc=$?; rm -rf "$tmp"; if [[ $rc -ne 0 && $RP_SAFE == 1 && $rp_mutated == 1 && -s /var/lib/rp/backup.tgz ]]; then rp_msg "Ошибка установки: немедленный откат"; /usr/local/bin/rp rollback >/dev/null 2>&1 && { systemctl stop rp-rollback-run.timer >/dev/null 2>&1; rm -f /root/.rp-push.sh; }; fi; echo "$rc" >/var/lib/rp/push.rc' EXIT
+  # 0. копия для отката (только файлы rp; права 0600: внутри ключи и пароли) и таймер отката ДО любых изменений
   if [[ $RP_SAFE == 1 && -d /etc/rp ]]; then
-    tar -czf /var/lib/rp/backup.tgz -C / etc/rp usr/local/lib/rp usr/local/bin/rp etc/systemd/system 2>/dev/null
+    local bk_list=() bk_f
+    for bk_f in etc/rp usr/local/lib/rp usr/local/bin/rp etc/wireguard/rp-wg.conf etc/sysctl.d/99-rp.conf root/.ssh/authorized_keys; do
+      [[ -e /$bk_f ]] && bk_list+=("$bk_f")
+    done
+    while IFS= read -r bk_f; do bk_list+=("${bk_f#/}"); done < <(find /etc/systemd/system -maxdepth 1 -name 'rp-*' 2>/dev/null)
+    rm -f /var/lib/rp/backup.tgz
+    ( umask 077; tar -czf /var/lib/rp/backup.tgz -C / "${bk_list[@]}" 2>/dev/null; [[ $? -le 1 ]] ) \
+      && tar -tzf /var/lib/rp/backup.tgz >/dev/null 2>&1 \
+      || rp_fail "Не удалось создать проверяемую резервную копию: обновление прервано до изменений"
+    chmod 600 /var/lib/rp/backup.tgz
+    systemctl stop rp-rollback-run.timer rp-rollback.timer >/dev/null 2>&1
+    systemd-run --on-active=1800 --unit=rp-rollback-run --description="rp: откат обновления" /usr/local/bin/rp rollback >/dev/null 2>&1
+    systemctl is-active --quiet rp-rollback-run.timer || rp_fail "Не удалось взвести таймер отката: обновление прервано до изменений"
   fi
+  rp_mutated=1
   # 1. бандл: проверка суммы до любых изменений
   rp_bundle | base64 -d >"$tmp/b.tgz" 2>/dev/null || rp_fail "Бандл повреждён (base64)"
   [[ $(sha256sum "$tmp/b.tgz" | awk '{print $1}') == "$RP_BUNDLE_SHA" ]] || rp_fail "SHA256 бандла не совпала — вставьте блок заново целиком"
@@ -2365,6 +2394,12 @@ rp_main() {
   install -d -m 700 /etc/wireguard; install -m 600 /etc/rp/rp-wg.conf /etc/wireguard/rp-wg.conf; chmod 600 /etc/rp/rp-wg.conf
   # shellcheck disable=SC1091
   . /etc/rp/rp2.conf
+  # конфиги исключённых транспортов не должны оставаться от прежнего бандла
+  local ord=" ${TRANSPORT_ORDER:-} "
+  [[ $ord == *" hy2-wg "* ]] || rm -f /etc/rp/hy2.yaml
+  [[ $ord == *" hy2o-wg "* ]] || rm -f /etc/rp/hy2o.yaml
+  [[ $ord == *" reality-xhttp "* ]] || rm -f /etc/rp/xray-xhttp.json
+  [[ $ord == *" reality-xhttp2 "* ]] || rm -f /etc/rp/xray-xhttp2.json
   # VPS-2 may host unrelated services; never toggle its global IPv6 or
   # global rp_filter. ip_forward is necessary for the inner WG egress only.
   printf '# Managed by rp (VPS-2); do not disable global IPv6/rp_filter\nnet.ipv4.ip_forward=1\n' \
@@ -2393,7 +2428,7 @@ rp_main() {
           /var/lib/rp/active /var/lib/rp/since
     rp_msg "Новая установка: прежний ручной режим VPS-2 сброшен в auto"
   fi
-  if [[ $RP_SAFE == 1 ]]; then systemd-run --on-active=1800 --unit=rp-rollback --description="rp: откат обновления" /usr/local/bin/rp rollback >/dev/null 2>&1; fi
+  if [[ $RP_SAFE == 1 ]] && ! systemctl is-active --quiet rp-rollback-run.timer; then rp_fail "Таймер отката пропал во время установки"; fi
   # Full T1/T2/T3 for EVERY configured transport on both fresh install and push.
   # The selected manual transport is enforced only for final activation.
   /usr/local/bin/rp select
@@ -2514,7 +2549,7 @@ self_install() {
   if [[ $rv != "$SELF_VERSION" ]]; then
     rm -f "$tmp"
     err "На GitHub находится версия $rv, а сейчас запущена $SELF_VERSION."
-    err "Обновите rp_gpt.sh в репозитории или запустите скачанный файл как обычный файл."
+    err "Обновите rp.sh в репозитории или запустите скачанный файл как обычный файл."
     return 1
   fi
   self_install_file "$tmp"; rv=$?
@@ -3352,7 +3387,7 @@ cmd_door() {
 
 # ── Обновление VPS-2 по SSH: передача, ожидание, подтверждение ───────────
 # push_start [задержка_с] — блок на VPS-2 и запуск в отдельном сеансе (туннель при проверке транспортов
-# перезапускается, SSH-сеанс оборвётся); откат на VPS-2 сработает сам через 10 минут без подтверждения
+# перезапускается, SSH-сеанс оборвётся); откат на VPS-2 сработает сам через 30 минут без подтверждения
 # Одна временная потеря SSH не должна отменять rp push: обратный XHTTP-мост
 # может еще регистрироваться, либо сторож меняет активный транспорт.
 # Проверяем РЕАЛЬНЫЙ SSH (а не только ss -lnt на 127.0.0.1:2222),
@@ -3487,7 +3522,18 @@ push_wait() {
   route_sync_locked >/dev/null 2>&1 || warn "VPS-2 доступен, но маршрут Xray VPS-1 пока не согласован"
   wait_exit || { err "Выход через VPS-2 не работает после обновления (откат на VPS-2 сработает сам)"; return 1; }
   touch "$STATE/linked"
-  vps2_run '/usr/local/bin/rp confirm' >/dev/null 2>&1 || { warn "Подтвердите вручную на VPS-2: rp confirm"; return 0; }
+  local cf_try cf_ok=0
+  for cf_try in 1 2 3; do
+    vps2_run '/usr/local/bin/rp confirm' >/dev/null 2>&1 && { cf_ok=1; break; }
+    sleep 3
+  done
+  ((cf_ok)) || { err "VPS-2 не подтвердил обновление: выполните там  rp confirm  до истечения 30 минут, иначе сработает откат"; return 1; }
+  local res_now; res_now=$(tr_results 2>/dev/null || true)
+  if grep -q '=fail' <<<"$res_now"; then
+    warn "Итог: DEGRADED — часть транспортов не прошла T1–T3 (rp transports)"
+  else
+    ok "Итог: FULL_OK — все транспорты прошли T1–T3"
+  fi
   ok "VPS-2 обновлён и подтверждён"
   route_sync_locked >/dev/null 2>&1 || warn "Маршрут VPS-1 пока не подтверждён; выполните rp tunnel sync"
 }
@@ -4126,17 +4172,17 @@ menu_dns() {
 menu_upd() {
   local c
   while :; do cls; banner "Обновления" "Xray, Hysteria2, списки"; cmd_upgrade check
-    mhead "Действия"; mi 1 "Обновить Xray"; mi 2 "Обновить Hysteria2"; mi 3 "Обновить списки РФ"; mi 4 "Обновить rp из GitHub (rp_gpt.sh)"; mi 0 "Назад"; mpick c
-    case $c in 1) (cmd_upgrade xray); pause ;; 2) (cmd_upgrade hy2); pause ;; 3) (cmd_upgrade ru); pause ;; 4) (cmd_upgrade self); pause ;; 0) return ;; *) warn "Введите число от 0 до 4"; sleep 1 ;; esac
+    mhead "Действия"; mi 1 "Обновить Xray"; mi 2 "Обновить Hysteria2"; mi 3 "Обновить списки РФ"; mi 4 "Обновить rp из GitHub (rp.sh)"; mi 0 "Назад"; mpick c
+    case $c in 1) (lock; cmd_upgrade xray); pause ;; 2) (lock; cmd_upgrade hy2); pause ;; 3) (lock; cmd_upgrade ru); pause ;; 4) (lock; cmd_upgrade self); pause ;; 0) return ;; *) warn "Введите число от 0 до 4"; sleep 1 ;; esac
   done
 }
 menu_tunnel() {
   local c
   while :; do cls; banner "Туннель к VPS-2" "$(cf TRANSPORT_ORDER)"; cmd_door list
-    mhead "Действия"; mi 1 "Строка для VPS-2 (он сам скачает блок)"; mi 2 "Блок для VPS-2 (вставка вручную)"; mi 3 "Обновить VPS-2 по SSH (откат 10 мин)"; mi 4 "SSH на VPS-2"
+    mhead "Действия"; mi 1 "Строка для VPS-2 (он сам скачает блок)"; mi 2 "Блок для VPS-2 (вставка вручную)"; mi 3 "Обновить VPS-2 по SSH (откат 30 мин)"; mi 4 "SSH на VPS-2"
     mi 5 "Двери (Reality)"; mi 6 "Сменить секреты"; mi 7 "Проверка сайтов SNI"; mi 8 "Транспорты: результаты проверки"; mi 9 "Исключить неработающие транспорты"; mi 10 "Выбрать активный транспорт (авто / вручную)"; mi 0 "Назад"; mpick c
-    case $c in 1) (cmd_link); pause ;; 2) (cmd_block); pause ;; 3) (cmd_push); pause ;; 4) (cmd_ssh); pause ;; 5) (cmd_door list); pause ;; 6) (cmd_rotate); pause ;; 7) (cmd_sni); pause ;;
-      8) (cmd_transports); pause ;; 9) (cmd_prune); pause ;; 10) (lock; cmd_tunnel select); pause ;; 0) return ;; *) warn "Введите число от 0 до 10"; sleep 1 ;; esac
+    case $c in 1) (lock; cmd_link); pause ;; 2) (cmd_block); pause ;; 3) (lock; cmd_push); pause ;; 4) (cmd_ssh); pause ;; 5) (cmd_door list); pause ;; 6) (lock; cmd_rotate); pause ;; 7) (cmd_sni); pause ;;
+      8) (cmd_transports); pause ;; 9) (lock; cmd_prune); pause ;; 10) (lock; cmd_tunnel select); pause ;; 0) return ;; *) warn "Введите число от 0 до 10"; sleep 1 ;; esac
   done
 }
 menu_main() {
@@ -4204,7 +4250,7 @@ rp $SELF_VERSION — цепочка «клиенты WG → VPS-1 → тунне
   rp install               установка; роль VPS-1 / VPS-2 выбирается здесь
   rp migrate               применить версию команды rp к текущей установке VPS-1
   rp save                  сохранить запущенную сборку как /usr/local/bin/rp
-  rp update                скачать rp_gpt.sh из GitHub, установить и выполнить migrate
+  rp update                скачать rp.sh из GitHub, установить и выполнить migrate
   VPS-1:
   rp client add|del|list|show [имя]   клиенты WG (конфиг и QR; QR строит сам скрипт)
   rp link [порт]           короткая строка для VPS-2: он сам скачает блок с VPS-1 (одноразовый HTTPS, TTL 30 мин)
