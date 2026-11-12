@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# deploy-teleport.sh v1.1.1 — Teleport Community Edition, single-host cluster
+# deploy-teleport.sh v1.1.2 — Teleport Community Edition, single-host cluster
 # Linux + systemd; Bash >= 4; root; interactive. No unattended modifications to existing installs.
 # Deployment: Auth + Proxy + SSH, inbound 443/tcp, internal listeners on loopback.
 # Files and data remain owned by the current installation until explicit uninstall.
 # Optional: TELEPORT_SETUP_VERSION=18.11.10 bash deploy-teleport.sh
 # Optional: TELEPORT_SETUP_ACME_STAGING=1 bash deploy-teleport.sh
+# Offline archives: TELEPORT_SETUP_SHA256=<trusted 64-hex checksum> (verified out of band).
 set -o pipefail
 set -o nounset
 umask 077
 
-SCRIPT_VERSION=1.1.1
+SCRIPT_VERSION=1.1.2
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR=/usr/local/bin
 CONF=/etc/teleport.yaml
@@ -23,7 +24,7 @@ STATE=$STATE_DIR/state.env
 LOG=/var/log/teleport-setup.log
 CACHE_DIR=/var/cache/teleport-setup
 BACKUP_DIR=/var/backups/teleport
-TP_INDEX=https://apt.releases.teleport.dev/debian/dists/bookworm
+TP_RELEASE_API=https://rlz.teleport.sh/versions
 TP_CDN=https://cdn.teleport.dev
 ACME_HOME=/opt/acme.sh
 ACME_CONF=/etc/acme.sh
@@ -311,7 +312,7 @@ dns_manager() {
 }
 dns_test() {
   local h bad=0
-  for h in cdn.teleport.dev apt.releases.teleport.dev acme-v02.api.letsencrypt.org github.com; do
+  for h in cdn.teleport.dev rlz.teleport.sh acme-v02.api.letsencrypt.org github.com; do
     if timeout 8 getent ahostsv4 "$h" >/dev/null 2>&1; then ok "DNS $h"; else err "DNS $h"; bad=1; fi
   done
   return "$bad"
@@ -549,16 +550,31 @@ tp_owned() {
   return 0
 }
 tp_version() { "$BIN_DIR/teleport" version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 | tr -d v || :; }
-tp_majors() {
-  curl -fsSL --retry 2 -m 25 "$TP_INDEX/Release" 2>>"$LOG" |
-    awk '/^Components:/{for(i=2;i<=NF;i++)if($i~/^stable\/v[0-9]+$/){v=$i;sub(/^stable\/v/,"",v);print v}}' | sort -n
+# Teleport's maintainers publish the current stable version through rlz.teleport.sh.
+# GitHub Releases is no longer updated consistently (the last release object is
+# v18.10.0, although newer stable binaries are published by Teleport).
+# The APT repository must not be used to discover releases: it can contain
+# non-public/test versions (e.g. 999.0.3).
+tp_valid_version() {
+  local v=${1#v} major minor patch
+  [[ $v =~ ^([0-9]{1,2})\.([0-9]{1,2})\.([0-9]{1,3})$ ]] || return 1
+  major=${BASH_REMATCH[1]}; minor=${BASH_REMATCH[2]}; patch=${BASH_REMATCH[3]}
+  # Reject leading zeros, pseudo-versions and implausible major releases.
+  [ "$major" = "$((10#$major))" ] && [ "$minor" = "$((10#$minor))" ] &&
+    [ "$patch" = "$((10#$patch))" ] && [ "$major" -ge 10 ] && [ "$major" -lt 100 ]
 }
-tp_latest_in() {
-  curl -fsSL --retry 2 -m 40 "$TP_INDEX/stable/v$1/binary-amd64/Packages.gz" 2>>"$LOG" |
-    gzip -dc 2>>"$LOG" |
-    awk '/^Package: /{p=($2=="teleport")}p&&/^Version: /{print $2}' |
-    grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
+tp_release_latest() {
+  local payload matched version
+  payload=$(curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --connect-timeout 10 -m 25 \
+    "$TP_RELEASE_API" 2>>"$LOG") || return 1
+  # We need only the top-level `latest` string; no jq dependency for minimal OSes.
+  # Reject anything but a plain stable numeric version (no -rc/-dev/build).
+  matched=$(printf '%s' "$payload" | grep -oEm1 '"latest"[[:space:]]*:[[:space:]]*"v?[0-9]+\.[0-9]+\.[0-9]+"') || return 1
+  version=${matched%\"}; version=${version##*\"}; version=${version#v}
+  tp_valid_version "$version" || return 1
+  printf '%s\n' "$version"
 }
+
 local_tarball() {
   local v=$1 f name
   for f in "$(pwd)"/teleport-v"$v"-linux-"$ARCH"-bin.tar.gz \
@@ -568,57 +584,98 @@ local_tarball() {
   return 1
 }
 tp_pick_version() {
-  local majors last v
+  local version
   TP_TARGET=
-  if [[ ${TELEPORT_SETUP_VERSION:-} =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    TP_TARGET=${TELEPORT_SETUP_VERSION#v}; info "Версия задана: $TP_TARGET"; return 0
+  if [ -n "${TELEPORT_SETUP_VERSION:-}" ]; then
+    version=${TELEPORT_SETUP_VERSION#v}
+    tp_valid_version "$version" || { err "Некорректная версия: $TELEPORT_SETUP_VERSION (только X.Y.Z, без pre-release)"; return 1; }
+    TP_TARGET=$version
+    info "Версия задана вручную: $TP_TARGET; SHA256 обязателен"
+    return 0
   fi
-  majors=$(tp_majors); last=$(tail -1 <<<"$majors")
-  if [ -n "$last" ]; then TP_TARGET=$(tp_latest_in "$last"); fi
-  if [ -n "$TP_TARGET" ]; then ok "Доступна версия $TP_TARGET"; return 0; fi
-  warn "Список версий недоступен. Можно указать версию вручную."
+  if version=$(tp_release_latest); then
+    TP_TARGET=$version
+    ok "Последний стабильный Teleport: $TP_TARGET (официальный сервис релизов)"
+    return 0
+  fi
+  warn "Не удалось получить подтверждённую стабильную версию с $TP_RELEASE_API"
+  warn "Версия из APT-индекса не используется; GitHub Releases может отставать от бинарных выпусков."
   while :; do
-    ask "Точная версия X.Y.Z" "18.11.10"; v=${ANSWER#v}
-    [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && { TP_TARGET=$v; return 0; }
-    warn "Некорректная версия"
+    ask "Укажите точную стабильную версию X.Y.Z (пусто — отмена)" ""
+    version=${ANSWER#v}
+    if [ -z "$version" ]; then err "Не удалось определить версию Teleport"; return 1; fi
+    if tp_valid_version "$version"; then
+      TP_TARGET=$version
+      warn "Ручная версия будет установлена только при наличии проверенной SHA256-суммы"
+      return 0
+    fi
+    warn "Некорректная версия; допустимо, например, 18.11.10"
   done
 }
+
+# Download and verify tarball strictly against Teleport CDN's sidecar checksum.
+# No unchecked download, no silent trust of locally supplied .sha256 files.
 tp_fetch() {
-  local v=$1 file="teleport-v$1-linux-$ARCH-bin.tar.gz" sum f attempt expected localfile
+  local v=$1 file checksum_output sum hash_name extra f attempt actual localfile
+  tp_valid_version "$v" || { err "Неподдерживаемая версия Teleport: $v"; return 1; }
+  file="teleport-v${v}-linux-${ARCH}-bin.tar.gz"
   localfile=$(local_tarball "$v") || localfile=
-  sum=$(curl -fsSL --retry 2 -m 25 "$TP_CDN/$file.sha256" 2>>"$LOG" | awk 'NR==1{print $1}')
-  if ! [[ $sum =~ ^[[:xdigit:]]{64}$ ]] && [ -n "$localfile" ] && [ -s "$localfile.sha256" ]; then
-    # Offline distribution: checksum file must have been fetched from a trusted source.
-    sum=$(awk 'NR==1{print $1}' "$localfile.sha256")
-    warn "Использую локальный SHA256. Подлинность самого файла .sha256 необходимо проверить отдельно."
+
+  # Optional for genuinely offline operation: an explicit checksum verified
+  # independently by the operator. Never accept a local .sha256 implicitly.
+  if [ -n "${TELEPORT_SETUP_SHA256:-}" ]; then
+    sum=${TELEPORT_SETUP_SHA256,,}
+    [[ $sum =~ ^[a-f0-9]{64}$ ]] || { err "TELEPORT_SETUP_SHA256 должен содержать ровно 64 hex-символа"; return 1; }
+    warn "Применён явно заданный SHA256; вы отвечаете за достоверность значения"
+  else
+    checksum_output=$(curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 10 -m 40 \
+      "$TP_CDN/$file.sha256" 2>>"$LOG") || {
+        err "Нет доступа к официальной SHA256-сумме: $TP_CDN/$file.sha256"
+        err "Установка отменена; архив без проверенной суммы запускаться не будет"
+        return 1
+      }
+    read -r sum hash_name extra <<<"$checksum_output"
+    sum=${sum,,}
+    # Official format: 64hex<space>filename (or *filename for binary mode).
+    if ! [[ $sum =~ ^[a-f0-9]{64}$ ]] || [ -n "$extra" ] ||
+       { [ "$hash_name" != "$file" ] && [ "$hash_name" != "*$file" ]; }; then
+      err "Неверный формат/имя файла в официальной SHA256-сумме для $file"
+      return 1
+    fi
   fi
-  [[ $sum =~ ^[[:xdigit:]]{64}$ ]] || { err "Нет достоверного SHA256 для $file"; return 1; }
+
+  mkdir -p "$CACHE_DIR" || return 1
   f=$localfile
   [ -n "$f" ] || f="$CACHE_DIR/$file"
-  mkdir -p "$CACHE_DIR"
   for attempt in 1 2 3; do
     if [ -f "$f" ]; then
-      expected=$(sha256sum "$f" | awk '{print $1}')
-      if [ "${expected,,}" = "${sum,,}" ]; then TP_TARBALL=$f; ok "SHA256 $file подтверждён"; return 0; fi
-      [ "$attempt" -eq 1 ] && warn "Локальный/кешированный архив не совпадает с SHA256"
+      actual=$(sha256sum "$f" | awk '{print $1}') || return 1
+      if [ "$actual" = "$sum" ]; then
+        TP_TARBALL=$f; ok "SHA256 для $file подтверждён"; return 0
+      fi
+      warn "SHA256 архива не совпал с опубликованным: $f"
     fi
-    # Keep .part between retries and resume reliably.
+    # Existing downloaded archive can be reused as a partial download.
     f="$CACHE_DIR/$file"
-    [ -f "$f" ] && mv -f "$f" "$f.part" || :
-    if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 20 --max-time 900 -C - \
-       --progress-bar -o "$f.part" "$TP_CDN/$file"; then
+    if [ -f "$f" ]; then mv -f "$f" "$f.part" || return 1; fi
+    if ! curl --proto '=https' --tlsv1.2 -fL --retry 3 --retry-delay 2 \
+       --connect-timeout 20 --max-time 900 -C - --progress-bar \
+       -o "$f.part" "$TP_CDN/$file"; then
       warn "Загрузка не завершена, будет повторена"
       continue
     fi
-    expected=$(sha256sum "$f.part" | awk '{print $1}')
-    if [ "${expected,,}" = "${sum,,}" ]; then
-      mv -f "$f.part" "$f"; TP_TARBALL=$f; ok "SHA256 $file подтверждён"; return 0
+    actual=$(sha256sum "$f.part" | awk '{print $1}') || return 1
+    if [ "$actual" = "$sum" ]; then
+      mv -f "$f.part" "$f" || return 1
+      TP_TARBALL=$f; ok "SHA256 для $file подтверждён"; return 0
     fi
-    # Incompatible partial download; next attempt must start from zero.
+    # Wrong content or mismatched partial: next attempt starts clean.
     rm -f "$f.part"; warn "Контрольная сумма не совпала (попытка $attempt)"
   done
-  err "Не удалось загрузить проверенный Teleport $v"; return 1
+  err "Не удалось получить проверенный Teleport $v"
+  return 1
 }
+
 tp_install_bins() {
   local dest b staged; local -a bins=(teleport tctl tsh tbot fdpass-teleport)
   dest=$(mktemp -d "$TMP_DIR/teleport-extract.XXXXXX") || return 1
@@ -1018,7 +1075,7 @@ fresh_install() {
     fi
   done
   [ ! -e "$CONF" ] || { err "Существует $CONF. Нельзя перезаписывать чужую конфигурацию."; return 1; }
-  tp_pick_version
+  tp_pick_version || return 1
   tp_fetch "$TP_TARGET" || return 1
   if ! cert_apply; then
     err "TLS-сертификат не получен; Teleport ещё не установлен"; return 1
@@ -1062,23 +1119,37 @@ final_summary() {
 # In-place update: backup after stopping, revalidate and restore on any failure.
 menu_update() {
   deps
-  local current latest majors cm next target backup
-  current=$(tp_version); [ -n "$current" ] || { err "Версия Teleport не определена"; return 1; }
-  cm=${current%%.*}; next=$((cm+1))
-  majors=$(tp_majors)
-  [ -n "$majors" ] || { err "Не удалось проверить ветки версий"; return 1; }
-  if grep -qx "$next" <<<"$majors"; then
-    latest=$(tp_latest_in "$next")
+  local current latest cm lm target backup
+  current=$(tp_version)
+  [ -n "$current" ] && tp_valid_version "$current" || { err "Версия установленного Teleport не определена"; return 1; }
+  cm=${current%%.*}
+  if [ -n "${TELEPORT_SETUP_VERSION:-}" ]; then
+    target=${TELEPORT_SETUP_VERSION#v}
+    tp_valid_version "$target" || { err "Некорректная TELEPORT_SETUP_VERSION"; return 1; }
+    info "Обновление до явно заданной версии $target"
   else
-    latest=$(tp_latest_in "$cm")
+    latest=$(tp_release_latest) || {
+      err "Не удалось получить свежую стабильную версию с $TP_RELEASE_API"
+      err "Укажите TELEPORT_SETUP_VERSION=X.Y.Z для ручного обновления"
+      return 1
+    }
+    target=$latest
+    info "Официальный последний стабильный релиз: $latest"
   fi
-  [ -n "$latest" ] || { err "Нет версии для обновления"; return 1; }
-  if [ "$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)" != "$latest" ] || [ "$latest" = "$current" ]; then
-    ok "Обновлений нет ($current)"; return 0
+  lm=${target%%.*}
+  if [ "$lm" -gt "$((cm+1))" ]; then
+    err "Переход v$cm -> v$lm запрещён: Teleport обновляется по одной major-версии"
+    err "Сначала обновитесь до последней поддерживаемой версии v$((cm+1)) (через TELEPORT_SETUP_VERSION)"
+    return 1
   fi
-  target=$latest
-  info "Обновление $current → $target; допускается переход не более чем на одну major"
-  warn "Агенты Teleport также должны быть совместимы. Планируйте окно обслуживания."
+  if [ "$lm" -lt "$cm" ] ||
+     [ "$(printf '%s\n%s\n' "$current" "$target" | sort -V | tail -1)" != "$target" ] ||
+     [ "$current" = "$target" ]; then
+    ok "Обновление не требуется (установлено: $current)"
+    return 0
+  fi
+  info "Обновление $current -> $target"
+  warn "Агенты Teleport должны быть совместимы. Планируйте окно обслуживания."
   ask_yn "Остановить Teleport для offline-бэкапа и обновления?" n || return 0
   tp_fetch "$target" || return 1
   run "Остановка Teleport" systemctl stop teleport || return 1
@@ -1097,6 +1168,7 @@ menu_update() {
   fi
   return 1
 }
+
 menu_admin() {
   local u logins
   ask_username "Новый администратор" ""; u=$ANSWER
