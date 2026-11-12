@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# deploy-teleport.sh v1.1.3 — Teleport Community Edition, single-host cluster
+# deploy-teleport.sh v1.1.4 — Teleport Community Edition, single-host cluster
 # Linux + systemd; Bash >= 4; root; interactive. No unattended modifications to existing installs.
 # Deployment: Auth + Proxy + SSH, inbound 443/tcp, internal listeners on loopback.
 # Files and data remain owned by the current installation until explicit uninstall.
 # Optional: TELEPORT_SETUP_VERSION=18.11.10 bash deploy-teleport.sh
 # Optional: TELEPORT_SETUP_ACME_STAGING=1 bash deploy-teleport.sh
 # Binary mirror (GitHub Releases assets): TELEPORT_SETUP_GITHUB_REPO=fLex0id/reverse-proxy
-# Binary source: TELEPORT_SETUP_BINARY_SOURCE=auto|github|cdn (default auto)
+# Binary source: TELEPORT_SETUP_BINARY_SOURCE=github|cdn|auto (default github; no fallback)
 # GitHub mirror release tag: teleport-vX.Y.Z, assets: teleport-vX.Y.Z-linux-ARCH-bin.tar.gz and .sha256
 # Offline archives: TELEPORT_SETUP_SHA256=<trusted 64-hex checksum> (verified out of band).
 set -o pipefail
 set -o nounset
 umask 077
 
-SCRIPT_VERSION=1.1.3
+SCRIPT_VERSION=1.1.4
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR=/usr/local/bin
 CONF=/etc/teleport.yaml
@@ -33,7 +33,7 @@ TP_CDN=https://cdn.teleport.dev
 # A GitHub Releases mirror must be explicitly populated with the exact official
 # archive and its .sha256 sidecar; the archive is never taken from source tarballs.
 TP_GITHUB_REPO=${TELEPORT_SETUP_GITHUB_REPO:-fLex0id/reverse-proxy}
-TP_BIN_SOURCE=${TELEPORT_SETUP_BINARY_SOURCE:-auto}  # auto (GitHub first, prompt for CDN), github, cdn
+TP_BIN_SOURCE=${TELEPORT_SETUP_BINARY_SOURCE:-github}  # default GitHub-only; CDN is explicit opt-in
 ACME_HOME=/opt/acme.sh
 ACME_CONF=/etc/acme.sh
 ACME_VER=3.1.6
@@ -583,11 +583,9 @@ tp_owned() {
   return 0
 }
 tp_version() { "$BIN_DIR/teleport" version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1 | tr -d v || :; }
-# Teleport's maintainers publish the current stable version through rlz.teleport.sh.
-# GitHub Releases is no longer updated consistently (the last release object is
-# v18.10.0, although newer stable binaries are published by Teleport).
-# The APT repository must not be used to discover releases: it can contain
-# non-public/test versions (e.g. 999.0.3).
+# Discover the newest version available in our binary mirror, NOT the official
+# upstream version. This prevents selecting a release not yet mirrored to GitHub.
+# The APT repository must never be used: it may contain pseudo-versions (999.0.3).
 tp_valid_version() {
   local v=${1#v} major minor patch
   [[ $v =~ ^([0-9]{1,2})\.([0-9]{1,2})\.([0-9]{1,3})$ ]] || return 1
@@ -608,6 +606,30 @@ tp_release_latest() {
   printf '%s\n' "$version"
 }
 
+# Query this repository's public releases and choose the highest *stable* version
+# that actually has both binary and checksum assets for the current architecture.
+# Do not depend on jq/python: minimal Linux images may have neither.
+tp_mirror_latest() {
+  local payload tags v archive
+  tp_github_repo_valid || { err "Некорректное имя GitHub-репозитория: $TP_GITHUB_REPO"; return 1; }
+  payload=$(curl4 --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+    --connect-timeout 10 --max-time 30 --retry 1 \
+    -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/repos/$TP_GITHUB_REPO/releases?per_page=100" 2>>"$LOG") || return 1
+  tags=$(printf '%s' "$payload" | grep -oE '"tag_name"[[:space:]]*:[[:space:]]*"teleport-v[0-9]+\.[0-9]+\.[0-9]+"' \
+    | sed -E 's/.*teleport-v([0-9]+\.[0-9]+\.[0-9]+)"/\1/' | sort -Vu -r) || return 1
+  [ -n "$tags" ] || return 1
+  while IFS= read -r v; do
+    tp_valid_version "$v" || continue
+    archive="teleport-v${v}-linux-${ARCH}-bin.tar.gz"
+    if tp_github_assets "$v" "$archive" >>"$LOG" 2>&1; then
+      printf '%s\n' "$v"
+      return 0
+    fi
+  done <<<"$tags"
+  return 1
+}
+
 local_tarball() {
   local v=$1 f name
   for f in "$(pwd)"/teleport-v"$v"-linux-"$ARCH"-bin.tar.gz \
@@ -626,25 +648,25 @@ tp_pick_version() {
     info "Версия задана вручную: $TP_TARGET; SHA256 обязателен"
     return 0
   fi
-  info "Запрос последнего стабильного выпуска Teleport (IPv4)..."
-  if version=$(tp_release_latest); then
-    TP_TARGET=$version
-    ok "Последний стабильный Teleport: $TP_TARGET (официальный сервис релизов)"
-    return 0
-  fi
-  warn "Не удалось получить подтверждённую стабильную версию с $TP_RELEASE_API"
-  warn "Версия из APT-индекса не используется; GitHub Releases может отставать от бинарных выпусков."
-  while :; do
-    ask "Укажите точную стабильную версию X.Y.Z (пусто — отмена)" ""
-    version=${ANSWER#v}
-    if [ -z "$version" ]; then err "Не удалось определить версию Teleport"; return 1; fi
-    if tp_valid_version "$version"; then
+  if [ "$TP_BIN_SOURCE" = cdn ]; then
+    info "Запрос последнего стабильного выпуска Teleport с официального сервиса (IPv4)..."
+    if version=$(tp_release_latest); then
       TP_TARGET=$version
-      warn "Ручная версия будет установлена только при наличии проверенной SHA256-суммы"
+      ok "Последний стабильный Teleport: $TP_TARGET"
       return 0
     fi
-    warn "Некорректная версия; допустимо, например, 18.11.10"
-  done
+    err "Не удалось получить стабильную версию с $TP_RELEASE_API"
+    return 1
+  fi
+  info "Поиск последней доступной сборки в GitHub Releases ($TP_GITHUB_REPO, IPv4)..."
+  if version=$(tp_mirror_latest); then
+    TP_TARGET=$version
+    ok "Последний доступный Teleport в GitHub: $TP_TARGET"
+    return 0
+  fi
+  err "Не найден опубликованный GitHub Release с архивом и SHA256 для архитектуры $ARCH."
+  err "Проверьте https://github.com/$TP_GITHUB_REPO/releases или укажите TELEPORT_SETUP_VERSION."
+  return 1
 }
 
 # Validate the GitHub release repository path; never permit arbitrary URLs/hosts.
@@ -664,8 +686,9 @@ tp_github_assets() {
       "https://api.github.com/repos/$TP_GITHUB_REPO/releases/tags/teleport-v$v" 2>>"$LOG"); then
     warn "GitHub API не вернул выпуск v$v (подробности: $LOG)"; return 2
   fi
-  if ! grep -Eq '"name"[[:space:]]*:[[:space:]]*"'"$file"'"' <<<"$payload"; then
-    warn "В GitHub Releases нет готового Linux-архива: $file"
+  if ! grep -Eq '"name"[[:space:]]*:[[:space:]]*"'"$file"'"' <<<"$payload" ||
+     ! grep -Eq '"name"[[:space:]]*:[[:space:]]*"'"$file"'.sha256"' <<<"$payload"; then
+    warn "В GitHub Releases отсутствует готовый архив или файл SHA256: $file"
     return 1
   fi
   return 0
@@ -738,21 +761,13 @@ tp_fetch() {
   tp_select_source "$v" "$file" || return 1
   remote_url="$TP_BINARY_BASE/$file"
   if [ -z "${sum:-}" ]; then
-    info "Получение SHA256 для $file (IPv4, ожидание не более 25 секунд)"
-    if [ "$TP_BINARY_BASE" = "$TP_CDN" ]; then
-      sum=$(tp_read_checksum "$TP_CDN/$file.sha256" "$file") || {
-        err "Не удалось получить проверяемую SHA256 с официального CDN"; return 1;
-      }
-    else
-      # Prefer official checksum, but only wait briefly for a blocked CDN.
-      if sum=$(tp_read_checksum "$TP_CDN/$file.sha256" "$file" 8); then
-        info "SHA256 получена с официального CDN"
-      else
-        sum=$(tp_read_checksum "$TP_HASH_BASE/$file.sha256" "$file") || {
-          err "В зеркале GitHub нет корректного $file.sha256"; return 1;
-        }
-        warn "SHA256 взята из того же GitHub-зеркала: это контроль целостности, но не независимое подтверждение происхождения"
-      fi
+    info "Проверка SHA256 (IPv4): $TP_HASH_BASE/$file.sha256"
+    sum=$(tp_read_checksum "$TP_HASH_BASE/$file.sha256" "$file") || {
+      err "SHA256 отсутствует, недоступна или не соответствует имени архива. Установка остановлена."
+      return 1
+    }
+    if [ "$TP_BINARY_BASE" != "$TP_CDN" ]; then
+      warn "SHA256 из того же GitHub-зеркала: проверяет целостность, не является независимой аттестацией подлинности"
     fi
   fi
 
@@ -1250,13 +1265,18 @@ menu_update() {
     tp_valid_version "$target" || { err "Некорректная TELEPORT_SETUP_VERSION"; return 1; }
     info "Обновление до явно заданной версии $target"
   else
-    latest=$(tp_release_latest) || {
-      err "Не удалось получить свежую стабильную версию с $TP_RELEASE_API"
-      err "Укажите TELEPORT_SETUP_VERSION=X.Y.Z для ручного обновления"
-      return 1
-    }
+    if [ "$TP_BIN_SOURCE" = cdn ]; then
+      latest=$(tp_release_latest) || {
+        err "Не удалось получить стабильную версию с $TP_RELEASE_API"; return 1;
+      }
+      info "Последняя версия с официального CDN: $latest"
+    else
+      latest=$(tp_mirror_latest) || {
+        err "Не найден GitHub Release с проверяемым бинарником для архитектуры $ARCH"; return 1;
+      }
+      info "Последняя версия в GitHub-зеркале: $latest"
+    fi
     target=$latest
-    info "Официальный последний стабильный релиз: $latest"
   fi
   lm=${target%%.*}
   if [ "$lm" -gt "$((cm+1))" ]; then
