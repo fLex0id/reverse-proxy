@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# deploy-teleport.sh v1.1.2 — Teleport Community Edition, single-host cluster
+# deploy-teleport.sh v1.1.3 — Teleport Community Edition, single-host cluster
 # Linux + systemd; Bash >= 4; root; interactive. No unattended modifications to existing installs.
 # Deployment: Auth + Proxy + SSH, inbound 443/tcp, internal listeners on loopback.
 # Files and data remain owned by the current installation until explicit uninstall.
 # Optional: TELEPORT_SETUP_VERSION=18.11.10 bash deploy-teleport.sh
 # Optional: TELEPORT_SETUP_ACME_STAGING=1 bash deploy-teleport.sh
+# Binary mirror (GitHub Releases assets): TELEPORT_SETUP_GITHUB_REPO=fLex0id/reverse-proxy
+# Binary source: TELEPORT_SETUP_BINARY_SOURCE=auto|github|cdn (default auto)
+# GitHub mirror release tag: teleport-vX.Y.Z, assets: teleport-vX.Y.Z-linux-ARCH-bin.tar.gz and .sha256
 # Offline archives: TELEPORT_SETUP_SHA256=<trusted 64-hex checksum> (verified out of band).
 set -o pipefail
 set -o nounset
 umask 077
 
-SCRIPT_VERSION=1.1.2
+SCRIPT_VERSION=1.1.3
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR=/usr/local/bin
 CONF=/etc/teleport.yaml
@@ -26,6 +29,11 @@ CACHE_DIR=/var/cache/teleport-setup
 BACKUP_DIR=/var/backups/teleport
 TP_RELEASE_API=https://rlz.teleport.sh/versions
 TP_CDN=https://cdn.teleport.dev
+# Teleport does not publish Linux release binaries in its own GitHub Releases.
+# A GitHub Releases mirror must be explicitly populated with the exact official
+# archive and its .sha256 sidecar; the archive is never taken from source tarballs.
+TP_GITHUB_REPO=${TELEPORT_SETUP_GITHUB_REPO:-fLex0id/reverse-proxy}
+TP_BIN_SOURCE=${TELEPORT_SETUP_BINARY_SOURCE:-auto}  # auto (GitHub first, prompt for CDN), github, cdn
 ACME_HOME=/opt/acme.sh
 ACME_CONF=/etc/acme.sh
 ACME_VER=3.1.6
@@ -118,6 +126,9 @@ init_console_ui() {
     printf '[INFO] No Cyrillic console font available; ASCII UI enabled.\n' >&2
   fi
 }
+
+# IPv4 for every curl request made by this installer, including GitHub redirects.
+curl4() { command curl -4 "$@"; }
 
 say() { ui_prepare "$*"; printf '%s\n' "$UI_DISPLAY"; }
 ok() { ui_prepare "$*"; if [ "$UI_CONSOLE" -eq 1 ]; then printf '  [OK] %s\n' "$UI_DISPLAY"; else printf '  ✔ %s\n' "$UI_DISPLAY"; fi; }
@@ -312,7 +323,7 @@ dns_manager() {
 }
 dns_test() {
   local h bad=0
-  for h in cdn.teleport.dev rlz.teleport.sh acme-v02.api.letsencrypt.org github.com; do
+  for h in api.github.com github.com rlz.teleport.sh acme-v02.api.letsencrypt.org; do
     if timeout 8 getent ahostsv4 "$h" >/dev/null 2>&1; then ok "DNS $h"; else err "DNS $h"; bad=1; fi
   done
   return "$bad"
@@ -401,7 +412,7 @@ doh_install_bin() {
   name="dnscrypt-proxy-linux_${da}-${DOH_VER}.tar.gz"
   dir=$(mktemp -d "$TMP_DIR/doh.XXXXXX") || return 1
   file="$dir/$name"
-  run "Загрузка dnscrypt-proxy" curl -fsSL --retry 3 -m 180 -o "$file" "https://github.com/DNSCrypt/dnscrypt-proxy/releases/download/$DOH_VER/$name" || return 1
+  run "Загрузка dnscrypt-proxy" curl4 -fsSL --retry 3 -m 180 -o "$file" "https://github.com/DNSCrypt/dnscrypt-proxy/releases/download/$DOH_VER/$name" || return 1
   tar -xzf "$file" -C "$dir" "linux-${da}/dnscrypt-proxy" >>"$LOG" 2>&1 || { err "Архив dnscrypt-proxy не подходит"; return 1; }
   install -m 0755 "$dir/linux-${da}/dnscrypt-proxy" "$DOH_BIN" || return 1
   touch "$DNS_BACKUP/doh_binary_owned"
@@ -444,7 +455,20 @@ EOF
   else
     run "Запуск DoH" systemctl enable --now "$DOH_UNIT.service"
   fi || return 1
-  "$DOH_BIN" -config "$DOH_CONF" -resolve example.com >>"$LOG" 2>&1
+  # A systemd active state alone does not prove functioning encrypted upstream.
+  if ! systemctl is-active -q "$DOH_UNIT.service"; then
+    err "DoH служба не запущена"; return 1
+  fi
+  info "Проверка реального DoH-запроса (через dnscrypt-proxy)"
+  if ! timeout 25 "$DOH_BIN" -config "$DOH_CONF" -resolve example.com >>"$LOG" 2>&1; then
+    err "DoH не подтвердил разрешение example.com через защищённый upstream"
+    return 1
+  fi
+  if ! ss -Hlun '( sport = :53 )' 2>/dev/null | grep -Fq "${DOH_LISTEN}:53"; then
+    err "DoH активен, но не слушает ${DOH_LISTEN}:53"
+    return 1
+  fi
+  ok "DoH запущен, слушает ${DOH_LISTEN}:53 и разрешает имена через DoH"
 }
 DNS_PROVIDERS=(
   'Cloudflare|1.1.1.1 1.0.0.1|cloudflare-dns.com'
@@ -491,7 +515,12 @@ dns_change() {
   if [ "$chk" -eq 0 ]; then
     if [ "$mode" = plain ]; then systemctl disable --now "$DOH_UNIT" >>"$LOG" 2>&1 || :; fi
     state_set DNS_MODE "$label/$mode"
-    ok "DNS переключён: $label ($mode)"; return 0
+    if [ "$mode" = doh ]; then
+      ok "DoH включён: системный DNS -> ${DOH_LISTEN}:53 -> HTTPS ($host)"
+    else
+      ok "DNS переключён: $label ($mode)"
+    fi
+    return 0
   fi
   err "DNS не прошёл проверку, восстанавливаю предыдущую конфигурацию"
   if cp -a "$snapshot/resolv.conf" "$(dirname "$RESOLV_CONF")/.teleport-dns-rollback.$$"; then
@@ -504,7 +533,11 @@ dns_change() {
   systemctl daemon-reload >>"$LOG" 2>&1 || :
   case "$manager" in resolved) systemctl restart systemd-resolved >>"$LOG" 2>&1 || : ;; nm) systemctl reload NetworkManager >>"$LOG" 2>&1 || : ;; esac
   if [ "$was_doh" -eq 1 ]; then systemctl restart "$DOH_UNIT" >>"$LOG" 2>&1 || :; else systemctl disable --now "$DOH_UNIT" >>"$LOG" 2>&1 || :; fi
-  if [ "$had_backup" -eq 0 ]; then rm -rf "$DNS_BACKUP"; fi
+  if [ "$had_backup" -eq 0 ]; then
+    # If we installed dnscrypt-proxy for this failed operation, do not orphan it.
+    [ ! -f "$DNS_BACKUP/doh_binary_owned" ] || rm -f -- "$DOH_BIN"
+    rm -rf -- "$DNS_BACKUP"
+  fi
   dns_test || warn "DNS всё ещё не работает: проверьте сеть вручную"
   return 1
 }
@@ -523,7 +556,7 @@ dns_check_domain() {
   else
     info "$name → $resolved"
   fi
-  publicip=$(curl -fsSL --max-time 7 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || :)
+  publicip=$(curl4 -fsSL --max-time 7 https://api.ipify.org 2>/dev/null | tr -d '[:space:]' || :)
   if is_ip "$publicip"; then info "Публичный IPv4 (по ipify): $publicip"; fi
   if [ "$mode" = acme-teleport ]; then
     warn "Встроенный ACME требует публичный DNS и доступ к TCP/443 из интернета."
@@ -565,7 +598,7 @@ tp_valid_version() {
 }
 tp_release_latest() {
   local payload matched version
-  payload=$(curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --connect-timeout 10 -m 25 \
+  payload=$(curl4 --proto '=https' --tlsv1.2 -fsSL --retry 2 --connect-timeout 10 -m 25 \
     "$TP_RELEASE_API" 2>>"$LOG") || return 1
   # We need only the top-level `latest` string; no jq dependency for minimal OSes.
   # Reject anything but a plain stable numeric version (no -rc/-dev/build).
@@ -593,6 +626,7 @@ tp_pick_version() {
     info "Версия задана вручную: $TP_TARGET; SHA256 обязателен"
     return 0
   fi
+  info "Запрос последнего стабильного выпуска Teleport (IPv4)..."
   if version=$(tp_release_latest); then
     TP_TARGET=$version
     ok "Последний стабильный Teleport: $TP_TARGET (официальный сервис релизов)"
@@ -613,66 +647,154 @@ tp_pick_version() {
   done
 }
 
-# Download and verify tarball strictly against Teleport CDN's sidecar checksum.
-# No unchecked download, no silent trust of locally supplied .sha256 files.
+# Validate the GitHub release repository path; never permit arbitrary URLs/hosts.
+tp_github_repo_valid() {
+  [[ $TP_GITHUB_REPO =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$ ]]
+}
+
+# Only release assets count as binaries: GitHub's source tarball is not Teleport.
+# Returns: 0 (asset listed), 1 (release missing), 2 (GitHub API unavailable).
+tp_github_assets() {
+  local v=$1 file=$2 payload
+  tp_github_repo_valid || { err "Некорректный GitHub репозиторий: $TP_GITHUB_REPO"; return 2; }
+  info "Проверка GitHub Releases: $TP_GITHUB_REPO / teleport-v$v (IPv4)"
+  if ! payload=$(curl4 --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+      --connect-timeout 10 --max-time 20 --retry 1 \
+      -H 'Accept: application/vnd.github+json' \
+      "https://api.github.com/repos/$TP_GITHUB_REPO/releases/tags/teleport-v$v" 2>>"$LOG"); then
+    warn "GitHub API не вернул выпуск v$v (подробности: $LOG)"; return 2
+  fi
+  if ! grep -Eq '"name"[[:space:]]*:[[:space:]]*"'"$file"'"' <<<"$payload"; then
+    warn "В GitHub Releases нет готового Linux-архива: $file"
+    return 1
+  fi
+  return 0
+}
+
+# Validate official-style SHA256 sidecar (hex + the exact archive filename).
+# This verifies integrity; when mirror and checksum share an account,
+# authenticity still depends on the integrity of the mirror account.
+tp_read_checksum() {
+  local url=$1 archive=$2 max_time=${3:-25} output sum name rest
+  output=$(curl4 --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+    --connect-timeout 8 --max-time "$max_time" --retry 0 "$url" 2>>"$LOG") || return 1
+  read -r sum name rest <<<"$output"
+  sum=${sum,,}
+  [[ $sum =~ ^[a-f0-9]{64}$ ]] && [ -z "${rest:-}" ] && \
+    { [ "$name" = "$archive" ] || [ "$name" = "*$archive" ]; } || return 1
+  printf '%s\n' "$sum"
+}
+
+# An absent mirror must not silently redirect the user back to the blocked CDN.
+tp_select_source() {
+  local v=$1 file=$2 gh_rc
+  TP_BINARY_BASE=; TP_HASH_BASE=
+  case "$TP_BIN_SOURCE" in github|cdn|auto) : ;; *) err "TELEPORT_SETUP_BINARY_SOURCE: допустимо auto, github, cdn"; return 1 ;; esac
+  if [ "$TP_BIN_SOURCE" != cdn ]; then
+    gh_rc=0
+    tp_github_assets "$v" "$file" || gh_rc=$?
+    if [ "$gh_rc" -eq 0 ]; then
+      TP_BINARY_BASE="https://github.com/$TP_GITHUB_REPO/releases/download/teleport-v$v"
+      TP_HASH_BASE=$TP_BINARY_BASE
+      ok "Выбран GitHub Releases ($TP_GITHUB_REPO)"
+      return 0
+    fi
+    [ "$TP_BIN_SOURCE" != github ] || {
+      err "Источник github выбран строго, но бинарника нет. Нужен GitHub Release teleport-v$v с активами $file и $file.sha256."
+      return 1
+    }
+    warn "У официального gravitational/teleport нет Linux-бинарников в GitHub Releases."
+    warn "Добавьте официальный архив и файл SHA256 в GitHub Release своего зеркала либо используйте локальный архив."
+    if ! ask_yn "Попробовать официальный CDN вместо GitHub? (со скоростным тайм-аутом)" n; then
+      err "Скачивание отменено; никакой неподтверждённый архив не запускается"
+      return 1
+    fi
+  fi
+  TP_BINARY_BASE=$TP_CDN
+  TP_HASH_BASE=$TP_CDN
+  info "Выбран официальный CDN (IPv4, тайм-аут при отсутствии передачи данных)"
+}
+
+# Fetch archive from GitHub Releases mirror or official CDN; SHA256 is mandatory.
+# Never consider a source archive / GitHub tag to be a compiled binary.
 tp_fetch() {
-  local v=$1 file checksum_output sum hash_name extra f attempt actual localfile
+  local v=$1 file sum f part attempt actual localfile remote_url curl_rc
   tp_valid_version "$v" || { err "Неподдерживаемая версия Teleport: $v"; return 1; }
   file="teleport-v${v}-linux-${ARCH}-bin.tar.gz"
   localfile=$(local_tarball "$v") || localfile=
 
-  # Optional for genuinely offline operation: an explicit checksum verified
-  # independently by the operator. Never accept a local .sha256 implicitly.
+  # Offline override is only valid when explicitly provided by the operator.
   if [ -n "${TELEPORT_SETUP_SHA256:-}" ]; then
     sum=${TELEPORT_SETUP_SHA256,,}
-    [[ $sum =~ ^[a-f0-9]{64}$ ]] || { err "TELEPORT_SETUP_SHA256 должен содержать ровно 64 hex-символа"; return 1; }
-    warn "Применён явно заданный SHA256; вы отвечаете за достоверность значения"
-  else
-    checksum_output=$(curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 10 -m 40 \
-      "$TP_CDN/$file.sha256" 2>>"$LOG") || {
-        err "Нет доступа к официальной SHA256-сумме: $TP_CDN/$file.sha256"
-        err "Установка отменена; архив без проверенной суммы запускаться не будет"
-        return 1
+    [[ $sum =~ ^[a-f0-9]{64}$ ]] || { err "TELEPORT_SETUP_SHA256: нужно 64 hex-символа"; return 1; }
+    warn "Используется явно заданная SHA256: подтвердите её происхождение независимо"
+    if [ -n "$localfile" ]; then
+      actual=$(sha256sum "$localfile" | awk '{print $1}') || return 1
+      if [ "$actual" = "$sum" ]; then TP_TARBALL=$localfile; ok "Локальный архив проверен по SHA256"; return 0; fi
+      err "Локальный архив имеет неправильную SHA256"; return 1
+    fi
+  fi
+
+  tp_select_source "$v" "$file" || return 1
+  remote_url="$TP_BINARY_BASE/$file"
+  if [ -z "${sum:-}" ]; then
+    info "Получение SHA256 для $file (IPv4, ожидание не более 25 секунд)"
+    if [ "$TP_BINARY_BASE" = "$TP_CDN" ]; then
+      sum=$(tp_read_checksum "$TP_CDN/$file.sha256" "$file") || {
+        err "Не удалось получить проверяемую SHA256 с официального CDN"; return 1;
       }
-    read -r sum hash_name extra <<<"$checksum_output"
-    sum=${sum,,}
-    # Official format: 64hex<space>filename (or *filename for binary mode).
-    if ! [[ $sum =~ ^[a-f0-9]{64}$ ]] || [ -n "$extra" ] ||
-       { [ "$hash_name" != "$file" ] && [ "$hash_name" != "*$file" ]; }; then
-      err "Неверный формат/имя файла в официальной SHA256-сумме для $file"
-      return 1
+    else
+      # Prefer official checksum, but only wait briefly for a blocked CDN.
+      if sum=$(tp_read_checksum "$TP_CDN/$file.sha256" "$file" 8); then
+        info "SHA256 получена с официального CDN"
+      else
+        sum=$(tp_read_checksum "$TP_HASH_BASE/$file.sha256" "$file") || {
+          err "В зеркале GitHub нет корректного $file.sha256"; return 1;
+        }
+        warn "SHA256 взята из того же GitHub-зеркала: это контроль целостности, но не независимое подтверждение происхождения"
+      fi
     fi
   fi
 
   mkdir -p "$CACHE_DIR" || return 1
-  f=$localfile
-  [ -n "$f" ] || f="$CACHE_DIR/$file"
+  if [ -n "$localfile" ]; then
+    actual=$(sha256sum "$localfile" | awk '{print $1}') || return 1
+    if [ "$actual" = "$sum" ]; then TP_TARBALL=$localfile; ok "Локальный архив подтверждён по SHA256"; return 0; fi
+    warn "Локальный архив не совпадает с контрольной суммой; будет загружен новый"
+  fi
+  f="$CACHE_DIR/$file"; part="$f.part"
+  if [ -f "$f" ]; then
+    actual=$(sha256sum "$f" | awk '{print $1}') || return 1
+    if [ "$actual" = "$sum" ]; then TP_TARBALL=$f; ok "Кэш: SHA256 подтверждена"; return 0; fi
+    rm -f -- "$f"  # invalid completed file must not be used as a partial
+  fi
   for attempt in 1 2 3; do
-    if [ -f "$f" ]; then
-      actual=$(sha256sum "$f" | awk '{print $1}') || return 1
-      if [ "$actual" = "$sum" ]; then
-        TP_TARBALL=$f; ok "SHA256 для $file подтверждён"; return 0
+    info "Загрузка Teleport v$v, попытка $attempt/3, IPv4; отмена при скорости менее 2 КБ/с в течение 30 секунд"
+    # Keep .part between retries; --continue-at - resumes if server supports it.
+    # -4 even on redirected release-assets.githubusercontent.com downloads.
+    curl_rc=0
+    curl4 --proto '=https' --proto-redir '=https' --tlsv1.2 -fL \
+        --connect-timeout 12 --max-time 300 --speed-limit 2048 --speed-time 30 \
+        --progress-bar -C - -o "$part" "$remote_url" || curl_rc=$?
+    if [ "$curl_rc" -ne 0 ]; then
+      # curl code 33 means the server refuses byte-range resumption.
+      if [ "$curl_rc" -eq 33 ]; then
+        rm -f -- "$part"
+        warn "Сервер не поддержал докачку; следующая попытка начнётся с нуля"
+      else
+        warn "Загрузка не идёт (curl exit $curl_rc); сохранил частичный файл для докачки"
       fi
-      warn "SHA256 архива не совпал с опубликованным: $f"
-    fi
-    # Existing downloaded archive can be reused as a partial download.
-    f="$CACHE_DIR/$file"
-    if [ -f "$f" ]; then mv -f "$f" "$f.part" || return 1; fi
-    if ! curl --proto '=https' --tlsv1.2 -fL --retry 3 --retry-delay 2 \
-       --connect-timeout 20 --max-time 900 -C - --progress-bar \
-       -o "$f.part" "$TP_CDN/$file"; then
-      warn "Загрузка не завершена, будет повторена"
       continue
     fi
-    actual=$(sha256sum "$f.part" | awk '{print $1}') || return 1
+    actual=$(sha256sum "$part" | awk '{print $1}') || return 1
     if [ "$actual" = "$sum" ]; then
-      mv -f "$f.part" "$f" || return 1
-      TP_TARBALL=$f; ok "SHA256 для $file подтверждён"; return 0
+      mv -f -- "$part" "$f" || return 1
+      TP_TARBALL=$f; ok "Teleport $v получен и проверен по SHA256"; return 0
     fi
-    # Wrong content or mismatched partial: next attempt starts clean.
-    rm -f "$f.part"; warn "Контрольная сумма не совпала (попытка $attempt)"
+    rm -f -- "$part"
+    err "Контрольная сумма не совпала (попытка $attempt)"
   done
-  err "Не удалось получить проверенный Teleport $v"
+  err "Не удалось скачать Teleport $v. Установку останавливаю, лог: $LOG"
   return 1
 }
 
@@ -744,11 +866,11 @@ tp_restore() {
 }
 
 # TLS certificate handling: secrets are never passed to run() or printed into logs.
-acme_sh() { "$ACME_HOME/acme.sh" --home "$ACME_HOME" --config-home "$ACME_CONF" "$@"; }
+acme_sh() { "$ACME_HOME/acme.sh" --home "$ACME_HOME" --config-home "$ACME_CONF" --request-v4 "$@"; }
 acme_install() {
   [ -x "$ACME_HOME/acme.sh" ] && return 0
   local t="$CACHE_DIR/acme"; mkdir -p "$t"
-  run "Загрузка acme.sh $ACME_VER" curl -fsSL --retry 3 -m 120 \
+  run "Загрузка acme.sh $ACME_VER" curl4 -fsSL --retry 3 -m 120 \
     -o "$t/acme.tar.gz" "https://github.com/acmesh-official/acme.sh/archive/refs/tags/$ACME_VER.tar.gz" || return 1
   tar -xzf "$t/acme.tar.gz" -C "$t" >>"$LOG" 2>&1 || return 1
   ( cd "$t/acme.sh-$ACME_VER" && ./acme.sh --install --home "$ACME_HOME" \
@@ -765,7 +887,7 @@ After=network-online.target
 Wants=network-online.target
 [Service]
 Type=oneshot
-ExecStart=$ACME_HOME/acme.sh --cron --home $ACME_HOME --config-home $ACME_CONF
+ExecStart=$ACME_HOME/acme.sh --cron --home $ACME_HOME --config-home $ACME_CONF --request-v4
 EOF
   cat >"/etc/systemd/system/$ACME_UNIT.timer" <<EOF
 [Unit]
@@ -841,7 +963,7 @@ cert_acme_dns() {
   info "Получение сертификата; секреты не записываются в журнал команд"
   local rc=0
   env "${envs[@]}" "$ACME_HOME/acme.sh" --home "$ACME_HOME" --config-home "$ACME_CONF" \
-      --issue --server "$server" --dns "$hook" "${domains[@]}" --keylength ec-256 \
+      --issue --request-v4 --server "$server" --dns "$hook" "${domains[@]}" --keylength ec-256 \
       </dev/null >>"$LOG" 2>&1 || rc=$?
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
     err "Не удалось выпустить сертификат (код $rc; подробности в $LOG)"; return 1
@@ -988,7 +1110,7 @@ firewall_open() {
 proxy_health() {
   # Insecure TLS validation is used ONLY for probing the local web endpoint;
   # public certificate verification is a separate concern.
-  curl -kfsS --max-time 6 --resolve "$CLUSTER:443:127.0.0.1" \
+  curl4 -kfsS --max-time 6 --resolve "$CLUSTER:443:127.0.0.1" \
     "https://$CLUSTER/webapi/ping" >/dev/null 2>&1
 }
 wait_healthy() {
@@ -1107,8 +1229,8 @@ final_summary() {
   say "  Первая ссылка (срок ограничен): $2"
   say "  tsh login --proxy=$CLUSTER:443 --user=$1$([ "$CERT_MODE" = self ] && printf ' --insecure' || :)"
   say "  tsh ls; tsh ssh ${ADMIN_LOGINS%%,*}@$NODENAME"
-  say "  Проверка из другой сети: curl -fsS https://$CLUSTER/webapi/ping"
-  if [ "$CERT_MODE" != self ] && ! curl -fsS --max-time 8 \
+  say "  Проверка из другой сети: curl -4 -fsS https://$CLUSTER/webapi/ping"
+  if [ "$CERT_MODE" != self ] && ! curl4 -fsS --max-time 8 \
      --resolve "$CLUSTER:443:127.0.0.1" "https://$CLUSTER/webapi/ping" >/dev/null 2>&1; then
     warn "Проверка доверия TLS не прошла: проверьте SAN/fullchain, ACME и системные CA"
   fi
