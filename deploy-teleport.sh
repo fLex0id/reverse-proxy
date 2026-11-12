@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy-teleport.sh v1.1.0 — Teleport Community Edition, single-host cluster
+# deploy-teleport.sh v1.1.1 — Teleport Community Edition, single-host cluster
 # Linux + systemd; Bash >= 4; root; interactive. No unattended modifications to existing installs.
 # Deployment: Auth + Proxy + SSH, inbound 443/tcp, internal listeners on loopback.
 # Files and data remain owned by the current installation until explicit uninstall.
@@ -9,7 +9,7 @@ set -o pipefail
 set -o nounset
 umask 077
 
-SCRIPT_VERSION=1.1.0
+SCRIPT_VERSION=1.1.1
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR=/usr/local/bin
 CONF=/etc/teleport.yaml
@@ -52,14 +52,80 @@ LAST_BACKUP=
 ARCH=
 PKG=
 
-say() { printf '%s\n' "$*"; }
-ok() { printf '  ✔ %s\n' "$*"; }
-info() { printf '  • %s\n' "$*"; }
-warn() { printf '  ! %s\n' "$*" >&2; }
-err() { printf '  ✖ %s\n' "$*" >&2; }
+# Display compatibility for Linux virtual consoles (including SPICE/VNC text consoles).
+# In a regular SSH/GUI terminal the original Russian/Unicode UI is preserved.
+# For a Linux VC: try UTF-8 + an installed Cyrillic font, remove unsupported
+# decorative glyphs, and fall back to ASCII transliteration if no font loads.
+# Override: TELEPORT_FORCE_ASCII=1 (always ASCII; does not change the console font).
+UI_CONSOLE=0
+UI_ASCII=0
+UI_DISPLAY=
+
+ui_prepare() {
+  UI_DISPLAY=$1
+  [ "$UI_CONSOLE" -eq 1 ] || return 0
+  UI_DISPLAY=${UI_DISPLAY//✔/[OK]}
+  UI_DISPLAY=${UI_DISPLAY//✖/[ERROR]}
+  UI_DISPLAY=${UI_DISPLAY//•/*}
+  UI_DISPLAY=${UI_DISPLAY//›/>}
+  UI_DISPLAY=${UI_DISPLAY//━/=}
+  UI_DISPLAY=${UI_DISPLAY//—/-}
+  UI_DISPLAY=${UI_DISPLAY//→/->}
+  UI_DISPLAY=${UI_DISPLAY//«/<}
+  UI_DISPLAY=${UI_DISPLAY//»/>}
+  [ "$UI_ASCII" -eq 1 ] || return 0
+  # Built-in transliteration: no iconv, Python or extra packages required.
+  local -a from=(Щ Ш Ч Ж Ю Я Ё Ц Х Э Ы Ъ Ь Й щ ш ч ж ю я ё ц х э ы ъ ь й
+                 А Б В Г Д Е З И К Л М Н О П Р С Т У Ф а б в г д е з и к л м н о п р с т у ф)
+  local -a to=(Shch Sh Ch Zh Yu Ya Yo Ts Kh E Y '' '' Y shch sh ch zh yu ya yo ts kh e y '' '' y
+               A B V G D E Z I K L M N O P R S T U F a b v g d e z i k l m n o p r s t u f)
+  local i
+  for i in "${!from[@]}"; do UI_DISPLAY=${UI_DISPLAY//${from[$i]}/${to[$i]}}; done
+}
+
+init_console_ui() {
+  if [ "${TELEPORT_FORCE_ASCII:-0}" = 1 ]; then
+    UI_CONSOLE=1; UI_ASCII=1; return 0
+  fi
+  local dev font dir path loaded=0 loc
+  # Avoid a persistent change of the system locale. LC_CTYPE only affects
+  # this script and its children, not /etc/locale.conf or /etc/default/locale.
+  if [ "$(locale charmap 2>/dev/null)" != UTF-8 ]; then
+    for loc in C.UTF-8 C.utf8 en_US.UTF-8 ru_RU.UTF-8; do
+      if LC_ALL="$loc" locale charmap 2>/dev/null | grep -qx UTF-8; then
+        export LC_CTYPE="$loc"
+        break
+      fi
+    done
+  fi
+  dev=$(tty 2>/dev/null || :)
+  case "$dev" in /dev/tty[0-9]*|/dev/console) UI_CONSOLE=1 ;; *) return 0 ;; esac
+  # Tell the kernel virtual terminal to decode output as UTF-8.
+  printf '\033%%G' >"$dev" 2>/dev/null || :
+  if command -v setfont >/dev/null 2>&1 && [ "${TELEPORT_CONSOLE_FONT:-1}" != 0 ]; then
+    for font in LatArCyrHeb-16 latarcyrheb-sun16 Uni2-Fixed16 Uni3-Fixed16 Uni2-VGA16 LatGrkCyr-8x16 UniCyr_8x16 cyr-sun16; do
+      for dir in /usr/share/consolefonts /usr/share/kbd/consolefonts /usr/lib/kbd/consolefonts; do
+        for path in "$dir/$font.psfu.gz" "$dir/$font.psf.gz" "$dir/$font.psfu" "$dir/$font.psf"; do
+          [ -r "$path" ] || continue
+          if setfont -C "$dev" "$path" >/dev/null 2>&1; then loaded=1; break 3; fi
+        done
+      done
+    done
+  fi
+  if [ "$loaded" -eq 0 ]; then
+    UI_ASCII=1
+    printf '[INFO] No Cyrillic console font available; ASCII UI enabled.\n' >&2
+  fi
+}
+
+say() { ui_prepare "$*"; printf '%s\n' "$UI_DISPLAY"; }
+ok() { ui_prepare "$*"; if [ "$UI_CONSOLE" -eq 1 ]; then printf '  [OK] %s\n' "$UI_DISPLAY"; else printf '  ✔ %s\n' "$UI_DISPLAY"; fi; }
+info() { ui_prepare "$*"; if [ "$UI_CONSOLE" -eq 1 ]; then printf '  [i] %s\n' "$UI_DISPLAY"; else printf '  • %s\n' "$UI_DISPLAY"; fi; }
+warn() { ui_prepare "$*"; printf '  ! %s\n' "$UI_DISPLAY" >&2; }
+err() { ui_prepare "$*"; if [ "$UI_CONSOLE" -eq 1 ]; then printf '  [ERROR] %s\n' "$UI_DISPLAY" >&2; else printf '  ✖ %s\n' "$UI_DISPLAY" >&2; fi; }
 log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
 die() { err "$*"; err "Журнал: $LOG"; exit 1; }
-hdr() { printf '\n━━ %s ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' "$*"; }
+hdr() { ui_prepare "$*"; if [ "$UI_CONSOLE" -eq 1 ]; then printf '\n========== %s ==========\n' "$UI_DISPLAY"; else printf '\n━━ %s ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n' "$UI_DISPLAY"; fi; }
 cleanup() { if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then rm -rf -- "$TMP_DIR"; fi; }
 trap cleanup EXIT
 trap 'printf "\n"; warn "Прервано пользователем"; exit 130' INT
@@ -80,16 +146,19 @@ run() {
 ask() {
   local prompt=$1 default=${2-} a
   if [ -n "$default" ]; then
-    read -r -e -p "  › $prompt: " -i "$default" a || die "Ввод прерван"
+    ui_prepare "  › $prompt: "
+    read -r -e -p "$UI_DISPLAY" -i "$default" a || die "Ввод прерван"
   else
-    read -r -e -p "  › $prompt: " a || die "Ввод прерван"
+    ui_prepare "  › $prompt: "
+    read -r -e -p "$UI_DISPLAY" a || die "Ввод прерван"
   fi
   ANSWER=$a
 }
 ask_yn() {
   local prompt=$1 def=${2:-n} a
   while :; do
-    read -r -p "  › $prompt [$([ "$def" = y ] && echo 'Д/н' || echo 'д/Н')]: " a || die "Ввод прерван"
+    ui_prepare "  › $prompt [$([ "$def" = y ] && echo 'Д/н' || echo 'д/Н')]: "
+    read -r -p "$UI_DISPLAY" a || die "Ввод прерван"
     a=${a,,}; [ -n "$a" ] || a=$def
     case "$a" in y|yes|д|да|1) return 0 ;; n|no|н|нет|0) return 1 ;; esac
     warn "Ответьте да или нет"
@@ -98,7 +167,8 @@ ask_yn() {
 ask_num() {
   local prompt=$1 max=$2 def=${3:-0} a
   while :; do
-    read -r -p "  › $prompt [$def]: " a || die "Ввод прерван"
+    ui_prepare "  › $prompt [$def]: "
+    read -r -p "$UI_DISPLAY" a || die "Ввод прерван"
     a=${a:-$def}; a=${a%[.)]}
     if [[ $a =~ ^[0-9]+$ ]] && [ "${#a}" -le 5 ] && [ "$((10#$a))" -le "$max" ]; then
       ANSWER=$((10#$a)); return 0
@@ -109,7 +179,8 @@ ask_num() {
 ask_secret() {
   local a
   while :; do
-    read -r -s -p "  › $1 (скрытый ввод): " a || die "Ввод прерван"
+    ui_prepare "  › $1 (скрытый ввод): "
+    read -r -s -p "$UI_DISPLAY" a || die "Ввод прерван"
     printf '\n'
     [ -n "$a" ] && { ANSWER=$a; return; }
     warn "Значение не может быть пустым"
@@ -1170,7 +1241,8 @@ menu_installed() {
       6) menu_cert || : ;; 7) menu_dns || : ;; 8) time_check || : ;;
       9) menu_status || : ;; 10) menu_uninstall || : ;; 0) return 0 ;;
     esac
-    read -r -p '  Enter — продолжить...' _ || return 0
+    ui_prepare '  Enter — продолжить...'
+    read -r -p "$UI_DISPLAY" _ || return 0
   done
 }
 main() {
@@ -1185,6 +1257,7 @@ main() {
   flock -n 9 || die "Другой экземпляр deploy-teleport.sh уже работает"
   TMP_DIR=$(mktemp -d "$CACHE_DIR/session.XXXXXX") || die "Нет временного каталога"
   export PATH="$BIN_DIR:$PATH"
+  init_console_ui
   log "=== deploy-teleport.sh $SCRIPT_VERSION ==="
   prechecks
   if [ "${1:-}" = dns-restore ]; then dns_restore; return $?; fi
