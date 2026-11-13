@@ -7,7 +7,6 @@ concurrent confirm/rollback. This never reboots or changes management networking
 import json
 from pathlib import Path
 import subprocess
-import sys
 import time
 
 HELPER='/root/rp-lab/transaction-current.py'

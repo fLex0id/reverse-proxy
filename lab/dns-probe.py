@@ -5,10 +5,10 @@ import json
 import secrets
 import socket
 import struct
-p=argparse.ArgumentParser();p.add_argument('server');p.add_argument('domain');p.add_argument('--type',type=int,default=1);p.add_argument('--tcp',action='store_true');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('server');p.add_argument('domain');p.add_argument('--type',type=int,default=1);p.add_argument('--tcp',action='store_true');p.add_argument('--timeout',type=float,default=10);a=p.parse_args()
 ident=secrets.randbelow(65536)
 q=struct.pack('!6H',ident,0x100,1,0,0,0)+b''.join(bytes([len(x)])+x.encode('ascii') for x in a.domain.split('.'))+b'\0'+struct.pack('!2H',a.type,1)
-s=socket.socket(socket.AF_INET,socket.SOCK_STREAM if a.tcp else socket.SOCK_DGRAM);s.settimeout(10)
+s=socket.socket(socket.AF_INET,socket.SOCK_STREAM if a.tcp else socket.SOCK_DGRAM);s.settimeout(a.timeout)
 s.connect((a.server,53))
 if a.tcp:
     s.sendall(struct.pack('!H',len(q))+q)

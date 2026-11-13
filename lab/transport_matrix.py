@@ -24,6 +24,9 @@ def run(host,cmd,name,timeout=420):
     result=dict(id=name,host=host,started=ts,seconds=round(time.monotonic()-start,3),rc=rc,result='PASS' if rc==0 else 'FAIL',log=name+'.log')
 
     if name.endswith('-T1-T8') and rc == 0 and ('  - T' in text or '  – T' in text): result['result']='SKIP'; result['reason']='One or more built-in checks skipped; see log'
+    if name.endswith('-endpoint-packets') and rc == 0:
+        result['result']='UNKNOWN'
+        result['reason']='Raw packet evidence requires flow attribution and analysis; command success is not leak acceptance'
     results.append(result);(out/'results.json').write_text(json.dumps(results,indent=2));print(json.dumps(result),flush=True)
     return rc
 

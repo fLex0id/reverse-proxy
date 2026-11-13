@@ -138,6 +138,39 @@ def disarm():
         raise RuntimeError('rollback timer remains active')
 
 
+def restore_watch(meta, boot_recovery=False):
+    if not meta['watch_active']: return
+    command('systemctl', 'enable', 'rp-watch')
+    # Boot recovery is ordered before the watcher; waiting for its start here
+    # would deadlock against this very recovery service.
+    if boot_recovery:
+        command('systemctl', '--no-block', 'start', 'rp-watch')
+    else:
+        command('systemctl', 'start', 'rp-watch')
+        command('systemctl', 'is-active', '--quiet', 'rp-watch')
+
+
+def finish_rollback(meta, boot_recovery=False):
+    # Retryable finalization: persist the terminal state only after supervision
+    # is restored; a later invocation can finish timer/archive cleanup safely.
+    (TX/'installing').unlink(missing_ok=True)
+    restore_watch(meta, boot_recovery)
+    meta['phase'] = 'ROLLED_BACK'
+    save(meta)
+    disarm()
+    BACKUP.unlink(missing_ok=True)
+    (TX/'pending').unlink(missing_ok=True)
+    Path('/root/.rp-push.sh').unlink(missing_ok=True)
+
+
+def abort_prepare(meta, boot_recovery=False):
+    # No bundle files may be installed until INSTALLING has been persisted.
+    # An incomplete archive must never be extracted over the intact old version.
+    (TX/'preparing.tgz').unlink(missing_ok=True)
+    meta['reason'] = 'preparation interrupted before bundle mutation'
+    finish_rollback(meta, boot_recovery)
+
+
 def prepare(pid):
     if META.exists() and load()['phase'] not in ('COMMITTED', 'ROLLED_BACK'):
         raise RuntimeError('a previous transaction is unresolved; confirm or rollback it first')
@@ -148,14 +181,23 @@ def prepare(pid):
     if command('systemctl', 'is-active', '--quiet', 'rp-rollback-run.timer', check=False).returncode == 0:
         raise RuntimeError('legacy update still pending; resolve it before migration')
     old_watch = command('systemctl', 'is-active', '--quiet', 'rp-watch', check=False).returncode == 0
-    command('systemctl', 'stop', 'rp-watch', check=False)
     roots = paths()
     published = False
-    archive = None
+    archive = TX/'preparing.tgz'
     try:
+        atomic(TX/'runner.py', Path(__file__).read_text())
+        meta = dict(phase='PREPARING', created=time.time(), deadline=int(time.time()) + 1800,
+                    boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                    pid=pid, pid_start=Path('/proc/%d/stat' % pid).read_text().split()[21],
+                    paths=roots, keys=owned_keys(), watch_active=old_watch)
+        save(meta)
+        published = True
+        arm(meta)
+        # Recovery is durable BEFORE pausing supervision or writing an archive.
         atomic(TX/'installing', 'installing\n')
         atomic(TX/'pending', 'pending\n')
-        fd, archive = tempfile.mkstemp(prefix='.backup.', dir=STATE)
+        command('systemctl', 'stop', 'rp-watch')
+        fd = os.open(archive, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         os.close(fd)
         with tarfile.open(archive, 'w:gz') as tf:
             for p in roots:
@@ -169,26 +211,14 @@ def prepare(pid):
         directory_fd = os.open(STATE, os.O_RDONLY | os.O_DIRECTORY)
         try: os.fsync(directory_fd)
         finally: os.close(directory_fd)
-        atomic(TX/'runner.py', Path(__file__).read_text())
-        meta = dict(phase='INSTALLING', created=time.time(), deadline=int(time.time()) + 1800,
-                    boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
-                    pid=pid, pid_start=Path('/proc/%d/stat' % pid).read_text().split()[21],
-                    paths=roots, sha256=digest(BACKUP), keys=owned_keys(), watch_active=old_watch)
+        meta['phase'] = 'INSTALLING'
+        meta['sha256'] = digest(BACKUP)
         save(meta)
-        published = True
-        arm(meta)
     except Exception:
-        # Preparation has not applied any bundle file. Restore the watchdog and
-        # mark a published intent aborted without touching the working tunnel.
+        # No bundle mutation has started, so even an archive failure is safe to
+        # abort. SIGKILL/power loss is handled by the same persisted PREPARING state.
         if published:
-            meta['phase'] = 'ROLLED_BACK'
-            meta['reason'] = 'prepare failed before bundle mutation'
-            save(meta)
-            disarm()
-        (TX/'installing').unlink(missing_ok=True)
-        (TX/'pending').unlink(missing_ok=True)
-        if archive and os.path.exists(archive): os.unlink(archive)
-        if old_watch: command('systemctl', 'start', 'rp-watch', check=False)
+            abort_prepare(meta)
         raise
     print('Transaction armed; verified private backup and reboot recovery ready')
 
@@ -234,6 +264,7 @@ def confirm():
         raise RuntimeError('not ready or confirmation deadline expired')
     validate_results()
     if digest(BACKUP) != meta['sha256']: raise RuntimeError('backup checksum mismatch')
+    if time.time() >= meta['deadline']: raise RuntimeError('confirmation deadline expired during validation')
     # The shared lock serializes this durable commit with a running rollback.
     # A late timer sees COMMITTED and cannot restore old files.
     meta['phase'] = 'COMMITTED'; save(meta)
@@ -266,7 +297,15 @@ def stop_installer(meta):
 
 def rollback(from_installer=False, boot_recovery=False):
     meta = load()
-    if meta['phase'] in ('COMMITTED', 'ROLLED_BACK'): return
+    if meta['phase'] == 'COMMITTED': return
+    if meta['phase'] == 'ROLLED_BACK':
+        finish_rollback(meta, boot_recovery)
+        return
+    if meta['phase'] == 'PREPARING':
+        if not from_installer: stop_installer(meta)
+        abort_prepare(meta, boot_recovery)
+        print('Preparation aborted; previous installation was not modified')
+        return
     if digest(BACKUP) != meta['sha256']: raise RuntimeError('backup checksum mismatch; no extraction attempted')
     with tarfile.open(BACKUP, 'r:gz') as tf:
         members = tf.getmembers()
@@ -301,21 +340,7 @@ def rollback(from_installer=False, boot_recovery=False):
         if time.monotonic() >= deadline:
             raise RuntimeError('restored files, but previous tunnel did not become ready')
         time.sleep(2)
-    meta['phase'] = 'ROLLED_BACK'; save(meta)
-    (TX/'pending').unlink(missing_ok=True)
-    (TX/'installing').unlink(missing_ok=True)
-    if meta['watch_active']:
-        command('systemctl', 'enable', 'rp-watch')
-        # During boot this recover service precedes rp-watch. Do not wait for
-        # a start job whose ordering dependency is this very process.
-        if boot_recovery:
-            command('systemctl', '--no-block', 'start', 'rp-watch')
-        else:
-            command('systemctl', 'start', 'rp-watch')
-            command('systemctl', 'is-active', '--quiet', 'rp-watch')
-    disarm()
-    Path('/root/.rp-push.sh').unlink(missing_ok=True)
-    BACKUP.unlink(missing_ok=True)
+    finish_rollback(meta, boot_recovery)
     print('Rollback restored the previous version and verified its active tunnel')
 
 
@@ -335,9 +360,7 @@ def main():
                 boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
                 if meta['phase'] == 'COMMITTED': confirm()
                 elif meta['phase'] == 'ROLLED_BACK':
-                    (TX/'installing').unlink(missing_ok=True)
-                    (TX/'pending').unlink(missing_ok=True)
-                    disarm()
+                    finish_rollback(meta, boot_recovery=True)
                 elif meta['boot_id'] != boot: rollback(boot_recovery=True)
         else: raise RuntimeError('unknown transaction command')
 

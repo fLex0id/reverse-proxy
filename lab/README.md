@@ -21,10 +21,24 @@ below `lab/private` (both ignored, mode 0700).
   preservation of unrelated SSH changes and confirm/rollback races. Requires an
   already healthy candidate and independent SSH. Never run concurrently with
   other mutation/fault suites.
+- `prepare_crash.py`: on LAB-2, kill the transaction helper during archive creation
+  and verify recovery through its actual systemd service.
+- `rollback_deadline.py`: on LAB-2, leave a READY transaction unconfirmed for the
+  full default 30 minutes and verify timer-driven rollback. No clock/deadline changes.
+- `dns_matrix.py --lab1 ALIAS --lab2 ALIAS --client ALIAS --output DIR`: 192 DNS
+  queries through the existing isolated client, with PCAP streamed from all hosts.
+  Install `dns-probe.py` at `/root/rp-lab/dns-probe.py` on the auxiliary host first.
+- `application_matrix.py` takes the same arguments; install `application_probe.py`
+  under `/root/rp-lab/` on the auxiliary host. Tests HTTP, HTTPS, DoH, DoT, HTTP/3,
+  STUN and the explicitly disabled IPv6 case. Requires curl with HTTP/3 support.
+- `failover.py --lab1 ALIAS --lab2 ALIAS --client ALIAS --lab1-ip IP --output DIR`:
+  block only LAB-2's packet-up TCP/8443 and measure real client recovery, with
+  an independent timed rule cleanup. Other configured ports require adapting
+  the fixture; this is not a generic firewall-management tool.
 
 A final six-hour soak has NOT started. The acceptance matrix remains NOT_READY.
-Reboots and broad resource-exhaustion scenarios require the snapshot operator
-available for recovery. Test artifacts may contain network metadata: keep private
+Notify the user and wait for their machine cleanup before the final clean install
+and six-hour soak. Test artifacts may contain network metadata: keep private
 and publish only sanitized evidence summaries.
 
 ## Development validation
@@ -34,3 +48,10 @@ The deployed artifact remains a single `rp.sh`; src/ is not needed to install it
 Run `python3 tools/static-check.py` and `python3 -m unittest discover -s tests -v`.
 Static checks require ShellCheck and pyflakes. CI also stores a formatting audit;
 legacy formatting is not silently rewritten.
+
+Hysteria now binds an assigned underlay IPv4 rather than all addresses, avoiding
+collisions with Xray transparent UDP reply sockets. The renderer uses PUBLIC_IP
+when locally assigned, otherwise the local source of the route to PUBLIC_IP
+(NAT deployments). Set `HY2_BIND_IP` in rp.conf for an explicit local interface
+address. Unassigned/wildcard addresses are rejected. Apply configuration again
+after interface-address changes; the current CLI accepts an IPv4 public endpoint.
