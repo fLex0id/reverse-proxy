@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.9-lab.3 (unreleased, NOT_READY)
+
+- Serialize mutating menu actions, installation, save and bundle creation with
+  the same operation lock as CLI commands.
+- Raise the inner WireGuard factory MTU from 1080 to 1280 on migration/reinstall
+  and new installation. QUIC's minimum 1200-byte UDP payload cannot cross an
+  IPv4 tunnel with MTU 1080 when DF is set. Preserve other operator values and
+  reject invalid or QUIC-incompatible MTUs when rendering either endpoint.
+- Updating the MTU requires `rp migrate` on VPS-1 and `rp push` to VPS-2.
+- Add actual isolated ENOSPC and before/after MTU tests, plus full per-transport
+  restart, repeated T3, DNS and application capture regression tooling.
+
 ## 1.2.9-lab.2 (unreleased, NOT_READY)
 
 - Arm persistent recovery before stopping the watcher or creating its backup;

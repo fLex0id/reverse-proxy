@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.2"
+SELF_VERSION="1.2.9-lab.3"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -3107,6 +3107,14 @@ conf_migrate() {
   conf_set CONF_VER 2
   ok "Конфигурация обновлена до v1.1: транспорты «$new»"
 }
+conf_exit_mtu_migrate() {
+  # The old 1080-byte factory MTU cannot carry QUIC's 1200-byte UDP Initial.
+  # Keep operator values; the renderer rejects values incompatible with QUIC.
+  if [[ -z $(cf EXIT_MTU) || $(cf EXIT_MTU) == 1080 ]]; then
+    conf_set EXIT_MTU 1280
+    note "MTU внутреннего WireGuard: 1280 (для QUIC/HTTP3). Выполните rp push для обновления VPS-2"
+  fi
+}
 cmd_migrate() {
   need_root; need_vps1
   banner "Применение rp $SELF_VERSION" "обновление действующей конфигурации"
@@ -3115,6 +3123,7 @@ cmd_migrate() {
   self_install || die "Не удалось сохранить исполняемый rp; миграция остановлена"
   py_install || die "Не удалось установить rp.py"
   conf_migrate
+  conf_exit_mtu_migrate
   conf_set TRANSPORT_ORDER "$(tr_sort "$(cf TRANSPORT_ORDER)")"
   # Upgrade existing installations without replacing the user's explicit browser preset.
   [[ $(cf RL_FP random) == random ]] && conf_set RL_FP chrome
@@ -3203,9 +3212,10 @@ vps1_install() {
   conf_set ROLE vps1 PUBLIC_IP "$PUBLIC_IP" WG_PORT "$WG_PORT" WG_NET "$(cf WG_NET '10.66.0.0/24')" WG_NET_GW "$(cf WG_NET_GW '10.66.0.1')" WG_MTU "$(cf WG_MTU 1380)" \
     TRANSPORT_ORDER "$order" TRANSPORT_FORCE "$(cf TRANSPORT_FORCE)" HY2_PORT "$HY2_PORT" HY2O_PORT "$HY2O_PORT" RXH_PORT "$RXH_PORT" RXH2_PORT "$RXH2_PORT" \
     RXH_SNI "${RXH_SNI:-www.microsoft.com}" RXH2_SNI "${RXH2_SNI:-www.asus.com}" XHTTP_PATH "$(cf XHTTP_PATH "/$(rand_hex 4)")" XHTTP2_PATH "$(cf XHTTP2_PATH "/$(rand_hex 4)")" \
-    HY2_MASQ "$(cf HY2_MASQ "https://${HY2_MASQ_HOST:-www.microsoft.com}")" EXIT_MTU "$(cf EXIT_MTU 1080)" DOORS "$(cf DOORS 'ssh=2222=127.0.0.1:22')" \
+    HY2_MASQ "$(cf HY2_MASQ "https://${HY2_MASQ_HOST:-www.microsoft.com}")" EXIT_MTU "$(cf EXIT_MTU 1280)" DOORS "$(cf DOORS 'ssh=2222=127.0.0.1:22')" \
     RU_DIRECT "$([[ $ru == y ]] && echo 1 || echo 0)" RU_GUARD "$(cf RU_GUARD 1)" RU_GEOIP "$(cf RU_GEOIP 1)" DNS_RU "$(cf DNS_RU '77.88.8.8')" DNS_REMOTE "$(cf DNS_REMOTE 'quad9 cloudflare')" \
     DISABLE_IPV6 "$(cf DISABLE_IPV6 1)" SNIFF "$(cf SNIFF 1)" RL_FP "$(cf RL_FP chrome)" WATCH_MIN "$(cf WATCH_MIN 10)" WATCH_MAX "$(cf WATCH_MAX 15)" CONF_VER 2
+  conf_exit_mtu_migrate
   chown root:root "$CONF"; touch "$CLIENTS"; chmod 600 "$CLIENTS"
 
   step "Xray и Hysteria2"
@@ -5333,9 +5343,19 @@ def hy2_client(cfg, obfs=False):
     return s
 
 
+def exit_mtu(cfg):
+    value = str(cfg.get("EXIT_MTU", "1280"))
+    # IPv4 (20) + UDP (8) + minimum QUIC datagram (1200); no DF-clearing hack.
+    # Hysteria fragments/reassembles its UDP payload above the outer QUIC layer.
+    if not re.fullmatch(r"[0-9]+", value) or not 1228 <= int(value) <= 65535:
+        die("EXIT_MTU должен быть 1228..65535 для QUIC/HTTP3; рекомендуется 1280. "
+            "Измените на VPS-1, выполните rp apply и rp push")
+    return value
+
+
 def wg_exit_server(cfg):
     need(cfg, "EXIT_PRIV1", "EXIT_PUB2", "EXIT_PSK")
-    mtu = cfg.get("EXIT_MTU", "1080")
+    mtu = exit_mtu(cfg)
     # rp_filter=2 (loose): ответы из интернета приходят в wg-exit, а обратный маршрут к их адресам
     # в основной таблице ведёт в публичный интерфейс — при strict (1) ядро такие ответы выбрасывает.
     return ("[Interface]\nAddress = 10.77.0.1/30\nListenPort = 51821\nPrivateKey = %s\nMTU = %s\nTable = off\n"
@@ -5354,7 +5374,7 @@ def wg_exit_client(cfg):
             "# Bootstrap handshake via probe; refresh inner WG link at a non-default 28s.\n"
             "# VPS-2 initiates to loopback; WG is encapsulated by Hysteria2, not public UDP.\n"
             "PersistentKeepalive = 28\n"
-            % (cfg["EXIT_PRIV2"], cfg.get("EXIT_MTU", "1080"), cfg["EXIT_PUB1"], cfg["EXIT_PSK"]))
+            % (cfg["EXIT_PRIV2"], exit_mtu(cfg), cfg["EXIT_PUB1"], cfg["EXIT_PSK"]))
 
 
 def wg0_server(cfg):

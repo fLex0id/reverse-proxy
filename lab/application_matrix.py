@@ -32,12 +32,14 @@ cases=[('http',curl+['http://1.1.1.1/'],'success'),
        ('http3',curl+['--http3-only','--resolve','cloudflare-dns.com:443:1.1.1.1','-H','accept: application/dns-message',query],'success'),
        ('dot',['python3','/root/rp-lab/application_probe.py','dot'],'success'),
        ('stun',['python3','/root/rp-lab/application_probe.py','stun'],'success'),
+       ('stun-cloudflare',['python3','/root/rp-lab/application_probe.py','stun',
+                           '--host','stun.cloudflare.com','--port','3478'],'success'),
        ('ipv6',['curl','-g','-6','-k','-sS','--max-time','10','https://[2606:4700:4700::1111]/','-o','/dev/null'],'blocked')]
 try:
     for label,host in [('lab1',a.lab1),('lab2',a.lab2),('client',a.client)]:
         unit='rp-lab-app-'+token;interface='wg0' if label=='client' else 'ens18'
         command=['tcpdump','-U','-i',interface,'-nn','-s','0','-w','-',
-                 'host 1.1.1.1 or host 2606:4700:4700::1111 or port 53 or port 853 or udp port 19302']
+                 'host 1.1.1.1 or host 2606:4700:4700::1111 or port 53 or port 853 or udp port 19302 or udp port 3478']
         if label=='client':command=['ip','netns','exec','rp-lab-client']+command
         command=['systemd-run','--quiet','--pipe','--wait','--unit='+unit,'--property=RuntimeMaxSec=120']+command
         data=(out/(label+'.pcap')).open('wb');log=(out/(label+'-capture.log')).open('w')

@@ -1,5 +1,32 @@
 # Defect register (work in progress)
 
+## RP-012 P1: inner WireGuard MTU prevents QUIC over both Hysteria transports
+Packet captures on LAB-2 show 1200-byte QUIC Initial/reply datagrams followed by
+ICMP fragmentation-needed (MTU 1080). With unchanged candidate lab.2, runtime-only
+changes to MTU 1280 on both inner WG interfaces change HTTP/3 from timeout to PASS:
+hy2-wg 8.280s timeout -> 0.357s; hy2o-wg 8.206s timeout -> 0.375s.
+Independent restore timers were armed before changing either interface. HTTP,
+HTTPS, DoH and DoT still pass; LAB-1 has no direct control-destination packets.
+Google STUN still fails, including a direct numeric LAB-2 control; it is not
+counted as a fix or removed from regression. A second Cloudflare STUN endpoint
+is added separately for positive UDP coverage.
+
+Candidate lab.3 migrates missing/old factory EXIT_MTU to 1280 and validates
+1228..65535 when rendering both ends; other operator settings are not overwritten.
+The lower bound is 1200 + IPv4 20 + UDP 8, per
+[RFC 9000 section 14](https://www.rfc-editor.org/rfc/rfc9000.html#section-14).
+Hysteria's own UDP fragmentation is part of its
+[specified protocol](https://v2.hysteria.network/docs/developers/Protocol/#fragmentation),
+not a DF-clearing workaround. Deployment and full lab.3 regression are pending.
+
+## RP-008 additional real ENOSPC coverage
+A 128-KiB tmpfs mounted only on the transaction directory caused real kernel
+ENOSPC while preparing the backup, without filling the root filesystem.
+Six assertions PASS: actual ENOSPC, ROLLED_BACK, partial archive/markers removed,
+old config byte-identical, watcher active, old tunnel live in both directions.
+The temporary filesystem was unmounted and its independent cleanup timer stopped.
+This covers preparation failure, not every installation disk-write failure.
+
 ## RP-011 P1: menu mutations bypass the CLI operation lock
 The client, RU, DNS and main menus called mutating functions without the lock
 used by their CLI equivalents. Concurrent menu/CLI operations could overwrite
