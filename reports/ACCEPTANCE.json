@@ -1,0 +1,73 @@
+{
+  "verdict": "NOT_READY",
+  "baseline": "3d3077d8940ac136b25cae4a6667a26531843a11",
+  "soak_required_hours": 6,
+  "rocky9": "NOT_TESTED",
+  "items": [
+    {
+      "id": "F01",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F02",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F03",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F04",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F05",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F06",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F07",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F08",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F09",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F10",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F11",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F12",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F13",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    }
+  ]
+}

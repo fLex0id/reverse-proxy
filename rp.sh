@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # rp — клиенты WG → VPS-1 (РФ) → туннель (XHTTP/HY2) → VPS-2 (выход).
+# 1.2.9-lab.1: reject incomplete/degraded push results before confirmation; lab validation pending.
 # 1.2.8: audit fixes (backup perms, early rollback timer, confirm checks, menu locks, rp.sh URL, stale files).
 # 1.2.7: RU-list download fallbacks/resume, fast observatory, SSH-door wait in rp test, exact probe byte counts.
 # 1.2.6: complete SNI + all transport validation, Xray 26.4.25-compatible DNS, strict RU lists.
@@ -11,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.8-audit-fixes"
+SELF_VERSION="1.2.9-lab.1"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -180,7 +181,13 @@ pause() { [[ -t 0 ]] && { ui_printf '\n%s  Любая клавиша - наза�
 STEP_N=0; STEP_I=0
 steps() { STEP_N=$1; STEP_I=0; }
 step() { STEP_I=$((STEP_I + 1)); ui_printf '\n%s%s%d/%d%s  %s\n' "$B" "$C_ACC" "$STEP_I" "$STEP_N" "$R" "$*"; }
-dot_state() { if systemctl is-active --quiet "$1" 2>/dev/null; then if (( ASCII_MODE )); then printf '[UP] running'; else printf '%s●%s работает' "$C_OK" "$R"; fi; else if (( ASCII_MODE )); then printf '[DOWN] stopped'; else printf '%s●%s остановлена' "$C_ERR" "$R"; fi; fi; }
+dot_state() {
+  if systemctl is-active --quiet "$1" 2>/dev/null; then
+    if (( ASCII_MODE )); then printf '[UP] running'; else printf '%s●%s работает' "$C_OK" "$R"; fi
+  else
+    if (( ASCII_MODE )); then printf '[DOWN] stopped'; else printf '%s●%s остановлена' "$C_ERR" "$R"; fi
+  fi
+}
 
 KV_W=18
 card() { if (( ASCII_MODE )); then ui_printf '  +-- %s\n' "$1"; else printf '  %s┌─ %s%s\n' "$C_DIM" "$1" "$R"; fi; }
@@ -491,6 +498,15 @@ secrets_reality() {
   conf_set RL_PRIV "$a" RL_PUB "$b" RL_SID "$(rand_hex 8)" \
     RL_UUID_X "$(uuid)" RL_UUID_T "$(uuid)" RL_UUID_PX "$(uuid)" RL_UUID_PT "$(uuid)"
 }
+# Reinstall preserves complete key groups. Partial groups are an error, not an
+# excuse to rotate keys and silently disconnect existing clients/peers.
+secrets_ensure() {
+  local generator=$1 key present=0; shift
+  for key in "$@"; do [[ -z $(cf "$key") ]] || present=$((present + 1)); done
+  ((present == $#)) && return 0
+  ((present == 0)) || { err "Неполный набор ключей: восстановите конфигурацию; автоматическая смена запрещена"; return 1; }
+  "$generator"
+}
 secrets_extra() { # пароль локального SOCKS, пароль обфускации Hysteria2
   [[ -n $(cf SOCKS_PASS) ]] || conf_set SOCKS_USER "rp$(rand_hex 3)" SOCKS_PASS "$(rand_pass)"
   [[ -n $(cf HY2O_OBFS) ]] || conf_set HY2O_OBFS "$(rand_pass)"
@@ -573,7 +589,7 @@ sni_scan() {
 }
 SNI_CACHE=""
 sni_choose() { # sni_choose ПЕРЕМЕННАЯ «Заголовок» reality|masq [исключить-хост]
-  local var=$1 title=$2 kind=$3 skip=${4:-} h chk ru line shown=0
+  local var=$1 title=$2 kind=$3 skip=${4:-} h chk ru line
   [[ -n "${!var:-}" ]] && return 0
   if [[ -z $SNI_CACHE || ! -s $SNI_CACHE ]]; then
     SNI_CACHE=$(mktemp "$STATE/snicache.XXXXXX")
@@ -883,7 +899,7 @@ vps1_check() {
   ss -lnt 2>/dev/null | grep -q ':14205 ' || { err "Xray не слушает TPROXY-порт"; return 1; }
   if tr_has reality-xhttp || tr_has reality-xhttp2; then
     local api_ok=0 check_n
-    for check_n in 1 2 3 4 5; do
+    for ((check_n=1; check_n<=5; check_n++)); do
       if "$XRAY_BIN" api bi --server=127.0.0.1:10085 exit >/dev/null 2>&1; then api_ok=1; break; fi
       sleep 1
     done
@@ -1173,7 +1189,7 @@ ru_update() { # обновление: geosite РФ + штатная geoip Xray; 
 }
 
 # ── VPS-2: файлы пакета (CLI, сторож, юниты) и установочный блок ────────
-# Всё, что попадает на VPS-2, — чистый bash без Python; конфиги статичны (их генерирует VPS-1).
+# VPS-2: Bash CLI/watchdog, статичные конфиги и Python 3 для надёжного отката.
 
 # pin_release — SHA256 релизов Xray/Hysteria2 для обеих архитектур (без скачивания бинарников)
 pin_release() {
@@ -1194,8 +1210,363 @@ pin_release() {
   rm -rf "${tmp:?}"
 }
 
+# BEGIN GENERATED TRANSACTION HELPER
+transaction_source() { cat <<'RP_TRANSACTION_PY'
+#!/usr/bin/env python3
+"""Durable VPS-2 update transaction. Embedded verbatim into the deployable rp.sh.
+
+Only rp-owned paths are restored. Services are stopped during restoration; this
+is a recoverable transaction, not a claim of a filesystem-wide atomic rename.
+"""
+import datetime
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+
+STATE = Path('/var/lib/rp')
+TX = STATE / 'transaction'
+META = TX / 'state.json'
+BACKUP = STATE / 'backup.tgz'
+TIMER = 'rp-transaction-rollback.timer'
+UNITS = ['rp-watch.service', 'rp-xray@xhttp.service', 'rp-xray@xhttp2.service',
+         'rp-hy2.service', 'rp-hy2o.service', 'wg-quick@rp-wg.service', 'rp-nat.service']
+BASE_PATHS = ['etc/rp', 'usr/local/lib/rp', 'usr/local/bin/rp',
+              'usr/local/bin/xray', 'usr/local/bin/hysteria', 'usr/local/share/rp',
+              'etc/wireguard/rp-wg.conf', 'etc/sysctl.d/99-rp.conf',
+              'etc/firewalld/zones/rp-tunnel.xml',
+              'etc/firewalld/policies/rp-tunnel-egress.xml']
+STATE_NAMES = ['mode', 'active', 'since', 'usable', 'results', 'mode-request', 'mode-result']
+OWN_UNITS = ['rp-hy2.service', 'rp-hy2o.service', 'rp-xray@.service',
+             'rp-watch.service', 'rp-nat.service', 'rp-rollback.service']
+TRANSPORTS = {'reality-xhttp', 'reality-xhttp2', 'hy2-wg', 'hy2o-wg'}
+
+
+def command(*args, check=True, timeout=90):
+    r = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       text=True, timeout=timeout, env=dict(os.environ, RP_TX_INTERNAL='1'))
+    if check and r.returncode:
+        raise RuntimeError('command failed: ' + args[0] + ' ' + args[1])
+    return r
+
+
+def atomic(path, data, mode=0o600):
+    path = Path(path)
+    fd, name = tempfile.mkstemp(prefix='.' + path.name, dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            os.fchmod(f.fileno(), mode)
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(name, path)
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(fd)
+        finally: os.close(fd)
+    finally:
+        if os.path.exists(name): os.unlink(name)
+
+
+def save(meta): atomic(META, json.dumps(meta, indent=2) + '\n')
+def load(): return json.loads(META.read_text())
+def digest(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''): h.update(chunk)
+    return h.hexdigest()
+
+
+def owned_keys():
+    p = Path('/root/.ssh/authorized_keys')
+    return [line for line in p.read_text().splitlines() if line.endswith(' rp@vps1')] if p.exists() else []
+
+
+def restore_keys(lines):
+    p = Path('/root/.ssh/authorized_keys')
+    existing = p.read_text().splitlines() if p.exists() else []
+    # Preserve every unrelated key, including additions made after prepare.
+    preserved = [line for line in existing if not line.endswith(' rp@vps1')]
+    atomic(p, '\n'.join(preserved + lines) + '\n')
+    command('restorecon', str(p), check=False)
+
+
+def paths():
+    return BASE_PATHS + ['var/lib/rp/' + n for n in STATE_NAMES] + [
+        'etc/systemd/system/' + n for n in OWN_UNITS]
+
+
+def valid_member(member, roots):
+    name = member.name.rstrip('/')
+    if name.startswith('/') or '..' in Path(name).parts:
+        return False
+    if not any(name == p or name.startswith(p + '/') for p in roots):
+        return False
+    # Configs and binaries are regular files/directories. Refuse extraction of
+    # devices, FIFOs and links instead of following an attacker-controlled path.
+    return member.isfile() or member.isdir()
+
+
+def arm(meta):
+    deadline = datetime.datetime.fromtimestamp(meta['deadline'], datetime.timezone.utc)
+    unit_dir = Path('/etc/systemd/system')
+    atomic(unit_dir/'rp-transaction-rollback.service', '''[Unit]
+Description=rp: durable transaction rollback
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /var/lib/rp/transaction/runner.py rollback
+TimeoutStartSec=300
+''', 0o644)
+    atomic(unit_dir/TIMER, '[Unit]\nDescription=rp: unconfirmed update deadline\n[Timer]\nOnCalendar=' +
+           deadline.strftime('%Y-%m-%d %H:%M:%S UTC') + '\nPersistent=true\nAccuracySec=1s\n[Install]\nWantedBy=timers.target\n', 0o644)
+    atomic(unit_dir/'rp-transaction-recover.service', '''[Unit]
+Description=rp: recover interrupted update after reboot
+After=local-fs.target network-online.target
+Before=rp-watch.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /var/lib/rp/transaction/runner.py recover
+TimeoutStartSec=300
+[Install]
+WantedBy=multi-user.target
+''', 0o644)
+    command('restorecon', '-R', str(TX), str(unit_dir), check=False)
+    command('systemctl', 'daemon-reload')
+    command('systemctl', 'enable', 'rp-transaction-recover.service')
+    command('systemctl', 'enable', '--now', TIMER)
+    command('systemctl', 'is-active', '--quiet', TIMER)
+
+
+def disarm():
+    command('systemctl', 'disable', '--now', TIMER, check=False)
+    command('systemctl', 'disable', 'rp-transaction-recover.service', check=False)
+    if command('systemctl', 'is-active', '--quiet', TIMER, check=False).returncode == 0:
+        raise RuntimeError('rollback timer remains active')
+
+
+def prepare(pid):
+    if META.exists() and load()['phase'] not in ('COMMITTED', 'ROLLED_BACK'):
+        raise RuntimeError('a previous transaction is unresolved; confirm or rollback it first')
+    if not Path('/etc/rp/rp2.conf').exists():
+        raise RuntimeError('safe update requires an installed VPS-2')
+    TX.mkdir(mode=0o700, parents=True, exist_ok=True)
+    TX.chmod(0o700)
+    if command('systemctl', 'is-active', '--quiet', 'rp-rollback-run.timer', check=False).returncode == 0:
+        raise RuntimeError('legacy update still pending; resolve it before migration')
+    old_watch = command('systemctl', 'is-active', '--quiet', 'rp-watch', check=False).returncode == 0
+    command('systemctl', 'stop', 'rp-watch', check=False)
+    roots = paths()
+    published = False
+    archive = None
+    try:
+        atomic(TX/'installing', 'installing\n')
+        atomic(TX/'pending', 'pending\n')
+        fd, archive = tempfile.mkstemp(prefix='.backup.', dir=STATE)
+        os.close(fd)
+        with tarfile.open(archive, 'w:gz') as tf:
+            for p in roots:
+                actual = Path('/') / p
+                if actual.exists() or actual.is_symlink(): tf.add(actual, arcname=p, recursive=True)
+        with tarfile.open(archive, 'r:gz') as tf:
+            if not all(valid_member(m, roots) for m in tf):
+                raise RuntimeError('unsupported link/device in managed backup paths')
+        with open(archive, 'rb') as f: os.fsync(f.fileno())
+        os.replace(archive, BACKUP)
+        directory_fd = os.open(STATE, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(directory_fd)
+        finally: os.close(directory_fd)
+        atomic(TX/'runner.py', Path(__file__).read_text())
+        meta = dict(phase='INSTALLING', created=time.time(), deadline=int(time.time()) + 1800,
+                    boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                    pid=pid, pid_start=Path('/proc/%d/stat' % pid).read_text().split()[21],
+                    paths=roots, sha256=digest(BACKUP), keys=owned_keys(), watch_active=old_watch)
+        save(meta)
+        published = True
+        arm(meta)
+    except Exception:
+        # Preparation has not applied any bundle file. Restore the watchdog and
+        # mark a published intent aborted without touching the working tunnel.
+        if published:
+            meta['phase'] = 'ROLLED_BACK'
+            meta['reason'] = 'prepare failed before bundle mutation'
+            save(meta)
+            disarm()
+        (TX/'installing').unlink(missing_ok=True)
+        (TX/'pending').unlink(missing_ok=True)
+        if archive and os.path.exists(archive): os.unlink(archive)
+        if old_watch: command('systemctl', 'start', 'rp-watch', check=False)
+        raise
+    print('Transaction armed; verified private backup and reboot recovery ready')
+
+
+def ready():
+    meta = load()
+    if meta['phase'] != 'INSTALLING': raise RuntimeError('not an installing transaction')
+    meta['phase'] = 'READY'
+    save(meta)
+    (TX/'installing').unlink(missing_ok=True)
+    command('systemctl', 'enable', '--now', 'rp-watch')
+    command('systemctl', 'is-active', '--quiet', 'rp-watch')
+
+
+def validate_results():
+    conf = {}
+    for line in Path('/etc/rp/rp2.conf').read_text().splitlines():
+        if '=' in line:
+            k, v = line.split('=', 1); conf[k] = v.strip('"')
+    expected = conf.get('TRANSPORT_ORDER', '').split()
+    if not expected or not set(expected) <= TRANSPORTS: raise RuntimeError('invalid transport order')
+    seen = {}
+    for line in (STATE/'results').read_text().splitlines():
+        parts = line.split('=')
+        if len(parts) != 2 or parts[0] in seen or parts[1] != 'ok':
+            raise RuntimeError('incomplete, failed or duplicated transport results')
+        seen[parts[0]] = parts[1]
+    if set(seen) != set(expected): raise RuntimeError('missing transport results')
+    if (STATE/'push.rc').read_text().strip() != '0': raise RuntimeError('installer has not succeeded')
+    command('/usr/local/bin/rp', '_func', timeout=60)
+    command('systemctl', 'is-active', '--quiet', 'rp-watch')
+
+
+def confirm():
+    meta = load()
+    if meta['phase'] == 'COMMITTED':
+        disarm()
+        BACKUP.unlink(missing_ok=True)
+        (TX/'pending').unlink(missing_ok=True)
+        Path('/root/.rp-push.sh').unlink(missing_ok=True)
+        return
+    if meta['phase'] != 'READY' or time.time() >= meta['deadline']:
+        raise RuntimeError('not ready or confirmation deadline expired')
+    validate_results()
+    if digest(BACKUP) != meta['sha256']: raise RuntimeError('backup checksum mismatch')
+    # The shared lock serializes this durable commit with a running rollback.
+    # A late timer sees COMMITTED and cannot restore old files.
+    meta['phase'] = 'COMMITTED'; save(meta)
+    disarm()
+    BACKUP.unlink(missing_ok=True)
+    (TX/'pending').unlink(missing_ok=True)
+    Path('/root/.rp-push.sh').unlink(missing_ok=True)
+    print('Update COMMITTED after complete transport results and live probe')
+
+
+def stop_installer(meta):
+    if meta['boot_id'] != Path('/proc/sys/kernel/random/boot_id').read_text().strip(): return
+    pid = meta['pid']
+    try:
+        if Path('/proc/%d/stat' % pid).read_text().split()[21] != meta['pid_start']: return
+    except FileNotFoundError: return
+    # The installer is launched by setsid for push; never signal an unrelated
+    # console process group. Kill only this exact process and its descendants.
+    def children(parent):
+        found = []
+        try: ids = Path('/proc/%d/task/%d/children' % (parent, parent)).read_text().split()
+        except FileNotFoundError: return found
+        for n in ids:
+            found.extend(children(int(n))); found.append(int(n))
+        return found
+    for target in children(pid) + [pid]:
+        try: os.kill(target, signal.SIGKILL)
+        except ProcessLookupError: pass
+
+
+def rollback(from_installer=False, boot_recovery=False):
+    meta = load()
+    if meta['phase'] in ('COMMITTED', 'ROLLED_BACK'): return
+    if digest(BACKUP) != meta['sha256']: raise RuntimeError('backup checksum mismatch; no extraction attempted')
+    with tarfile.open(BACKUP, 'r:gz') as tf:
+        members = tf.getmembers()
+        if not all(valid_member(m, meta['paths']) for m in members):
+            raise RuntimeError('unsafe backup member; no extraction attempted')
+    if not from_installer: stop_installer(meta)
+    meta['phase'] = 'ROLLING_BACK'; save(meta)
+    for u in UNITS: command('systemctl', 'stop', u, check=False)
+    for p in meta['paths']:
+        target = Path('/') / p
+        if target.is_dir() and not target.is_symlink(): shutil.rmtree(target)
+        else: target.unlink(missing_ok=True)
+    # Only verified regular files/directories below fixed rp-owned roots.
+    with tarfile.open(BACKUP, 'r:gz') as tf:
+        # Already validated every member: fixed owned roots, no links/devices.
+        # Preserve owner/mode for service-readable secrets on older Python too.
+        options = {'filter': 'fully_trusted'} if hasattr(tarfile, 'fully_trusted_filter') else {}
+        tf.extractall('/', **options)
+    restore_keys(meta['keys'])
+    command('restorecon', '-R', '/etc/rp', '/usr/local/lib/rp', '/usr/local/bin', check=False)
+    command('systemctl', 'daemon-reload')
+    if command('systemctl', 'is-active', '--quiet', 'firewalld', check=False).returncode == 0:
+        command('firewall-cmd', '--reload')
+    command('/usr/local/bin/rp', 'fixnet')
+    command('/usr/local/bin/rp', 'restart')
+    # Service start is not tunnel readiness: the reverse bridge must connect,
+    # then the remote observatory must publish its first observation.
+    deadline = time.monotonic() + 90
+    while True:
+        if command('/usr/local/bin/rp', '_func', check=False, timeout=40).returncode == 0:
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError('restored files, but previous tunnel did not become ready')
+        time.sleep(2)
+    meta['phase'] = 'ROLLED_BACK'; save(meta)
+    (TX/'pending').unlink(missing_ok=True)
+    (TX/'installing').unlink(missing_ok=True)
+    if meta['watch_active']:
+        command('systemctl', 'enable', 'rp-watch')
+        # During boot this recover service precedes rp-watch. Do not wait for
+        # a start job whose ordering dependency is this very process.
+        if boot_recovery:
+            command('systemctl', '--no-block', 'start', 'rp-watch')
+        else:
+            command('systemctl', 'start', 'rp-watch')
+            command('systemctl', 'is-active', '--quiet', 'rp-watch')
+    disarm()
+    Path('/root/.rp-push.sh').unlink(missing_ok=True)
+    BACKUP.unlink(missing_ok=True)
+    print('Rollback restored the previous version and verified its active tunnel')
+
+
+def main():
+    if os.geteuid() != 0: raise RuntimeError('root required')
+    os.umask(0o077)
+    with open('/run/rp-transaction.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        action = sys.argv[1]
+        if action == 'prepare': prepare(int(sys.argv[2]))
+        elif action == 'ready': ready()
+        elif action == 'confirm': confirm()
+        elif action == 'rollback': rollback('--from-installer' in sys.argv)
+        elif action == 'recover':
+            if META.exists():
+                meta = load()
+                boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+                if meta['phase'] == 'COMMITTED': confirm()
+                elif meta['phase'] == 'ROLLED_BACK':
+                    (TX/'installing').unlink(missing_ok=True)
+                    (TX/'pending').unlink(missing_ok=True)
+                    disarm()
+                elif meta['boot_id'] != boot: rollback(boot_recovery=True)
+        else: raise RuntimeError('unknown transaction command')
+
+if __name__ == '__main__':
+    try: main()
+    except Exception as exc:
+        print('rp transaction FAILED/UNKNOWN: ' + str(exc), file=sys.stderr)
+        sys.exit(1)
+RP_TRANSACTION_PY
+}
+# END GENERATED TRANSACTION HELPER
+
 vps2_files() { # vps2_files КАТАЛОГ — раскладывает CLI, сторож и юниты в дерево пакета
   local d=$1; mkdir -p "$d/usr/local/bin" "$d/usr/local/lib/rp" "$d/etc/systemd/system" "$d/etc/rp"
+  transaction_source >"$d/usr/local/lib/rp/transaction.py"
   # NAT как файл nft: загрузка идемпотентна (delete + create), счётчики для диагностики
   cat >"$d/etc/rp/nat.nft" <<'EOS'
 table ip rp_nat
@@ -1520,7 +1891,7 @@ diag() {
 cmd_select() {
   local rc
   trap 'systemctl enable --now rp-watch >/dev/null 2>&1; exit 130' INT TERM
-  cmd_select_body "$@"; rc=$?
+  cmd_select_body; rc=$?
   trap - INT TERM
   return $rc
 }
@@ -1781,14 +2152,18 @@ cmd_remove() {
   systemctl daemon-reload; say "Удалено. Бинарники /usr/local/bin/{xray,hysteria,rp} оставлены; rm — вручную."
 }
 cmd_confirm() {
-  systemctl stop rp-rollback-run.timer rp-rollback.timer >/dev/null 2>&1 || true
-  if systemctl is-active --quiet rp-rollback-run.timer || systemctl is-active --quiet rp-rollback.timer; then
-    say "Таймер отката не остановлен: обновление НЕ подтверждено" >&2; return 1
+  if [[ -f $STATE/transaction/state.json ]]; then
+    python3 "$STATE/transaction/runner.py" confirm
+    return $?
   fi
-  rm -f /root/.rp-push.sh "$STATE/backup.tgz" "$STATE/mode.before-identity" "$STATE/active.before-identity" "$STATE/since.before-identity"
-  say "Обновление подтверждено, откат отменён"
+  say "Нет проверяемой транзакции: подтверждение запрещено" >&2
+  return 1
 }
 cmd_rollback() {
+  if [[ -f $STATE/transaction/state.json ]]; then
+    python3 "$STATE/transaction/runner.py" rollback
+    return $?
+  fi
   [[ -f $STATE/backup.tgz ]] || { say "Резервной копии нет"; return 1; }
   tar -xzf "$STATE/backup.tgz" -C / || { say "Не удалось восстановить резервную копию" >&2; return 1; }
   local f
@@ -1813,10 +2188,21 @@ menu() {
       printf '\n◆ rp · VPS-2   транспорт: %s\n  1 Статус\n  2 Перезапуск\n  3 Журнал\n  4 Проверить все транспорты заново\n  5 Починить NAT и пересылку\n  6 Удалить\n  0 Выход\n› ' "$(active)"
     fi
     read -r c || exit 0
-    case $c in 1) cmd_status ;; 2) cmd_restart ;; 3) cmd_logs 60 ;; 4) cmd_select ;; 5) cmd_fixnet ;; 6) cmd_remove ;; 0) exit 0 ;; *) say "Введите число от 0 до 6" ;; esac
+    case $c in 1) cmd_status ;; 2) /usr/local/bin/rp restart ;; 3) cmd_logs 60 ;; 4) /usr/local/bin/rp select ;; 5) /usr/local/bin/rp fixnet ;; 6) /usr/local/bin/rp remove ;; 0) exit 0 ;; *) say "Введите число от 0 до 6" ;; esac
   done
 }
 if [[ ${1:-} == --ascii ]]; then RP_ASCII=1; export RP_ASCII; shift; fi
+case "${1:-menu}:${2:-}" in
+  mode:status|mode:result|mode:) : ;;
+  select:*|restart:*|remove:*|fixnet:*|mode:*|failback:*|_setorder:*)
+    if [[ ${RP_TX_INTERNAL:-0} != 1 ]]; then
+      exec 8>/run/rp-vps2-mutation.lock
+      flock -n 8 || { say "Другая операция VPS-2 выполняется" >&2; exit 1; }
+      if [[ -f $STATE/transaction/pending ]]; then
+        say "Обновление не завершено; требуется rollback" >&2; exit 1
+      fi
+    fi ;;
+esac
 case ${1:-menu} in
   menu) menu ;; status) cmd_status ;; restart) cmd_restart ;; logs) cmd_logs "${2:-80}" ;; select) cmd_select ;;
   test) t=$(active); t1_check "$t" && t2_check "$t" && t3_check "$t" && say "T1–T3: ок" ;;
@@ -1868,7 +2254,8 @@ order_now() { fn tr_order; }
 # Cooldown per transport after failures; memory is intentionally reset on service restart.
 declare -A blocked_until=() strike=()
 penalize() {
-  local t=$1 now=$(date +%s) n=${strike[$1]:-0} seconds
+  local t=$1 now n=${strike[$1]:-0} seconds
+  now=$(date +%s) || return 1
   n=$((n + 1)); ((n > 4)) && n=4
   strike[$t]=$n
   seconds=$((300 * (1 << (n - 1))))  # 5, 10, 20, 40 minutes
@@ -1919,13 +2306,12 @@ mode_commit() {
 }
 process_mode_request() {
   [[ -s $ST/mode-request ]] || return 1
-  local id desired previous previous_mode status=fail t
+  local id desired previous status=fail t
   read -r id desired <"$ST/mode-request" || true
   [[ $id =~ ^[0-9a-f-]{8,64}$ ]] || { rm -f "$ST/mode-request"; return 0; }
   case $desired in auto|reality-xhttp|reality-xhttp2|hy2-wg|hy2o-wg) :;;
     *) mode_result "$id" fail; rm -f "$ST/mode-request"; return 0;; esac
   previous=$(active)
-  previous_mode=$(fn mode_get 2>/dev/null) || previous_mode=invalid
   if [[ $desired == auto ]]; then
     if mode_commit auto; then
       status=ok
@@ -1992,6 +2378,7 @@ errors=0; last_switch=$(date +%s)
 next_deep=$((last_switch + $(rand_between 480 900)))
 last_failback=0
 while :; do
+  if [[ -f $ST/transaction/installing ]]; then sleep 2; continue; fi
   if process_mode_request; then activity_sleep; continue; fi
   read -ra order <<<"$(order_now)"
   if ((${#order[@]} == 0)); then
@@ -2319,33 +2706,25 @@ rp_main() {
   exec </dev/null   # скрипт уже прочитан целиком (rp_main — последняя строка): команды не должны читать остаток потока
   [[ $EUID -eq 0 ]] || rp_fail "Нужен root"
   command -v dnf >/dev/null || rp_fail "Нужен dnf (Rocky Linux 9/10)"
-  local tmp xurl xsha hurl hsha
+  exec 8>/run/rp-vps2-mutation.lock
+  flock -n 8 || rp_fail "Другая операция VPS-2 выполняется"
+  command -v python3 >/dev/null || dnf -y install python3 >/dev/null 2>&1 || rp_fail "Не удалось установить python3 для безопасного обновления"
+  local xurl xsha hurl hsha
   tmp=$(mktemp -d) || rp_fail "mktemp"
   mkdir -p /var/lib/rp; rm -f /var/lib/rp/push.rc
   # код завершения читает VPS-1 (rp push ждёт его, прежде чем подтвердить обновление)
   rp_mutated=0
   # При ошибке после начала изменений (RP_SAFE=1) откатываемся сразу, не дожидаясь таймера.
-  trap 'rc=$?; rm -rf "$tmp"; if [[ $rc -ne 0 && $RP_SAFE == 1 && $rp_mutated == 1 && -s /var/lib/rp/backup.tgz ]]; then rp_msg "Ошибка установки: немедленный откат"; /usr/local/bin/rp rollback >/dev/null 2>&1 && { systemctl stop rp-rollback-run.timer >/dev/null 2>&1; rm -f /root/.rp-push.sh; }; fi; echo "$rc" >/var/lib/rp/push.rc' EXIT
-  # 0. копия для отката (только файлы rp; права 0600: внутри ключи и пароли) и таймер отката ДО любых изменений
-  if [[ $RP_SAFE == 1 && -d /etc/rp ]]; then
-    local bk_list=() bk_f
-    for bk_f in etc/rp usr/local/lib/rp usr/local/bin/rp etc/wireguard/rp-wg.conf etc/sysctl.d/99-rp.conf root/.ssh/authorized_keys; do
-      [[ -e /$bk_f ]] && bk_list+=("$bk_f")
-    done
-    while IFS= read -r bk_f; do bk_list+=("${bk_f#/}"); done < <(find /etc/systemd/system -maxdepth 1 -name 'rp-*' 2>/dev/null)
-    rm -f /var/lib/rp/backup.tgz
-    ( umask 077; tar -czf /var/lib/rp/backup.tgz -C / "${bk_list[@]}" 2>/dev/null; [[ $? -le 1 ]] ) \
-      && tar -tzf /var/lib/rp/backup.tgz >/dev/null 2>&1 \
-      || rp_fail "Не удалось создать проверяемую резервную копию: обновление прервано до изменений"
-    chmod 600 /var/lib/rp/backup.tgz
-    systemctl stop rp-rollback-run.timer rp-rollback.timer >/dev/null 2>&1
-    systemd-run --on-active=1800 --unit=rp-rollback-run --description="rp: откат обновления" /usr/local/bin/rp rollback >/dev/null 2>&1
-    systemctl is-active --quiet rp-rollback-run.timer || rp_fail "Не удалось взвести таймер отката: обновление прервано до изменений"
-  fi
-  rp_mutated=1
-  # 1. бандл: проверка суммы до любых изменений
+  trap 'rc=$?; rm -rf "$tmp"; if [[ $rc -ne 0 && $RP_SAFE == 1 && $rp_mutated == 1 ]]; then python3 /var/lib/rp/transaction/runner.py rollback --from-installer || true; fi; printf "%s\n" "$rc" >/var/lib/rp/push.rc' EXIT
+  # Validate and extract ONLY the transaction helper before mutation. Its hash
+  # is covered by the generated bundle digest. The backup runner is immutable.
   rp_bundle | base64 -d >"$tmp/b.tgz" 2>/dev/null || rp_fail "Бандл повреждён (base64)"
-  [[ $(sha256sum "$tmp/b.tgz" | awk '{print $1}') == "$RP_BUNDLE_SHA" ]] || rp_fail "SHA256 бандла не совпала — вставьте блок заново целиком"
+  [[ $(sha256sum "$tmp/b.tgz" | awk '{print $1}') == "$RP_BUNDLE_SHA" ]] || rp_fail "SHA256 бандла не совпала"
+  if [[ $RP_SAFE == 1 ]]; then
+    tar -xOzf "$tmp/b.tgz" usr/local/lib/rp/transaction.py >"$tmp/transaction.py" || rp_fail "Нет transaction helper"
+    python3 "$tmp/transaction.py" prepare "$$" || rp_fail "Транзакция не подготовлена"
+    rp_mutated=1
+  fi
   rp_msg "rp: установка VPS-2"
   # 2. пакеты
   rp_msg "Пакеты"
@@ -2412,7 +2791,7 @@ rp_main() {
   systemctl daemon-reload
   # 5. NAT и пересылка, фаервол (порты наружу не открываются); rp fixnet — единая реализация
   rp_msg "NAT и пересылка"
-  /usr/local/bin/rp fixnet || rp_fail "не удалось включить NAT/firewalld на VPS-2"
+  RP_TX_INTERNAL=1 /usr/local/bin/rp fixnet || rp_fail "не удалось включить NAT/firewalld на VPS-2"
   # 6. SSH: ключ с ограничениями (только с loopback и внутреннего WG-адреса, без форвардинга)
   install -d -m 700 /root/.ssh; touch /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys
   sed -i '/ rp@vps1$/d' /root/.ssh/authorized_keys
@@ -2428,11 +2807,14 @@ rp_main() {
           /var/lib/rp/active /var/lib/rp/since
     rp_msg "Новая установка: прежний ручной режим VPS-2 сброшен в auto"
   fi
-  if [[ $RP_SAFE == 1 ]] && ! systemctl is-active --quiet rp-rollback-run.timer; then rp_fail "Таймер отката пропал во время установки"; fi
+  if [[ $RP_SAFE == 1 ]] && ! systemctl is-active --quiet rp-transaction-rollback.timer; then rp_fail "Таймер отката пропал во время установки"; fi
   # Full T1/T2/T3 for EVERY configured transport on both fresh install and push.
   # The selected manual transport is enforced only for final activation.
-  /usr/local/bin/rp select
+  RP_TX_INTERNAL=1 /usr/local/bin/rp select
   local rc=$?
+  if [[ $RP_SAFE == 1 && $rc == 0 ]]; then
+    python3 /var/lib/rp/transaction/runner.py ready || rc=1
+  fi
   echo
   rp_msg "Отпечаток host key (сверьте при первом rp ssh):"
   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null || ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub 2>/dev/null
@@ -2559,7 +2941,7 @@ self_install() {
 # Update self from the configured GitHub URL and migrate only after the new
 # executable has passed independent validation. Roll back executable on failure.
 self_upgrade() {
-  local tmp nv prev old_version rc=0
+  local tmp nv old_version rc=0
   need_root; mkdir -p "$STATE" "$BK_DIR"
   tmp=$(mktemp "${TMPDIR:-/tmp}/rp-update.XXXXXXXX") || return 1
   if ! self_fetch "$tmp"; then
@@ -2734,11 +3116,11 @@ vps1_install() {
   mkdir -p "$ETC" "$LIB" "$STATE" "$ASSETS" "$BK_DIR"; chown root:rp "$ETC"; chmod 750 "$ETC"; chmod 755 "$STATE" "$ASSETS"
   conf_set ROLE vps1 PUBLIC_IP "$PUBLIC_IP" WG_PORT "$WG_PORT" WG_NET "10.66.0.0/24" WG_NET_GW "10.66.0.1" WG_MTU 1380 \
     TRANSPORT_ORDER "$order" TRANSPORT_FORCE "" HY2_PORT "$HY2_PORT" HY2O_PORT "$HY2O_PORT" RXH_PORT "$RXH_PORT" RXH2_PORT "$RXH2_PORT" \
-    RXH_SNI "${RXH_SNI:-www.microsoft.com}" RXH2_SNI "${RXH2_SNI:-www.asus.com}" XHTTP_PATH "/$(rand_hex 4)" XHTTP2_PATH "/$(rand_hex 4)" \
+    RXH_SNI "${RXH_SNI:-www.microsoft.com}" RXH2_SNI "${RXH2_SNI:-www.asus.com}" XHTTP_PATH "$(cf XHTTP_PATH "/$(rand_hex 4)")" XHTTP2_PATH "$(cf XHTTP2_PATH "/$(rand_hex 4)")" \
     HY2_MASQ "https://${HY2_MASQ_HOST:-www.microsoft.com}" EXIT_MTU 1080 DOORS "ssh=2222=127.0.0.1:22" \
     RU_DIRECT "$([[ $ru == y ]] && echo 1 || echo 0)" RU_GUARD 1 RU_GEOIP 1 DNS_RU "77.88.8.8" DNS_REMOTE "quad9 cloudflare" \
     DISABLE_IPV6 1 SNIFF 1 RL_FP chrome WATCH_MIN 15 WATCH_MAX 35 CONF_VER 2
-  chown root:root "$CONF"; : >"$CLIENTS"; chmod 600 "$CLIENTS"
+  chown root:root "$CONF"; touch "$CLIENTS"; chmod 600 "$CLIENTS"
 
   step "Xray и Hysteria2"
   run "Xray $(cf XRAY_VER "$XRAY_PINNED")" xray_install "$(cf XRAY_VER "$XRAY_PINNED")" || die "Не удалось поставить Xray"
@@ -2746,9 +3128,9 @@ vps1_install() {
   run "Хэши релизов для VPS-2" pin_release || warn "Хэши для VPS-2 не получены — блок можно будет собрать позже (rp block)"
 
   step "Ключи и сертификат"
-  py_install; secrets_wg || die "Не удалось создать ключи WireGuard"
-  secrets_reality || die "Не удалось создать ключи Reality"
-  secrets_extra; conf_set HY2_PASS "$(rand_pass)"
+  py_install; secrets_ensure secrets_wg WG_PRIV WG_PUB EXIT_PRIV1 EXIT_PUB1 EXIT_PRIV2 EXIT_PUB2 EXIT_PSK || die "Не удалось создать ключи WireGuard"
+  secrets_ensure secrets_reality RL_PRIV RL_PUB RL_SID RL_UUID_X RL_UUID_T RL_UUID_PX RL_UUID_PT || die "Не удалось создать ключи Reality"
+  secrets_extra; [[ -n $(cf HY2_PASS) ]] || conf_set HY2_PASS "$(rand_pass)"
   [[ $order == *hy2* ]] && { hy2_cert "${HY2_MASQ_HOST:-www.microsoft.com}" || die "Сертификат не создан"; }
   ssh_key; ok "Ключи созданы (секреты только в $CONF, права 600)"
 
@@ -2794,7 +3176,7 @@ cl_show() { # cl_show имя — конфиг и QR
   [[ -n $n ]] || pick_from n "Клиент" "${_l[@]}" || { warn "Клиентов нет"; return 1; }
   local conf; conf=$(py client "$n") || return 1
   printf '\n%s\n' "$conf"
-  mkdir -p -m 700 /root/rp-clients; chmod 700 /root/rp-clients; printf '%s\n' "$conf" >"/root/rp-clients/$n.conf"; chmod 600 "/root/rp-clients/$n.conf"
+  install -d -m 700 /root/rp-clients; printf '%s\n' "$conf" >"/root/rp-clients/$n.conf"; chmod 600 "/root/rp-clients/$n.conf"
   printf '\n'; py qr "/root/rp-clients/$n.conf" || note "QR не построен (конфиг длиннее 458 байт?) — используйте файл"; printf '\n'
   note "Файл: /root/rp-clients/$n.conf"
 }
@@ -2976,16 +3358,27 @@ route_target_for() {
     *) return 1 ;;
   esac
 }
-route_api_override() { # баланcировщик, тег|clear
-  local bal=$1 target=$2
+route_api_override() { # apply and verify the actual in-memory RoutingService state
+  local bal=$1 target=$2 response
   [[ $bal == exit || $bal == rev ]] || return 2
   case $target in
     to-exit|r-xhttp|r-xhttp2)
-      "$XRAY_BIN" api bo --server=127.0.0.1:10085 -b "$bal" "$target" >/dev/null 2>&1 ;;
+      "$XRAY_BIN" api bo --server=127.0.0.1:10085 -b "$bal" "$target" >/dev/null 2>&1 || return 1 ;;
     clear)
-      "$XRAY_BIN" api bo --server=127.0.0.1:10085 -b "$bal" -r >/dev/null 2>&1 ;;
+      "$XRAY_BIN" api bo --server=127.0.0.1:10085 -b "$bal" -r >/dev/null 2>&1 || return 1 ;;
     *) return 2 ;;
   esac
+  # Xray 26.4.25 exposes structured output with --json (verified on the lab).
+  response=$("$XRAY_BIN" api bi --server=127.0.0.1:10085 --json "$bal" 2>/dev/null) || return 1
+  printf '%s\n' "$response" | python3 -I -c '
+import json, sys
+try:
+    result = json.load(sys.stdin)["balancer"]["override"]
+    expected = "" if sys.argv[1] == "clear" else sys.argv[1]
+    assert isinstance(result, dict) and result.get("target", "") == expected
+except (ValueError, KeyError, TypeError, AssertionError):
+    sys.exit(1)
+' "$target"
 }
 route_rev_has() { # Detect whether this outbound is valid for the separate management balancer.
   local tag=$1
@@ -3496,6 +3889,25 @@ EOF
   ok "Обновление запущено на VPS-2 (откат через 30 минут, если не подтвердить)"
 }
 
+# Require exactly one successful result per configured transport. Empty, partial,
+# duplicated and unrecognised results are UNKNOWN/FAILED, never FULL_OK.
+push_results_ok() {
+  local results=$1 t line name value
+  local -A expected=() seen=()
+  for t in $(cf TRANSPORT_ORDER); do
+    case $t in reality-xhttp2|reality-xhttp|hy2-wg|hy2o-wg) expected[$t]=1 ;; *) return 1 ;; esac
+  done
+  ((${#expected[@]} > 0)) || return 1
+  while IFS= read -r line; do
+    [[ $line == *=* ]] || return 1
+    name=${line%%=*}; value=${line#*=}
+    [[ -n $name && $value == ok ]] || return 1
+    [[ -n ${expected[$name]:-} && -z ${seen[$name]:-} ]] || return 1
+    seen[$name]=1
+  done <<<"$results"
+  ((${#seen[@]} == ${#expected[@]}))
+}
+
 # push_wait — до 27 минут: все четыре транспорта и полные T1/T2/T3,
 # оставляя запас до 30-минутного отката для подтверждения.
 push_wait() {
@@ -3507,7 +3919,8 @@ push_wait() {
     rc=""; sleep 6; t=$((t + 6))
   done
   [[ -n $rc ]] || { err "VPS-2 не вернулся на связь за 27 минут (автоматический откат через 30 минут)"; return 1; }
-  if ((rc != 0)); then
+  [[ $rc =~ ^[0-9]{1,3}$ ]] || { err "Недостоверный код установки: обновление НЕ подтверждено"; return 1; }
+  if ((10#$rc != 0)); then
     err "Установка на VPS-2 завершилась с ошибкой (код $rc)"
     local tail_log
     tail_log=$(RP_READ_RETRIES=1 vps2_read 'tail -n 32 /var/lib/rp/push.log' 2>/dev/null || true)
@@ -3519,21 +3932,23 @@ push_wait() {
     warn "Повторный rp push пока не выполняйте: сначала выясните причину ошибки"
     return 1
   fi
-  route_sync_locked >/dev/null 2>&1 || warn "VPS-2 доступен, но маршрут Xray VPS-1 пока не согласован"
+  local res_now
+  res_now=$(tr_results 2>/dev/null) && push_results_ok "$res_now" || {
+    err "FAILED/UNKNOWN: нет полного успешного результата T1–T3 всех транспортов; обновление НЕ подтверждено"
+    return 1
+  }
+  route_sync_locked >/dev/null 2>&1 || {
+    err "Маршрут Xray VPS-1 не согласован: обновление НЕ подтверждено"; return 1
+  }
   wait_exit || { err "Выход через VPS-2 не работает после обновления (откат на VPS-2 сработает сам)"; return 1; }
   touch "$STATE/linked"
   local cf_try cf_ok=0
-  for cf_try in 1 2 3; do
+  for ((cf_try=1; cf_try<=3; cf_try++)); do
     vps2_run '/usr/local/bin/rp confirm' >/dev/null 2>&1 && { cf_ok=1; break; }
     sleep 3
   done
   ((cf_ok)) || { err "VPS-2 не подтвердил обновление: выполните там  rp confirm  до истечения 30 минут, иначе сработает откат"; return 1; }
-  local res_now; res_now=$(tr_results 2>/dev/null || true)
-  if grep -q '=fail' <<<"$res_now"; then
-    warn "Итог: DEGRADED — часть транспортов не прошла T1–T3 (rp transports)"
-  else
-    ok "Итог: FULL_OK — все транспорты прошли T1–T3"
-  fi
+  ok "Итог: FULL_OK — все транспорты прошли T1–T3"
   ok "VPS-2 обновлён и подтверждён"
   route_sync_locked >/dev/null 2>&1 || warn "Маршрут VPS-1 пока не подтверждён; выполните rp tunnel sync"
 }
@@ -4294,7 +4709,7 @@ cmd_install() {
   case $ROLE_CHOICE in vps1) vps1_install ;; vps2) vps2_entry ;; esac
 }
 
-lock() { exec 9>/run/rp.lock; flock -n 9 || die "Другая операция rp уже выполняется"; }
+lock() { exec 9>/run/rp.lock; flock -w 5 9 || die "Другая операция rp уже выполняется"; }
 
 main() {
   local cmd=${1:-}; shift || true
