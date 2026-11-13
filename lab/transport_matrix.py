@@ -22,7 +22,7 @@ def run(host,cmd,name,timeout=420):
         rc=124; text='TIMEOUT: remote process may still be running; inspect before retrying\n'
     (out/(name+'.log')).write_text(text)
     result=dict(id=name,host=host,started=ts,seconds=round(time.monotonic()-start,3),rc=rc,result='PASS' if rc==0 else 'FAIL',log=name+'.log')
-    
+
     if name.endswith('-T1-T8') and rc == 0 and ('  - T' in text or '  – T' in text): result['result']='SKIP'; result['reason']='One or more built-in checks skipped; see log'
     results.append(result);(out/'results.json').write_text(json.dumps(results,indent=2));print(json.dumps(result),flush=True)
     return rc
