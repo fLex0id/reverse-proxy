@@ -4653,16 +4653,16 @@ menu_clients() {
   local c
   while :; do cls; banner "Клиенты WG" "OpenWrt и другие"; cl_list
     mhead "Действия"; mi 1 "Добавить"; mi 2 "Конфиг и QR"; mi 3 "Удалить"; mi 0 "Назад"; mpick c
-    case $c in 1) (cl_add); pause ;; 2) (cl_show); pause ;; 3) (cl_del); pause ;; 0) return ;; *) warn "Введите число от 0 до 3"; sleep 1 ;; esac
+    case $c in 1) (lock; cl_add); pause ;; 2) (cl_show); pause ;; 3) (lock; cl_del); pause ;; 0) return ;; *) warn "Введите число от 0 до 3"; sleep 1 ;; esac
   done
 }
 menu_ru() {
   local c
   while :; do cls; banner "Российские сайты напрямую" "списки .dat"; cmd_ru status
     mhead "Действия"; mi 1 "Обновить списки"; mi 2 "Включить"; mi 3 "Выключить"; mi 4 "Исключение: через туннель"; mi 5 "Исключение: напрямую"; mi 0 "Назад"; mpick c
-    case $c in 1) (cmd_ru update); pause ;; 2) (cmd_ru on); pause ;; 3) (cmd_ru off); pause ;;
-      4) local d=""; ask d "Домен" "" '^[A-Za-z0-9.-]+\.[A-Za-z0-9-]+$' "Нужен домен"; (cmd_ru proxy "$d"); pause ;;
-      5) local d=""; ask d "Домен" "" '^[A-Za-z0-9.-]+\.[A-Za-z0-9-]+$' "Нужен домен"; (cmd_ru direct "$d"); pause ;;
+    case $c in 1) (lock; cmd_ru update); pause ;; 2) (lock; cmd_ru on); pause ;; 3) (lock; cmd_ru off); pause ;;
+      4) local d=""; ask d "Домен" "" '^[A-Za-z0-9.-]+\.[A-Za-z0-9-]+$' "Нужен домен"; (lock; cmd_ru proxy "$d"); pause ;;
+      5) local d=""; ask d "Домен" "" '^[A-Za-z0-9.-]+\.[A-Za-z0-9-]+$' "Нужен домен"; (lock; cmd_ru direct "$d"); pause ;;
       0) return ;; *) warn "Введите число от 0 до 5"; sleep 1 ;; esac
   done
 }
@@ -4671,9 +4671,9 @@ menu_dns() {
   while :; do cls; banner "DNS" "DoH через туннель"; cmd_dns show
     mhead "Действия"; mi 1 "Выбрать серверы"; mi 2 "Проверить серверы"; mi 3 "Быстро: Quad9 + Cloudflare"; mi 4 "Быстро: только Quad9"; mi 5 "Российский DNS (IPv4)"; mi 0 "Назад"; mpick c
     case $c in
-      1) v=""; ask v "Серверы через пробел (quad9 cloudflare google adguard или https://…/dns-query)" "$(cf DNS_REMOTE)" '^[A-Za-z0-9:/._ -]+$' "Недопустимые символы"; (cmd_dns set "$v"); pause ;;
-      2) (cmd_dns test); pause ;; 3) (cmd_dns set quad9 cloudflare); pause ;; 4) (cmd_dns set quad9); pause ;;
-      5) v=""; ask v "IPv4 российского DNS (yandex или адрес)" "$(cf DNS_RU 77.88.8.8)" '^[A-Za-z0-9.]+$' "Укажите IPv4"; (cmd_dns ru "$v"); pause ;;
+      1) v=""; ask v "Серверы через пробел (quad9 cloudflare google adguard или https://…/dns-query)" "$(cf DNS_REMOTE)" '^[A-Za-z0-9:/._ -]+$' "Недопустимые символы"; (lock; cmd_dns set "$v"); pause ;;
+      2) (lock; cmd_dns test); pause ;; 3) (lock; cmd_dns set quad9 cloudflare); pause ;; 4) (lock; cmd_dns set quad9); pause ;;
+      5) v=""; ask v "IPv4 российского DNS (yandex или адрес)" "$(cf DNS_RU 77.88.8.8)" '^[A-Za-z0-9.]+$' "Укажите IPv4"; (lock; cmd_dns ru "$v"); pause ;;
       0) return ;; *) warn "Введите число от 0 до 5"; sleep 1 ;; esac
   done
 }
@@ -4689,7 +4689,7 @@ menu_tunnel() {
   while :; do cls; banner "Туннель к VPS-2" "$(cf TRANSPORT_ORDER)"; cmd_door list
     mhead "Действия"; mi 1 "Строка для VPS-2 (он сам скачает блок)"; mi 2 "Блок для VPS-2 (вставка вручную)"; mi 3 "Обновить VPS-2 по SSH (откат 30 мин)"; mi 4 "SSH на VPS-2"
     mi 5 "Двери (Reality)"; mi 6 "Сменить секреты"; mi 7 "Проверка сайтов SNI"; mi 8 "Транспорты: результаты проверки"; mi 9 "Исключить неработающие транспорты"; mi 10 "Выбрать активный транспорт (авто / вручную)"; mi 0 "Назад"; mpick c
-    case $c in 1) (lock; cmd_link); pause ;; 2) (cmd_block); pause ;; 3) (lock; cmd_push); pause ;; 4) (cmd_ssh); pause ;; 5) (cmd_door list); pause ;; 6) (lock; cmd_rotate); pause ;; 7) (cmd_sni); pause ;;
+    case $c in 1) (lock; cmd_link); pause ;; 2) (lock; cmd_block); pause ;; 3) (lock; cmd_push); pause ;; 4) (cmd_ssh); pause ;; 5) (cmd_door list); pause ;; 6) (lock; cmd_rotate); pause ;; 7) (cmd_sni); pause ;;
       8) (cmd_transports); pause ;; 9) (lock; cmd_prune); pause ;; 10) (lock; cmd_tunnel select); pause ;; 0) return ;; *) warn "Введите число от 0 до 10"; sleep 1 ;; esac
   done
 }
@@ -4698,7 +4698,7 @@ menu_main() {
   conf_load
   if (($(cf CONF_VER 1) < 2)); then   # конфигурация от версии 1.0: без перехода меню покажет устаревшие значения
     warn "Конфигурация создана версией 1.0 — нужен переход на $SELF_VERSION (ключи и клиенты сохраняются)"
-    yesno "Выполнить rp migrate сейчас?" y && { (cmd_migrate); pause; }
+    yesno "Выполнить rp migrate сейчас?" y && { (lock; cmd_migrate); pause; }
   fi
   while :; do
     conf_load; cls; banner "rp" "VPS-1 · $(cf PUBLIC_IP) · v$SELF_VERSION"
@@ -4715,9 +4715,9 @@ menu_main() {
     mi 13 "Сохранить эту версию как команду rp"; mi 14 "Обновить rp из GitHub"; mi 0 "Выход"; mpick c
     case $c in
       1) menu_clients ;; 2) menu_tunnel ;; 3) menu_ru ;; 4) menu_dns ;;
-      5) (cmd_test); pause ;; 6) (cmd_diag --fix); pause ;; 7) (cmd_doctor); pause ;; 8) (cmd_status); pause ;; 9) (cmd_logs 60); pause ;;
-      10) menu_upd ;; 11) (cmd_restart); pause ;; 12) (cmd_uninstall); pause; [[ -d $STATE ]] || exit 0 ;;   # после удаления меню не нужно
-      13) (self_install); pause ;; 14) (self_upgrade); pause ;;
+      5) (lock; cmd_test); pause ;; 6) (lock; cmd_diag --fix); pause ;; 7) (cmd_doctor); pause ;; 8) (cmd_status); pause ;; 9) (cmd_logs 60); pause ;;
+      10) menu_upd ;; 11) (lock; cmd_restart); pause ;; 12) (lock; cmd_uninstall); pause; [[ -d $STATE ]] || exit 0 ;;   # после удаления меню не нужно
+      13) (lock; self_install); pause ;; 14) (lock; self_upgrade); pause ;;
       0) exit 0 ;; *) warn "Введите число от 0 до 14"; sleep 1 ;;
     esac
   done
@@ -4747,7 +4747,7 @@ maybe_save_launched_build() {
   fi
   note "Запущен rp $SELF_VERSION, в команде rp установлено: ${src_version:-ничего}"
   if yesno "Сохранить запущенную версию как команду rp?" y; then
-    self_install || warn "Версия не сохранена; используйте меню 'Сохранить' или проверьте RP_URL"
+    (lock; self_install) || warn "Версия не сохранена; используйте меню 'Сохранить' или проверьте RP_URL"
   fi
 }
 usage() {
@@ -4793,13 +4793,13 @@ cmd_install() {
     local act=""; choose act "rp уже установлен на этом VPS-1" menu \
       "menu|Открыть управление|" "migrate|Перейти на версию $SELF_VERSION|обновить конфигурацию и службы, ключи сохраняются" \
       "reinstall|Изменить настройки|заново пройти вопросы (ключи клиентов сохранятся)" "update|Обновить списки РФ|только списки"
-    case $act in menu) maybe_save_launched_build; menu_main; return ;; migrate) cmd_migrate; return ;; update) ru_update --latest; return ;; esac
+    case $act in menu) maybe_save_launched_build; menu_main; return ;; migrate) lock; cmd_migrate; return ;; update) lock; ru_update --latest; return ;; esac
   fi
   banner "rp $SELF_VERSION" "установка"
   choose ROLE_CHOICE "Роль этого сервера" vps1 \
     "vps1|VPS-1 (Россия)|принимает WG-клиентов и ведёт трафик в туннель" \
     "vps2|VPS-2 (за границей)|выход в интернет; ставится блоком, созданным на VPS-1"
-  case $ROLE_CHOICE in vps1) vps1_install ;; vps2) vps2_entry ;; esac
+  case $ROLE_CHOICE in vps1) lock; vps1_install ;; vps2) vps2_entry ;; esac
 }
 
 lock() { exec 9>/run/rp.lock; flock -w 5 9 || die "Другая операция rp уже выполняется"; }
@@ -4814,12 +4814,12 @@ main() {
   case $cmd in
     ""|menu) need_root; conf_load; if [[ $(cf ROLE) == vps1 ]]; then maybe_save_launched_build; menu_main; else cmd_install; fi ;;
     install) cmd_install ;;
-    install-self|save) need_root; self_install ;;
+    install-self|save) need_root; lock; self_install ;;
     migrate) need_root; lock; cmd_migrate ;;
     version|-v|--version) echo "rp $SELF_VERSION" ;;
     help|-h|--help) usage ;;
     client) need_root; need_vps1; case ${1:-list} in add) lock; cl_add "${2:-}" ;; del) lock; cl_del "${2:-}" ;; list) cl_list ;; show) cl_show "${2:-}" ;; *) die "rp client add|del|list|show [имя]" ;; esac ;;
-    block) need_root; cmd_block "$@" ;;
+    block) need_root; lock; cmd_block "$@" ;;
     link) need_root; lock; cmd_link "$@" ;;
     _link_close) link_close "$@" ;;     # служебная: вызывает systemd после остановки rp-serve (без lock)
     push) need_root; lock; cmd_push ;;

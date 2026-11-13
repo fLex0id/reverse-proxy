@@ -1,5 +1,15 @@
 # Defect register (work in progress)
 
+## RP-011 P1: menu mutations bypass the CLI operation lock
+The client, RU, DNS and main menus called mutating functions without the lock
+used by their CLI equivalents. Concurrent menu/CLI operations could overwrite
+configuration or interfere with an update. Actual menu branches driven with
+fixture input and a second flock process reproduced 19 failures out of 28 cases.
+All 28 pass after locking each mutation; read-only menus do not hold the lock
+while waiting for input. Installation, save and bundle entry points also acquire
+the operation lock. Full suite: 74 tests PASS; generated-code static checks PASS.
+Concurrent live push/menu fault acceptance remains outstanding.
+
 ## RP-001 P0: unverified update confirmed
 Baseline push_wait calls confirm before reading transport results. Empty results
 print FULL_OK; a failed transport is committed as DEGRADED; route sync failure
