@@ -1,5 +1,22 @@
 # Defect register (work in progress)
 
+## RP-013 P1: DNS reply source reused across resolver destinations
+The lab.2 full regression had one timeout out of 768 DNS behaviors. Packet
+analysis confirms a real reply-address defect, not just a slow RU resolver:
+client 10.66.0.2:40640 queried 192.0.2.53:53 for ozon.ru A (ID 2625), but the
+response was sourced from 8.8.8.8:53 to the same port with matching ID and answer.
+The connected UDP client correctly rejected it. Both resolvers are intercepted;
+this does not show a direct foreign DNS leak. Deterministic source-port reuse
+reproduction and a correction are pending. Do not extend timeouts to conceal it.
+
+## RP-012 follow-up: live WireGuard MTU was not applied
+Real migration changed the generated file to 1280 but the link stayed at 1080:
+`wg syncconf` strips wg-quick fields including MTU. Apply now explicitly sets
+the live MTU from the installed file. Rollback uses the restored file rather
+than pending rp.conf values. Full apply also reconciles existing links when
+the generated file is unchanged. A fixture reproduces the old failure and
+verifies both interfaces on apply and restoration. 79 local tests PASS.
+
 ## RP-012 P1: inner WireGuard MTU prevents QUIC over both Hysteria transports
 Packet captures on LAB-2 show 1200-byte QUIC Initial/reply datagrams followed by
 ICMP fragmentation-needed (MTU 1080). With unchanged candidate lab.2, runtime-only

@@ -885,14 +885,23 @@ EOF
 declare -gA ACT=()
 unit_up() { local i; for i in 1 2 3; do systemctl is-active --quiet "$1" || return 1; sleep 1; done; }
 tr_has() { [[ " $(cf TRANSPORT_ORDER) " == *" $1 "* ]]; }
+wg_sync_live() {
+  local interface=$1 path=$2 mtu
+  # wg syncconf ignores wg-quick's MTU. Read the installed file so rollback
+  # restores the old link MTU too, even while rp.conf still holds new values.
+  mtu=$(sed -n 's/^MTU = \([0-9]\+\)$/\1/p' "$path")
+  [[ $mtu =~ ^[0-9]+$ ]] || { err "Нет корректного MTU в $path"; return 1; }
+  wg syncconf "$interface" <(wg-quick strip "$path") || return 1
+  ip link set dev "$interface" mtu "$mtu"
+}
 vps1_actions() {
   local a
   [[ -n ${ACT[nft]:-} ]] && { systemctl restart rp-net.service || return 1; }
   if [[ -n ${ACT[wg0]:-} ]]; then
-    if ip link show wg0 >/dev/null 2>&1; then wg syncconf wg0 <(wg-quick strip wg0) || return 1; else systemctl restart wg-quick@wg0 || return 1; fi
+    if ip link show wg0 >/dev/null 2>&1; then wg_sync_live wg0 /etc/wireguard/wg0.conf || return 1; else systemctl restart wg-quick@wg0 || return 1; fi
   fi
   if [[ -n ${ACT[wgexit]:-} ]]; then
-    if ip link show wg-exit >/dev/null 2>&1; then wg syncconf wg-exit <(wg-quick strip wg-exit) || return 1; else systemctl restart wg-quick@wg-exit || return 1; fi
+    if ip link show wg-exit >/dev/null 2>&1; then wg_sync_live wg-exit /etc/wireguard/wg-exit.conf || return 1; else systemctl restart wg-quick@wg-exit || return 1; fi
   fi
   for a in "${!ACT[@]}"; do [[ $a == restart:* ]] && { systemctl restart "${a#restart:}" || return 1; }; done
   return 0
@@ -933,7 +942,11 @@ vps1_units_sync() {
   else systemctl disable --now rp-hy2 >/dev/null 2>&1; fw_close "$(cf HY2_PORT)/udp"; fi
   if tr_has hy2o-wg; then anyhy=1; systemctl enable --now rp-hy2o >/dev/null 2>&1; fw_open "$(cf HY2O_PORT)/udp"
   else systemctl disable --now rp-hy2o >/dev/null 2>&1; [[ -n $(cf HY2O_PORT) ]] && fw_close "$(cf HY2O_PORT)/udp"; fi
-  if ((anyhy)); then systemctl enable --now wg-quick@wg-exit >/dev/null 2>&1; else systemctl disable --now wg-quick@wg-exit >/dev/null 2>&1; fi
+  if ((anyhy)); then
+    systemctl enable --now wg-quick@wg-exit >/dev/null 2>&1 || return 1
+    wg_sync_live wg-exit /etc/wireguard/wg-exit.conf || return 1
+  else systemctl disable --now wg-quick@wg-exit >/dev/null 2>&1; fi
+  if ip link show wg0 >/dev/null 2>&1; then wg_sync_live wg0 /etc/wireguard/wg0.conf || return 1; fi
   if tr_has reality-xhttp; then fw_open "$(cf RXH_PORT)/tcp"; else [[ -n $(cf RXH_PORT) ]] && fw_close "$(cf RXH_PORT)/tcp"; fi
   if tr_has reality-xhttp2; then fw_open "$(cf RXH2_PORT)/tcp"; else [[ -n $(cf RXH2_PORT) ]] && fw_close "$(cf RXH2_PORT)/tcp"; fi
   return 0
