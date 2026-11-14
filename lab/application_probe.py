@@ -6,6 +6,7 @@ import secrets
 import socket
 import ssl
 import struct
+import sys
 
 p=argparse.ArgumentParser();p.add_argument('protocol',choices=['dot','stun'])
 p.add_argument('--host',default='stun.l.google.com');p.add_argument('--port',type=int,default=19302)
@@ -31,6 +32,7 @@ else:
     tx=secrets.token_bytes(12);cookie=0x2112A442
     request=struct.pack('!HHI',0x0001,0,cookie)+tx
     target=socket.gethostbyname(a.host)
+    print(json.dumps(dict(protocol='STUN/UDP',phase='attempt',server=target,port=a.port)),file=sys.stderr,flush=True)
     with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as sock:
         sock.settimeout(10);sock.connect((target,a.port));sock.send(request);reply=sock.recv(2048)
     kind,length,magic=struct.unpack('!HHI',reply[:8])

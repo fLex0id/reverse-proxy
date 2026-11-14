@@ -15,8 +15,9 @@ below `lab/private` (both ignored, mode 0700).
   alone is not a leak-test PASS. Review skipped T8/static T7 explicitly.
 - `dns-probe.py RESOLVER NAME [--type NUMBER] [--tcp]`: standard-library DNS probe
   with no alternate/system resolver fallback.
-- `failclosed.py --lab1 ALIAS --client ALIAS --output DIR`: stop only rp-xray after
-  arming independent systemd restoration; verify blocked client requests and recovery.
+- `failclosed.py --lab1 ALIAS --lab2 ALIAS --client ALIAS --output DIR`: verify a
+  working client, arm independent restoration, then stop only rp-xray. Record
+  blocked requests and recovery with valid streamed captures on all three hosts.
 - `transaction_e2e.py`: run on LAB-2 with `/root/rp-lab/transaction-current.py` from
   `src/transaction.py`. Exercises real backup, corruption rejection, rollback,
   preservation of unrelated SSH changes and confirm/rollback races. Requires an
@@ -47,6 +48,10 @@ below `lab/private` (both ignored, mode 0700).
 - `prepare_enospc.py`: run on LAB-2 with the same helper path as transaction E2E.
   Cause real ENOSPC in a 128-KiB transaction-directory tmpfs, verify recovery,
   then unmount it. The root filesystem is not filled.
+- `reboot_recovery.py` takes the four host/output arguments. Pin packet-up, prepare
+  a durable transaction, mutate two rp-owned fixture files, actually reboot LAB-2,
+  then check automatic restoration, cleanup, supervision, manual pin and client
+  HTTPS. Requires independent management SSH; never overlap another fault suite.
 - `dns_source_reuse.py`: run inside the client namespace; send DNS queries to
   three resolver addresses from one UDP source port and validate the reply source.
 - `dns_redirect_trial.py`: LAB-1-only experimental regression fixture. Temporarily

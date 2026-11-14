@@ -11,8 +11,8 @@
     },
     {
       "id": "F02",
-      "result": "NOT_TESTED",
-      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+      "result": "UNKNOWN",
+      "reason": "Partial migration/reinstall fixtures pass; full self-update rollback and stream-launch acceptance pending"
     },
     {
       "id": "F03",
@@ -21,23 +21,23 @@
     },
     {
       "id": "F04",
-      "result": "NOT_TESTED",
-      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+      "result": "UNKNOWN",
+      "reason": "Scoped ordinary push, 30-minute rollback, SIGKILL/ENOSPC preparation, real reboot recovery and races pass; complete installer failure/concurrency matrix pending"
     },
     {
       "id": "F05",
-      "result": "NOT_TESTED",
-      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+      "result": "UNKNOWN",
+      "reason": "Four transport pins, auto, sync and routing readback exercised; complete split-brain and failure matrix pending"
     },
     {
       "id": "F06",
-      "result": "NOT_TESTED",
-      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+      "result": "UNKNOWN",
+      "reason": "Four full transport checks plus repeated T3 pass; one failover scenario measured; complete watchdog/fault/load matrix pending"
     },
     {
       "id": "F07",
-      "result": "NOT_TESTED",
-      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+      "result": "UNKNOWN",
+      "reason": "Built-in checks including restart exercised; static T7 kept separate; complete diagnostic failure/UNKNOWN semantics pending"
     },
     {
       "id": "F08",
@@ -51,8 +51,8 @@
     },
     {
       "id": "F10",
-      "result": "FAIL",
-      "reason": "RP-013: packet-confirmed DNS reply uses a previous resolver address when a client UDP source port is reused; other DNS acceptance scenarios still pending",
+      "result": "UNKNOWN",
+      "reason": "RP-013 candidate fix installed after deterministic reproduction; full lab.4 regression and resolver outage/reapply/reboot acceptance pending",
       "evidence": [
         "reports/DEFECTS.md#rp-013-p1-dns-reply-source-reused-across-resolver-destinations",
         "lab/dns_source_reuse.py"
@@ -70,8 +70,8 @@
     },
     {
       "id": "F13",
-      "result": "NOT_TESTED",
-      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+      "result": "UNKNOWN",
+      "reason": "28 menu branch lock fixtures pass; complete interactive behavior and concurrent live operations pending"
     }
   ]
 }

@@ -24,9 +24,9 @@ Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
 
 ## Current checkpoint (2026-11-14)
 
-Installed candidate: a1f7ba6, 1.2.9-lab.3. Ordinary VPS-1 migration and VPS-2
+Installed candidate: 61dbdf5, 1.2.9-lab.4. Ordinary VPS-1 migration and VPS-2
 push completed; all four full T1-T3 passed and transaction reached COMMITTED.
-79 local regression tests and generated-code static checks pass.
+82 local regression tests and generated-code static checks pass.
 Final clean installation and six-hour soak have NOT started.
 
 New commits since dcee312:
@@ -34,16 +34,32 @@ New commits since dcee312:
 - 7e2905f: inner WG MTU 1280 with explicit factory migration and validation;
   actual ENOSPC/MTU comparison and four-transport regression tooling.
 - a1f7ba6: update live WG MTU on apply and restore it from rollback files.
+- 61dbdf5: preserve intercepted DNS reply addresses across reused UDP ports.
 
 Actual ENOSPC during transaction preparation: 6/6 checks PASS, cleanup complete.
 HTTP/3 with each Hysteria variant: FAIL at MTU 1080, PASS at 1280, with simultaneous
 client/LAB-1/LAB-2 PCAPs; no direct LAB-1 packets to the control destination.
-Expanded lab.3 regression is running. Earlier lab.2 run passed 120 consecutive
+Expanded lab.3 regression completed: all four HTTP/3 cases, 120 additional T3
+checks, 768 ordinary DNS behaviors and Cloudflare STUN passed. Google STUN failed.
+See REGRESSION-2026-11-14.md for packet attribution and limits. Earlier lab.2 run passed 120 consecutive
 T3 payload checks (30 per transport), but exposed HY2 HTTP/3 and a DNS reply-source
 defect. DoH/Quad9 remained intermittent. Google numeric STUN also fails directly
 from LAB-2; an additional independent Cloudflare STUN case is now retained.
 
-RP-013 remains OPEN: one reused client UDP source port can receive a DNS answer
-from a previous resolver address. Packet proof is retained. A dedicated same-port
-test and isolated DNS redirect prototype are prepared; the prototype is not
-deployed in the candidate and must be tested after the current regression.
+RP-013 candidate fix is installed: conntrack-backed DNS redirect preserves the
+queried resolver address without changing general UDP behavior or split-DNS policy.
+The prototype passed 90 same-port and 192 ordinary DNS checks after startup;
+four initial timeout probes remain recorded. Full lab.4 regression is next.
+
+Lab.4 sustained-Xray-outage test: HTTPS/IPv6 blocked, DNS refused with no answer,
+no direct control-destination flow or foreign control-name DNS on LAB-1; HTTPS
+restored in 6.914 seconds. Route-sync supervision was paused during the sustained
+fault and independently restored. The first unpaused attempt is UNKNOWN because
+the timer automatically restarted Xray about three seconds into the probe window.
+The new DNS port is blocked from underlay over TCP and UDP.
+
+Real LAB-2 reboot in INSTALLING: seven scoped checks PASS. Boot changed, automatic
+rollback completed in 30.365 seconds, old config hash restored, new owned file and
+backup/pending removed, watch/live tunnel healthy, manual pin preserved, client
+HTTPS working. This used controlled owned-file mutation, not every installer
+failure point. Full clean/reboot/load/concurrency acceptance is still pending.
