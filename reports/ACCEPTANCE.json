@@ -1,0 +1,77 @@
+{
+  "verdict": "NOT_READY",
+  "baseline": "3d3077d8940ac136b25cae4a6667a26531843a11",
+  "soak_required_hours": 6,
+  "rocky9": "NOT_TESTED",
+  "items": [
+    {
+      "id": "F01",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F02",
+      "result": "UNKNOWN",
+      "reason": "Partial migration/reinstall fixtures pass; full self-update rollback and stream-launch acceptance pending"
+    },
+    {
+      "id": "F03",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F04",
+      "result": "UNKNOWN",
+      "reason": "Scoped ordinary push, 30-minute rollback, SIGKILL/ENOSPC preparation, real reboot recovery and races pass; complete installer failure/concurrency matrix pending"
+    },
+    {
+      "id": "F05",
+      "result": "UNKNOWN",
+      "reason": "Four transport pins, auto, sync and routing readback exercised; complete split-brain and failure matrix pending"
+    },
+    {
+      "id": "F06",
+      "result": "UNKNOWN",
+      "reason": "Four full transport checks plus repeated T3 pass; one failover scenario measured; complete watchdog/fault/load matrix pending"
+    },
+    {
+      "id": "F07",
+      "result": "UNKNOWN",
+      "reason": "Built-in checks including restart exercised; static T7 kept separate; complete diagnostic failure/UNKNOWN semantics pending"
+    },
+    {
+      "id": "F08",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F09",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F10",
+      "result": "UNKNOWN",
+      "reason": "RP-013 candidate fix installed after deterministic reproduction; full lab.4 regression and resolver outage/reapply/reboot acceptance pending",
+      "evidence": [
+        "reports/DEFECTS.md#rp-013-p1-dns-reply-source-reused-across-resolver-destinations",
+        "lab/dns_source_reuse.py"
+      ]
+    },
+    {
+      "id": "F11",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F12",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F13",
+      "result": "UNKNOWN",
+      "reason": "28 menu branch lock fixtures pass; complete interactive behavior and concurrent live operations pending"
+    }
+  ]
+}

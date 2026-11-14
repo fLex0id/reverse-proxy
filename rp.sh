@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # rp — клиенты WG → VPS-1 (РФ) → туннель (XHTTP/HY2) → VPS-2 (выход).
+# 1.2.9-lab.2: durable prepare recovery, bounded failover, identity-preserving reinstall, scoped removal; lab acceptance pending.
 # 1.2.8: audit fixes (backup perms, early rollback timer, confirm checks, menu locks, rp.sh URL, stale files).
 # 1.2.7: RU-list download fallbacks/resume, fast observatory, SSH-door wait in rp test, exact probe byte counts.
 # 1.2.6: complete SNI + all transport validation, Xray 26.4.25-compatible DNS, strict RU lists.
@@ -11,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.8-audit-fixes"
+SELF_VERSION="1.2.9-lab.4"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -180,7 +181,13 @@ pause() { [[ -t 0 ]] && { ui_printf '\n%s  Любая клавиша - наза�
 STEP_N=0; STEP_I=0
 steps() { STEP_N=$1; STEP_I=0; }
 step() { STEP_I=$((STEP_I + 1)); ui_printf '\n%s%s%d/%d%s  %s\n' "$B" "$C_ACC" "$STEP_I" "$STEP_N" "$R" "$*"; }
-dot_state() { if systemctl is-active --quiet "$1" 2>/dev/null; then if (( ASCII_MODE )); then printf '[UP] running'; else printf '%s●%s работает' "$C_OK" "$R"; fi; else if (( ASCII_MODE )); then printf '[DOWN] stopped'; else printf '%s●%s остановлена' "$C_ERR" "$R"; fi; fi; }
+dot_state() {
+  if systemctl is-active --quiet "$1" 2>/dev/null; then
+    if (( ASCII_MODE )); then printf '[UP] running'; else printf '%s●%s работает' "$C_OK" "$R"; fi
+  else
+    if (( ASCII_MODE )); then printf '[DOWN] stopped'; else printf '%s●%s остановлена' "$C_ERR" "$R"; fi
+  fi
+}
 
 KV_W=18
 card() { if (( ASCII_MODE )); then ui_printf '  +-- %s\n' "$1"; else printf '  %s┌─ %s%s\n' "$C_DIM" "$1" "$R"; fi; }
@@ -491,12 +498,37 @@ secrets_reality() {
   conf_set RL_PRIV "$a" RL_PUB "$b" RL_SID "$(rand_hex 8)" \
     RL_UUID_X "$(uuid)" RL_UUID_T "$(uuid)" RL_UUID_PX "$(uuid)" RL_UUID_PT "$(uuid)"
 }
+# Reinstall preserves complete key groups. Partial groups are an error, not an
+# excuse to rotate keys and silently disconnect existing clients/peers.
+secrets_ensure() {
+  local generator=$1 key present=0; shift
+  for key in "$@"; do [[ -z $(cf "$key") ]] || present=$((present + 1)); done
+  ((present == $#)) && return 0
+  ((present == 0)) || { err "Неполный набор ключей: восстановите конфигурацию; автоматическая смена запрещена"; return 1; }
+  "$generator"
+}
 secrets_extra() { # пароль локального SOCKS, пароль обфускации Hysteria2
   [[ -n $(cf SOCKS_PASS) ]] || conf_set SOCKS_USER "rp$(rand_hex 3)" SOCKS_PASS "$(rand_pass)"
   [[ -n $(cf HY2O_OBFS) ]] || conf_set HY2O_OBFS "$(rand_pass)"
 }
 hy2_cert() { # самоподписанный сертификат: DPI его не видит, клиент проверяет pinSHA256
-  local sni=$1 fp
+  local sni=$1 fp pin cert_pub key_pub
+  # A reinstall must not rotate the certificate pinned on the running VPS-2.
+  if [[ -e $ETC/hy2.key || -e $ETC/hy2.crt || -n $(cf HY2_PIN) ]]; then
+    [[ -s $ETC/hy2.key && -s $ETC/hy2.crt && -n $(cf HY2_PIN) ]] || {
+      err "Неполный сертификат Hysteria2: восстановите ключ, сертификат и HY2_PIN из резервной копии"; return 1;
+    }
+    openssl x509 -in "$ETC/hy2.crt" -noout -checkend 0 -checkhost "$sni" >/dev/null 2>&1 || {
+      err "Сертификат Hysteria2 истёк или не соответствует SNI; требуется согласованное обновление обоих серверов"; return 1;
+    }
+    cert_pub=$(openssl x509 -in "$ETC/hy2.crt" -pubkey -noout 2>/dev/null) || return 1
+    key_pub=$(openssl pkey -in "$ETC/hy2.key" -pubout 2>/dev/null) || return 1
+    [[ -n $cert_pub && $cert_pub == "$key_pub" ]] || { err "Ключ Hysteria2 не соответствует сертификату"; return 1; }
+    fp=$(openssl x509 -in "$ETC/hy2.crt" -noout -fingerprint -sha256 | cut -d= -f2) || return 1
+    pin=$(cf HY2_PIN); pin=${pin^^}
+    [[ ${fp//:/} == "${pin//:/}" ]] || { err "HY2_PIN не соответствует существующему сертификату"; return 1; }
+    return 0
+  fi
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
     -subj "/CN=$sni" -addext "subjectAltName=DNS:$sni" -keyout "$ETC/hy2.key" -out "$ETC/hy2.crt" 2>/dev/null || return 1
   chown root:rp "$ETC/hy2.key" "$ETC/hy2.crt"; chmod 640 "$ETC/hy2.key"; chmod 644 "$ETC/hy2.crt"
@@ -573,7 +605,7 @@ sni_scan() {
 }
 SNI_CACHE=""
 sni_choose() { # sni_choose ПЕРЕМЕННАЯ «Заголовок» reality|masq [исключить-хост]
-  local var=$1 title=$2 kind=$3 skip=${4:-} h chk ru line shown=0
+  local var=$1 title=$2 kind=$3 skip=${4:-} h chk ru line
   [[ -n "${!var:-}" ]] && return 0
   if [[ -z $SNI_CACHE || ! -s $SNI_CACHE ]]; then
     SNI_CACHE=$(mktemp "$STATE/snicache.XXXXXX")
@@ -767,8 +799,8 @@ Description=rp: detect VPS-2 automatic failover and mirror active route
 
 [Timer]
 OnBootSec=45s
-OnUnitInactiveSec=20s
-RandomizedDelaySec=15s
+OnUnitInactiveSec=3s
+RandomizedDelaySec=1s
 AccuracySec=1s
 Unit=rp-route-sync.service
 
@@ -853,14 +885,23 @@ EOF
 declare -gA ACT=()
 unit_up() { local i; for i in 1 2 3; do systemctl is-active --quiet "$1" || return 1; sleep 1; done; }
 tr_has() { [[ " $(cf TRANSPORT_ORDER) " == *" $1 "* ]]; }
+wg_sync_live() {
+  local interface=$1 path=$2 mtu
+  # wg syncconf ignores wg-quick's MTU. Read the installed file so rollback
+  # restores the old link MTU too, even while rp.conf still holds new values.
+  mtu=$(sed -n 's/^MTU = \([0-9]\+\)$/\1/p' "$path")
+  [[ $mtu =~ ^[0-9]+$ ]] || { err "Нет корректного MTU в $path"; return 1; }
+  wg syncconf "$interface" <(wg-quick strip "$path") || return 1
+  ip link set dev "$interface" mtu "$mtu"
+}
 vps1_actions() {
   local a
   [[ -n ${ACT[nft]:-} ]] && { systemctl restart rp-net.service || return 1; }
   if [[ -n ${ACT[wg0]:-} ]]; then
-    if ip link show wg0 >/dev/null 2>&1; then wg syncconf wg0 <(wg-quick strip wg0) || return 1; else systemctl restart wg-quick@wg0 || return 1; fi
+    if ip link show wg0 >/dev/null 2>&1; then wg_sync_live wg0 /etc/wireguard/wg0.conf || return 1; else systemctl restart wg-quick@wg0 || return 1; fi
   fi
   if [[ -n ${ACT[wgexit]:-} ]]; then
-    if ip link show wg-exit >/dev/null 2>&1; then wg syncconf wg-exit <(wg-quick strip wg-exit) || return 1; else systemctl restart wg-quick@wg-exit || return 1; fi
+    if ip link show wg-exit >/dev/null 2>&1; then wg_sync_live wg-exit /etc/wireguard/wg-exit.conf || return 1; else systemctl restart wg-quick@wg-exit || return 1; fi
   fi
   for a in "${!ACT[@]}"; do [[ $a == restart:* ]] && { systemctl restart "${a#restart:}" || return 1; }; done
   return 0
@@ -883,7 +924,7 @@ vps1_check() {
   ss -lnt 2>/dev/null | grep -q ':14205 ' || { err "Xray не слушает TPROXY-порт"; return 1; }
   if tr_has reality-xhttp || tr_has reality-xhttp2; then
     local api_ok=0 check_n
-    for check_n in 1 2 3 4 5; do
+    for ((check_n=1; check_n<=5; check_n++)); do
       if "$XRAY_BIN" api bi --server=127.0.0.1:10085 exit >/dev/null 2>&1; then api_ok=1; break; fi
       sleep 1
     done
@@ -901,7 +942,11 @@ vps1_units_sync() {
   else systemctl disable --now rp-hy2 >/dev/null 2>&1; fw_close "$(cf HY2_PORT)/udp"; fi
   if tr_has hy2o-wg; then anyhy=1; systemctl enable --now rp-hy2o >/dev/null 2>&1; fw_open "$(cf HY2O_PORT)/udp"
   else systemctl disable --now rp-hy2o >/dev/null 2>&1; [[ -n $(cf HY2O_PORT) ]] && fw_close "$(cf HY2O_PORT)/udp"; fi
-  if ((anyhy)); then systemctl enable --now wg-quick@wg-exit >/dev/null 2>&1; else systemctl disable --now wg-quick@wg-exit >/dev/null 2>&1; fi
+  if ((anyhy)); then
+    systemctl enable --now wg-quick@wg-exit >/dev/null 2>&1 || return 1
+    wg_sync_live wg-exit /etc/wireguard/wg-exit.conf || return 1
+  else systemctl disable --now wg-quick@wg-exit >/dev/null 2>&1; fi
+  if ip link show wg0 >/dev/null 2>&1; then wg_sync_live wg0 /etc/wireguard/wg0.conf || return 1; fi
   if tr_has reality-xhttp; then fw_open "$(cf RXH_PORT)/tcp"; else [[ -n $(cf RXH_PORT) ]] && fw_close "$(cf RXH_PORT)/tcp"; fi
   if tr_has reality-xhttp2; then fw_open "$(cf RXH2_PORT)/tcp"; else [[ -n $(cf RXH2_PORT) ]] && fw_close "$(cf RXH2_PORT)/tcp"; fi
   return 0
@@ -1173,7 +1218,7 @@ ru_update() { # обновление: geosite РФ + штатная geoip Xray; 
 }
 
 # ── VPS-2: файлы пакета (CLI, сторож, юниты) и установочный блок ────────
-# Всё, что попадает на VPS-2, — чистый bash без Python; конфиги статичны (их генерирует VPS-1).
+# VPS-2: Bash CLI/watchdog, статичные конфиги и Python 3 для надёжного отката.
 
 # pin_release — SHA256 релизов Xray/Hysteria2 для обеих архитектур (без скачивания бинарников)
 pin_release() {
@@ -1194,8 +1239,386 @@ pin_release() {
   rm -rf "${tmp:?}"
 }
 
+# BEGIN GENERATED TRANSACTION HELPER
+transaction_source() { cat <<'RP_TRANSACTION_PY'
+#!/usr/bin/env python3
+"""Durable VPS-2 update transaction. Embedded verbatim into the deployable rp.sh.
+
+Only rp-owned paths are restored. Services are stopped during restoration; this
+is a recoverable transaction, not a claim of a filesystem-wide atomic rename.
+"""
+import datetime
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+
+STATE = Path('/var/lib/rp')
+TX = STATE / 'transaction'
+META = TX / 'state.json'
+BACKUP = STATE / 'backup.tgz'
+TIMER = 'rp-transaction-rollback.timer'
+UNITS = ['rp-watch.service', 'rp-xray@xhttp.service', 'rp-xray@xhttp2.service',
+         'rp-hy2.service', 'rp-hy2o.service', 'wg-quick@rp-wg.service', 'rp-nat.service']
+BASE_PATHS = ['etc/rp', 'usr/local/lib/rp', 'usr/local/bin/rp',
+              'usr/local/bin/xray', 'usr/local/bin/hysteria', 'usr/local/share/rp',
+              'etc/wireguard/rp-wg.conf', 'etc/sysctl.d/99-rp.conf',
+              'etc/firewalld/zones/rp-tunnel.xml',
+              'etc/firewalld/policies/rp-tunnel-egress.xml']
+STATE_NAMES = ['mode', 'active', 'since', 'usable', 'results', 'mode-request', 'mode-result']
+OWN_UNITS = ['rp-hy2.service', 'rp-hy2o.service', 'rp-xray@.service',
+             'rp-watch.service', 'rp-nat.service', 'rp-rollback.service']
+TRANSPORTS = {'reality-xhttp', 'reality-xhttp2', 'hy2-wg', 'hy2o-wg'}
+
+
+def command(*args, check=True, timeout=90):
+    r = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       text=True, timeout=timeout, env=dict(os.environ, RP_TX_INTERNAL='1'))
+    if check and r.returncode:
+        raise RuntimeError('command failed: ' + args[0] + ' ' + args[1])
+    return r
+
+
+def atomic(path, data, mode=0o600):
+    path = Path(path)
+    fd, name = tempfile.mkstemp(prefix='.' + path.name, dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            os.fchmod(f.fileno(), mode)
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(name, path)
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(fd)
+        finally: os.close(fd)
+    finally:
+        if os.path.exists(name): os.unlink(name)
+
+
+def save(meta): atomic(META, json.dumps(meta, indent=2) + '\n')
+def load(): return json.loads(META.read_text())
+def digest(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b''): h.update(chunk)
+    return h.hexdigest()
+
+
+def owned_keys():
+    p = Path('/root/.ssh/authorized_keys')
+    return [line for line in p.read_text().splitlines() if line.endswith(' rp@vps1')] if p.exists() else []
+
+
+def restore_keys(lines):
+    p = Path('/root/.ssh/authorized_keys')
+    existing = p.read_text().splitlines() if p.exists() else []
+    # Preserve every unrelated key, including additions made after prepare.
+    preserved = [line for line in existing if not line.endswith(' rp@vps1')]
+    atomic(p, '\n'.join(preserved + lines) + '\n')
+    command('restorecon', str(p), check=False)
+
+
+def paths():
+    return BASE_PATHS + ['var/lib/rp/' + n for n in STATE_NAMES] + [
+        'etc/systemd/system/' + n for n in OWN_UNITS]
+
+
+def valid_member(member, roots):
+    name = member.name.rstrip('/')
+    if name.startswith('/') or '..' in Path(name).parts:
+        return False
+    if not any(name == p or name.startswith(p + '/') for p in roots):
+        return False
+    # Configs and binaries are regular files/directories. Refuse extraction of
+    # devices, FIFOs and links instead of following an attacker-controlled path.
+    return member.isfile() or member.isdir()
+
+
+def arm(meta):
+    deadline = datetime.datetime.fromtimestamp(meta['deadline'], datetime.timezone.utc)
+    unit_dir = Path('/etc/systemd/system')
+    atomic(unit_dir/'rp-transaction-rollback.service', '''[Unit]
+Description=rp: durable transaction rollback
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /var/lib/rp/transaction/runner.py rollback
+TimeoutStartSec=300
+''', 0o644)
+    atomic(unit_dir/TIMER, '[Unit]\nDescription=rp: unconfirmed update deadline\n[Timer]\nOnCalendar=' +
+           deadline.strftime('%Y-%m-%d %H:%M:%S UTC') + '\nPersistent=true\nAccuracySec=1s\n[Install]\nWantedBy=timers.target\n', 0o644)
+    atomic(unit_dir/'rp-transaction-recover.service', '''[Unit]
+Description=rp: recover interrupted update after reboot
+After=local-fs.target network-online.target
+Before=rp-watch.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /var/lib/rp/transaction/runner.py recover
+TimeoutStartSec=300
+[Install]
+WantedBy=multi-user.target
+''', 0o644)
+    command('restorecon', '-R', str(TX), str(unit_dir), check=False)
+    command('systemctl', 'daemon-reload')
+    command('systemctl', 'enable', 'rp-transaction-recover.service')
+    command('systemctl', 'enable', '--now', TIMER)
+    command('systemctl', 'is-active', '--quiet', TIMER)
+
+
+def disarm():
+    command('systemctl', 'disable', '--now', TIMER, check=False)
+    command('systemctl', 'disable', 'rp-transaction-recover.service', check=False)
+    if command('systemctl', 'is-active', '--quiet', TIMER, check=False).returncode == 0:
+        raise RuntimeError('rollback timer remains active')
+
+
+def restore_watch(meta, boot_recovery=False):
+    if not meta['watch_active']: return
+    command('systemctl', 'enable', 'rp-watch')
+    # Boot recovery is ordered before the watcher; waiting for its start here
+    # would deadlock against this very recovery service.
+    if boot_recovery:
+        command('systemctl', '--no-block', 'start', 'rp-watch')
+    else:
+        command('systemctl', 'start', 'rp-watch')
+        command('systemctl', 'is-active', '--quiet', 'rp-watch')
+
+
+def finish_rollback(meta, boot_recovery=False):
+    # Retryable finalization: persist the terminal state only after supervision
+    # is restored; a later invocation can finish timer/archive cleanup safely.
+    (TX/'installing').unlink(missing_ok=True)
+    restore_watch(meta, boot_recovery)
+    meta['phase'] = 'ROLLED_BACK'
+    save(meta)
+    disarm()
+    BACKUP.unlink(missing_ok=True)
+    (TX/'pending').unlink(missing_ok=True)
+    Path('/root/.rp-push.sh').unlink(missing_ok=True)
+
+
+def abort_prepare(meta, boot_recovery=False):
+    # No bundle files may be installed until INSTALLING has been persisted.
+    # An incomplete archive must never be extracted over the intact old version.
+    (TX/'preparing.tgz').unlink(missing_ok=True)
+    meta['reason'] = 'preparation interrupted before bundle mutation'
+    finish_rollback(meta, boot_recovery)
+
+
+def prepare(pid):
+    if META.exists() and load()['phase'] not in ('COMMITTED', 'ROLLED_BACK'):
+        raise RuntimeError('a previous transaction is unresolved; confirm or rollback it first')
+    if not Path('/etc/rp/rp2.conf').exists():
+        raise RuntimeError('safe update requires an installed VPS-2')
+    TX.mkdir(mode=0o700, parents=True, exist_ok=True)
+    TX.chmod(0o700)
+    if command('systemctl', 'is-active', '--quiet', 'rp-rollback-run.timer', check=False).returncode == 0:
+        raise RuntimeError('legacy update still pending; resolve it before migration')
+    old_watch = command('systemctl', 'is-active', '--quiet', 'rp-watch', check=False).returncode == 0
+    roots = paths()
+    published = False
+    archive = TX/'preparing.tgz'
+    try:
+        atomic(TX/'runner.py', Path(__file__).read_text())
+        meta = dict(phase='PREPARING', created=time.time(), deadline=int(time.time()) + 1800,
+                    boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                    pid=pid, pid_start=Path('/proc/%d/stat' % pid).read_text().split()[21],
+                    paths=roots, keys=owned_keys(), watch_active=old_watch)
+        save(meta)
+        published = True
+        arm(meta)
+        # Recovery is durable BEFORE pausing supervision or writing an archive.
+        atomic(TX/'installing', 'installing\n')
+        atomic(TX/'pending', 'pending\n')
+        command('systemctl', 'stop', 'rp-watch')
+        fd = os.open(archive, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.close(fd)
+        with tarfile.open(archive, 'w:gz') as tf:
+            for p in roots:
+                actual = Path('/') / p
+                if actual.exists() or actual.is_symlink(): tf.add(actual, arcname=p, recursive=True)
+        with tarfile.open(archive, 'r:gz') as tf:
+            if not all(valid_member(m, roots) for m in tf):
+                raise RuntimeError('unsupported link/device in managed backup paths')
+        with open(archive, 'rb') as f: os.fsync(f.fileno())
+        os.replace(archive, BACKUP)
+        directory_fd = os.open(STATE, os.O_RDONLY | os.O_DIRECTORY)
+        try: os.fsync(directory_fd)
+        finally: os.close(directory_fd)
+        meta['phase'] = 'INSTALLING'
+        meta['sha256'] = digest(BACKUP)
+        save(meta)
+    except Exception:
+        # No bundle mutation has started, so even an archive failure is safe to
+        # abort. SIGKILL/power loss is handled by the same persisted PREPARING state.
+        if published:
+            abort_prepare(meta)
+        raise
+    print('Transaction armed; verified private backup and reboot recovery ready')
+
+
+def ready():
+    meta = load()
+    if meta['phase'] != 'INSTALLING': raise RuntimeError('not an installing transaction')
+    meta['phase'] = 'READY'
+    save(meta)
+    (TX/'installing').unlink(missing_ok=True)
+    command('systemctl', 'enable', '--now', 'rp-watch')
+    command('systemctl', 'is-active', '--quiet', 'rp-watch')
+
+
+def validate_results():
+    conf = {}
+    for line in Path('/etc/rp/rp2.conf').read_text().splitlines():
+        if '=' in line:
+            k, v = line.split('=', 1); conf[k] = v.strip('"')
+    expected = conf.get('TRANSPORT_ORDER', '').split()
+    if not expected or not set(expected) <= TRANSPORTS: raise RuntimeError('invalid transport order')
+    seen = {}
+    for line in (STATE/'results').read_text().splitlines():
+        parts = line.split('=')
+        if len(parts) != 2 or parts[0] in seen or parts[1] != 'ok':
+            raise RuntimeError('incomplete, failed or duplicated transport results')
+        seen[parts[0]] = parts[1]
+    if set(seen) != set(expected): raise RuntimeError('missing transport results')
+    if (STATE/'push.rc').read_text().strip() != '0': raise RuntimeError('installer has not succeeded')
+    command('/usr/local/bin/rp', '_func', timeout=60)
+    command('systemctl', 'is-active', '--quiet', 'rp-watch')
+
+
+def confirm():
+    meta = load()
+    if meta['phase'] == 'COMMITTED':
+        disarm()
+        BACKUP.unlink(missing_ok=True)
+        (TX/'pending').unlink(missing_ok=True)
+        Path('/root/.rp-push.sh').unlink(missing_ok=True)
+        return
+    if meta['phase'] != 'READY' or time.time() >= meta['deadline']:
+        raise RuntimeError('not ready or confirmation deadline expired')
+    validate_results()
+    if digest(BACKUP) != meta['sha256']: raise RuntimeError('backup checksum mismatch')
+    if time.time() >= meta['deadline']: raise RuntimeError('confirmation deadline expired during validation')
+    # The shared lock serializes this durable commit with a running rollback.
+    # A late timer sees COMMITTED and cannot restore old files.
+    meta['phase'] = 'COMMITTED'; save(meta)
+    disarm()
+    BACKUP.unlink(missing_ok=True)
+    (TX/'pending').unlink(missing_ok=True)
+    Path('/root/.rp-push.sh').unlink(missing_ok=True)
+    print('Update COMMITTED after complete transport results and live probe')
+
+
+def stop_installer(meta):
+    if meta['boot_id'] != Path('/proc/sys/kernel/random/boot_id').read_text().strip(): return
+    pid = meta['pid']
+    try:
+        if Path('/proc/%d/stat' % pid).read_text().split()[21] != meta['pid_start']: return
+    except FileNotFoundError: return
+    # The installer is launched by setsid for push; never signal an unrelated
+    # console process group. Kill only this exact process and its descendants.
+    def children(parent):
+        found = []
+        try: ids = Path('/proc/%d/task/%d/children' % (parent, parent)).read_text().split()
+        except FileNotFoundError: return found
+        for n in ids:
+            found.extend(children(int(n))); found.append(int(n))
+        return found
+    for target in children(pid) + [pid]:
+        try: os.kill(target, signal.SIGKILL)
+        except ProcessLookupError: pass
+
+
+def rollback(from_installer=False, boot_recovery=False):
+    meta = load()
+    if meta['phase'] == 'COMMITTED': return
+    if meta['phase'] == 'ROLLED_BACK':
+        finish_rollback(meta, boot_recovery)
+        return
+    if meta['phase'] == 'PREPARING':
+        if not from_installer: stop_installer(meta)
+        abort_prepare(meta, boot_recovery)
+        print('Preparation aborted; previous installation was not modified')
+        return
+    if digest(BACKUP) != meta['sha256']: raise RuntimeError('backup checksum mismatch; no extraction attempted')
+    with tarfile.open(BACKUP, 'r:gz') as tf:
+        members = tf.getmembers()
+        if not all(valid_member(m, meta['paths']) for m in members):
+            raise RuntimeError('unsafe backup member; no extraction attempted')
+    if not from_installer: stop_installer(meta)
+    meta['phase'] = 'ROLLING_BACK'; save(meta)
+    for u in UNITS: command('systemctl', 'stop', u, check=False)
+    for p in meta['paths']:
+        target = Path('/') / p
+        if target.is_dir() and not target.is_symlink(): shutil.rmtree(target)
+        else: target.unlink(missing_ok=True)
+    # Only verified regular files/directories below fixed rp-owned roots.
+    with tarfile.open(BACKUP, 'r:gz') as tf:
+        # Already validated every member: fixed owned roots, no links/devices.
+        # Preserve owner/mode for service-readable secrets on older Python too.
+        options = {'filter': 'fully_trusted'} if hasattr(tarfile, 'fully_trusted_filter') else {}
+        tf.extractall('/', **options)
+    restore_keys(meta['keys'])
+    command('restorecon', '-R', '/etc/rp', '/usr/local/lib/rp', '/usr/local/bin', check=False)
+    command('systemctl', 'daemon-reload')
+    if command('systemctl', 'is-active', '--quiet', 'firewalld', check=False).returncode == 0:
+        command('firewall-cmd', '--reload')
+    command('/usr/local/bin/rp', 'fixnet')
+    command('/usr/local/bin/rp', 'restart')
+    # Service start is not tunnel readiness: the reverse bridge must connect,
+    # then the remote observatory must publish its first observation.
+    deadline = time.monotonic() + 90
+    while True:
+        if command('/usr/local/bin/rp', '_func', check=False, timeout=40).returncode == 0:
+            break
+        if time.monotonic() >= deadline:
+            raise RuntimeError('restored files, but previous tunnel did not become ready')
+        time.sleep(2)
+    finish_rollback(meta, boot_recovery)
+    print('Rollback restored the previous version and verified its active tunnel')
+
+
+def main():
+    if os.geteuid() != 0: raise RuntimeError('root required')
+    os.umask(0o077)
+    with open('/run/rp-transaction.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        action = sys.argv[1]
+        if action == 'prepare': prepare(int(sys.argv[2]))
+        elif action == 'ready': ready()
+        elif action == 'confirm': confirm()
+        elif action == 'rollback': rollback('--from-installer' in sys.argv)
+        elif action == 'recover':
+            if META.exists():
+                meta = load()
+                boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+                if meta['phase'] == 'COMMITTED': confirm()
+                elif meta['phase'] == 'ROLLED_BACK':
+                    finish_rollback(meta, boot_recovery=True)
+                elif meta['boot_id'] != boot: rollback(boot_recovery=True)
+        else: raise RuntimeError('unknown transaction command')
+
+if __name__ == '__main__':
+    try: main()
+    except Exception as exc:
+        print('rp transaction FAILED/UNKNOWN: ' + str(exc), file=sys.stderr)
+        sys.exit(1)
+RP_TRANSACTION_PY
+}
+# END GENERATED TRANSACTION HELPER
+
 vps2_files() { # vps2_files КАТАЛОГ — раскладывает CLI, сторож и юниты в дерево пакета
   local d=$1; mkdir -p "$d/usr/local/bin" "$d/usr/local/lib/rp" "$d/etc/systemd/system" "$d/etc/rp"
+  transaction_source >"$d/usr/local/lib/rp/transaction.py"
   # NAT как файл nft: загрузка идемпотентна (delete + create), счётчики для диагностики
   cat >"$d/etc/rp/nat.nft" <<'EOS'
 table ip rp_nat
@@ -1520,7 +1943,7 @@ diag() {
 cmd_select() {
   local rc
   trap 'systemctl enable --now rp-watch >/dev/null 2>&1; exit 130' INT TERM
-  cmd_select_body "$@"; rc=$?
+  cmd_select_body; rc=$?
   trap - INT TERM
   return $rc
 }
@@ -1756,7 +2179,7 @@ cmd_status() {
   say "Режим: $(mode_get); транспорт: ${t:-нет — fail-closed}"
   say "Приоритеты: $(tr_order); прошли первичный тест: $(tr '\n' ' ' <"$STATE/usable" 2>/dev/null)"
   say "Failback: $(failback_policy) (passive не прерывает рабочее соединение)"
-  say "Сквозная проба (HY2 и XHTTP): случайный интервал ${WATCH_MIN:-15}–${WATCH_MAX:-35} с; штатные QUIC/TCP keepalive не меняются"
+  say "Сквозная проба (HY2 и XHTTP): случайный интервал ${WATCH_MIN:-10}–${WATCH_MAX:-15} с; штатные QUIC/TCP keepalive не меняются"
   say "hy2: $(systemctl is-active rp-hy2)  hy2o: $(systemctl is-active rp-hy2o)  wg: $(systemctl is-active wg-quick@rp-wg)  xhttp: $(systemctl is-active rp-xray@xhttp)  xhttp2: $(systemctl is-active rp-xray@xhttp2)  сторож: $(systemctl is-active rp-watch)"
   [[ -n $t ]] && { func_ok "$t" && say "Проверка: туннель работает" || say "Проверка: туннель НЕ отвечает"; }
   [[ $t == hy2* ]] && wg show rp-wg latest-handshakes 2>/dev/null | awk '{print "Рукопожатие WG: " (($2>0)? systime()-$2 " с назад" : "не было")}'
@@ -1768,9 +2191,23 @@ cmd_logs() { journalctl -u rp-watch -u rp-hy2 -u rp-hy2o -u 'rp-xray@*' -u wg-qu
 cmd_restart() { local t; t=$(active); [[ -n $t ]] || { say "Транспорт не выбран: rp select"; return 1; }; tr_start "$t"; say "Перезапущено: $t"; }
 cmd_remove() {
   read -rp "Удалить rp с VPS-2 (туннель, конфиги, ключ SSH)? [y/N] " a; [[ ${a,,} == y ]] || return 0
-  systemctl disable --now rp-watch rp-nat >/dev/null 2>&1; systemctl stop rp-rollback-run.timer rp-rollback.timer >/dev/null 2>&1; rm -f /root/.rp-push.sh; tr_stop_all
-  rm -f /etc/systemd/system/rp-*.service /etc/systemd/system/rp-*.timer /etc/wireguard/rp-wg.conf /usr/local/lib/rp/watch.sh
-  rm -rf /etc/systemd/system/rp-* /usr/local/share/rp "$ETC" "$STATE"
+  # Exact owned units only: another application may also use the rp- prefix.
+  # Stop timers before removing the runner and handle absent legacy units singly.
+  local u
+  for u in rp-transaction-rollback.timer rp-rollback-run.timer rp-rollback.timer \
+    rp-transaction-recover.service rp-transaction-rollback.service rp-rollback-run.service \
+    rp-rollback.service rp-watch.service rp-nat.service rp-hy2.service rp-hy2o.service \
+    rp-xray@xhttp.service rp-xray@xhttp2.service rp-xray@tcp.service wg-quick@rp-wg.service; do
+    systemctl disable --now "$u" >/dev/null 2>&1 || true
+  done
+  tr_stop_all
+  for u in rp-watch.service rp-nat.service rp-hy2.service rp-hy2o.service rp-xray@.service \
+    rp-rollback.service rp-rollback.timer rp-rollback-run.service rp-rollback-run.timer \
+    rp-transaction-recover.service rp-transaction-rollback.service rp-transaction-rollback.timer; do
+    rm -f "/etc/systemd/system/$u"
+  done
+  rm -f /root/.rp-push.sh /etc/wireguard/rp-wg.conf
+  rm -rf /usr/local/lib/rp /usr/local/share/rp "$ETC" "$STATE"
   [[ -f /root/.ssh/authorized_keys ]] && sed -i '/ rp@vps1$/d' /root/.ssh/authorized_keys
   nft delete table ip rp_nat 2>/dev/null; rm -f /etc/sysctl.d/99-rp.conf
   if systemctl is-active --quiet firewalld; then
@@ -1781,14 +2218,18 @@ cmd_remove() {
   systemctl daemon-reload; say "Удалено. Бинарники /usr/local/bin/{xray,hysteria,rp} оставлены; rm — вручную."
 }
 cmd_confirm() {
-  systemctl stop rp-rollback-run.timer rp-rollback.timer >/dev/null 2>&1 || true
-  if systemctl is-active --quiet rp-rollback-run.timer || systemctl is-active --quiet rp-rollback.timer; then
-    say "Таймер отката не остановлен: обновление НЕ подтверждено" >&2; return 1
+  if [[ -f $STATE/transaction/state.json ]]; then
+    python3 "$STATE/transaction/runner.py" confirm
+    return $?
   fi
-  rm -f /root/.rp-push.sh "$STATE/backup.tgz" "$STATE/mode.before-identity" "$STATE/active.before-identity" "$STATE/since.before-identity"
-  say "Обновление подтверждено, откат отменён"
+  say "Нет проверяемой транзакции: подтверждение запрещено" >&2
+  return 1
 }
 cmd_rollback() {
+  if [[ -f $STATE/transaction/state.json ]]; then
+    python3 "$STATE/transaction/runner.py" rollback
+    return $?
+  fi
   [[ -f $STATE/backup.tgz ]] || { say "Резервной копии нет"; return 1; }
   tar -xzf "$STATE/backup.tgz" -C / || { say "Не удалось восстановить резервную копию" >&2; return 1; }
   local f
@@ -1813,10 +2254,21 @@ menu() {
       printf '\n◆ rp · VPS-2   транспорт: %s\n  1 Статус\n  2 Перезапуск\n  3 Журнал\n  4 Проверить все транспорты заново\n  5 Починить NAT и пересылку\n  6 Удалить\n  0 Выход\n› ' "$(active)"
     fi
     read -r c || exit 0
-    case $c in 1) cmd_status ;; 2) cmd_restart ;; 3) cmd_logs 60 ;; 4) cmd_select ;; 5) cmd_fixnet ;; 6) cmd_remove ;; 0) exit 0 ;; *) say "Введите число от 0 до 6" ;; esac
+    case $c in 1) cmd_status ;; 2) /usr/local/bin/rp restart ;; 3) cmd_logs 60 ;; 4) /usr/local/bin/rp select ;; 5) /usr/local/bin/rp fixnet ;; 6) /usr/local/bin/rp remove ;; 0) exit 0 ;; *) say "Введите число от 0 до 6" ;; esac
   done
 }
 if [[ ${1:-} == --ascii ]]; then RP_ASCII=1; export RP_ASCII; shift; fi
+case "${1:-menu}:${2:-}" in
+  mode:status|mode:result|mode:) : ;;
+  select:*|restart:*|remove:*|fixnet:*|mode:*|failback:*|_setorder:*)
+    if [[ ${RP_TX_INTERNAL:-0} != 1 ]]; then
+      exec 8>/run/rp-vps2-mutation.lock
+      flock -n 8 || { say "Другая операция VPS-2 выполняется" >&2; exit 1; }
+      if [[ -f $STATE/transaction/pending ]]; then
+        say "Обновление не завершено; требуется rollback" >&2; exit 1
+      fi
+    fi ;;
+esac
 case ${1:-menu} in
   menu) menu ;; status) cmd_status ;; restart) cmd_restart ;; logs) cmd_logs "${2:-80}" ;; select) cmd_select ;;
   test) t=$(active); t1_check "$t" && t2_check "$t" && t3_check "$t" && say "T1–T3: ок" ;;
@@ -1837,11 +2289,11 @@ set -u
 ST=/var/lib/rp
 # shellcheck disable=SC1091
 . /etc/rp/rp2.conf
-WATCH_MIN=${WATCH_MIN:-15}; WATCH_MAX=${WATCH_MAX:-35}
+WATCH_MIN=${WATCH_MIN:-10}; WATCH_MAX=${WATCH_MAX:-15}
 if [[ ! $WATCH_MIN =~ ^[0-9]+$ || ! $WATCH_MAX =~ ^[0-9]+$ ]] ||
    ((WATCH_MIN < 5 || WATCH_MAX > 120 || WATCH_MAX < WATCH_MIN)); then
-  logger -t rp-watch 'invalid WATCH_MIN/WATCH_MAX, using 15..35'
-  WATCH_MIN=15; WATCH_MAX=35
+  logger -t rp-watch 'invalid WATCH_MIN/WATCH_MAX, using 10..15'
+  WATCH_MIN=10; WATCH_MAX=15
 fi
 fn() { /usr/local/bin/rp _fn "$@"; }
 rand_between() {
@@ -1856,7 +2308,10 @@ activity_sleep() { sleep "$(rand_between "$WATCH_MIN" "$WATCH_MAX")"; }
 failback_policy_now() {
   [[ $(cat "$ST/failback-policy" 2>/dev/null || true) == active ]] && echo active || echo passive
 }
-error_sleep() { sleep "$(rand_between 8 15)"; }
+error_sleep() { sleep "$(rand_between 1 2)"; }
+# A bounded lightweight health sample, not a replacement for full T1/T2/T3.
+# Three consecutive failures are required before any automatic failover.
+health_probe() { timeout --kill-after=2 6 /usr/local/bin/rp _fn func_ok "$1"; }
 log() { logger -t rp-watch -- "$*"; }
 active() { cat "$ST/active" 2>/dev/null || true; }
 set_active() {
@@ -1868,7 +2323,8 @@ order_now() { fn tr_order; }
 # Cooldown per transport after failures; memory is intentionally reset on service restart.
 declare -A blocked_until=() strike=()
 penalize() {
-  local t=$1 now=$(date +%s) n=${strike[$1]:-0} seconds
+  local t=$1 now n=${strike[$1]:-0} seconds
+  now=$(date +%s) || return 1
   n=$((n + 1)); ((n > 4)) && n=4
   strike[$t]=$n
   seconds=$((300 * (1 << (n - 1))))  # 5, 10, 20, 40 minutes
@@ -1919,13 +2375,12 @@ mode_commit() {
 }
 process_mode_request() {
   [[ -s $ST/mode-request ]] || return 1
-  local id desired previous previous_mode status=fail t
+  local id desired previous status=fail t
   read -r id desired <"$ST/mode-request" || true
   [[ $id =~ ^[0-9a-f-]{8,64}$ ]] || { rm -f "$ST/mode-request"; return 0; }
   case $desired in auto|reality-xhttp|reality-xhttp2|hy2-wg|hy2o-wg) :;;
     *) mode_result "$id" fail; rm -f "$ST/mode-request"; return 0;; esac
   previous=$(active)
-  previous_mode=$(fn mode_get 2>/dev/null) || previous_mode=invalid
   if [[ $desired == auto ]]; then
     if mode_commit auto; then
       status=ok
@@ -1992,6 +2447,7 @@ errors=0; last_switch=$(date +%s)
 next_deep=$((last_switch + $(rand_between 480 900)))
 last_failback=0
 while :; do
+  if [[ -f $ST/transaction/installing ]]; then sleep 2; continue; fi
   if process_mode_request; then activity_sleep; continue; fi
   read -ra order <<<"$(order_now)"
   if ((${#order[@]} == 0)); then
@@ -2020,7 +2476,7 @@ while :; do
   fi
   now=$(date +%s)
   good=0
-  if fn func_ok "$t"; then good=1; fi
+  if health_probe "$t"; then good=1; fi
   if ((good && now >= next_deep)); then
     next_deep=$((now + $(rand_between 480 900)))
     fn t3_check "$t" >/dev/null || good=0
@@ -2078,6 +2534,23 @@ while :; do
   log "$t end-to-end probe failed ($errors/3)"
   if ((errors < 3)); then error_sleep; continue; fi
   errors=0
+  # In auto, validate a different eligible channel before retrying a known
+  # broken one. Retrying its full T2/T3 first can strand clients for minutes.
+  # Manual mode still retries only the pinned channel and stays fail-closed.
+  if [[ $(fn mode_get) == auto && ${#order[@]} -gt 1 ]]; then
+    penalize "$t"
+    clear_active
+    if choose_candidate "$t"; then
+      last_switch=$(date +%s)
+      next_deep=$((last_switch + $(rand_between 480 900)))
+      activity_sleep
+    else
+      fn tr_stop_all >/dev/null 2>&1 || true
+      log 'all eligible backup transports unavailable: fail-closed'
+      error_sleep
+    fi
+    continue
+  fi
   log "restarting unhealthy $t"
   if try_transport "$t"; then
     set_active "$t"; strike[$t]=0; blocked_until[$t]=0
@@ -2319,33 +2792,25 @@ rp_main() {
   exec </dev/null   # скрипт уже прочитан целиком (rp_main — последняя строка): команды не должны читать остаток потока
   [[ $EUID -eq 0 ]] || rp_fail "Нужен root"
   command -v dnf >/dev/null || rp_fail "Нужен dnf (Rocky Linux 9/10)"
-  local tmp xurl xsha hurl hsha
+  exec 8>/run/rp-vps2-mutation.lock
+  flock -n 8 || rp_fail "Другая операция VPS-2 выполняется"
+  command -v python3 >/dev/null || dnf -y install python3 >/dev/null 2>&1 || rp_fail "Не удалось установить python3 для безопасного обновления"
+  local xurl xsha hurl hsha
   tmp=$(mktemp -d) || rp_fail "mktemp"
   mkdir -p /var/lib/rp; rm -f /var/lib/rp/push.rc
   # код завершения читает VPS-1 (rp push ждёт его, прежде чем подтвердить обновление)
   rp_mutated=0
   # При ошибке после начала изменений (RP_SAFE=1) откатываемся сразу, не дожидаясь таймера.
-  trap 'rc=$?; rm -rf "$tmp"; if [[ $rc -ne 0 && $RP_SAFE == 1 && $rp_mutated == 1 && -s /var/lib/rp/backup.tgz ]]; then rp_msg "Ошибка установки: немедленный откат"; /usr/local/bin/rp rollback >/dev/null 2>&1 && { systemctl stop rp-rollback-run.timer >/dev/null 2>&1; rm -f /root/.rp-push.sh; }; fi; echo "$rc" >/var/lib/rp/push.rc' EXIT
-  # 0. копия для отката (только файлы rp; права 0600: внутри ключи и пароли) и таймер отката ДО любых изменений
-  if [[ $RP_SAFE == 1 && -d /etc/rp ]]; then
-    local bk_list=() bk_f
-    for bk_f in etc/rp usr/local/lib/rp usr/local/bin/rp etc/wireguard/rp-wg.conf etc/sysctl.d/99-rp.conf root/.ssh/authorized_keys; do
-      [[ -e /$bk_f ]] && bk_list+=("$bk_f")
-    done
-    while IFS= read -r bk_f; do bk_list+=("${bk_f#/}"); done < <(find /etc/systemd/system -maxdepth 1 -name 'rp-*' 2>/dev/null)
-    rm -f /var/lib/rp/backup.tgz
-    ( umask 077; tar -czf /var/lib/rp/backup.tgz -C / "${bk_list[@]}" 2>/dev/null; [[ $? -le 1 ]] ) \
-      && tar -tzf /var/lib/rp/backup.tgz >/dev/null 2>&1 \
-      || rp_fail "Не удалось создать проверяемую резервную копию: обновление прервано до изменений"
-    chmod 600 /var/lib/rp/backup.tgz
-    systemctl stop rp-rollback-run.timer rp-rollback.timer >/dev/null 2>&1
-    systemd-run --on-active=1800 --unit=rp-rollback-run --description="rp: откат обновления" /usr/local/bin/rp rollback >/dev/null 2>&1
-    systemctl is-active --quiet rp-rollback-run.timer || rp_fail "Не удалось взвести таймер отката: обновление прервано до изменений"
-  fi
-  rp_mutated=1
-  # 1. бандл: проверка суммы до любых изменений
+  trap 'rc=$?; rm -rf "$tmp"; if [[ $rc -ne 0 && $RP_SAFE == 1 && $rp_mutated == 1 ]]; then python3 /var/lib/rp/transaction/runner.py rollback --from-installer || true; fi; printf "%s\n" "$rc" >/var/lib/rp/push.rc' EXIT
+  # Validate and extract ONLY the transaction helper before mutation. Its hash
+  # is covered by the generated bundle digest. The backup runner is immutable.
   rp_bundle | base64 -d >"$tmp/b.tgz" 2>/dev/null || rp_fail "Бандл повреждён (base64)"
-  [[ $(sha256sum "$tmp/b.tgz" | awk '{print $1}') == "$RP_BUNDLE_SHA" ]] || rp_fail "SHA256 бандла не совпала — вставьте блок заново целиком"
+  [[ $(sha256sum "$tmp/b.tgz" | awk '{print $1}') == "$RP_BUNDLE_SHA" ]] || rp_fail "SHA256 бандла не совпала"
+  if [[ $RP_SAFE == 1 ]]; then
+    tar -xOzf "$tmp/b.tgz" usr/local/lib/rp/transaction.py >"$tmp/transaction.py" || rp_fail "Нет transaction helper"
+    python3 "$tmp/transaction.py" prepare "$$" || rp_fail "Транзакция не подготовлена"
+    rp_mutated=1
+  fi
   rp_msg "rp: установка VPS-2"
   # 2. пакеты
   rp_msg "Пакеты"
@@ -2412,7 +2877,7 @@ rp_main() {
   systemctl daemon-reload
   # 5. NAT и пересылка, фаервол (порты наружу не открываются); rp fixnet — единая реализация
   rp_msg "NAT и пересылка"
-  /usr/local/bin/rp fixnet || rp_fail "не удалось включить NAT/firewalld на VPS-2"
+  RP_TX_INTERNAL=1 /usr/local/bin/rp fixnet || rp_fail "не удалось включить NAT/firewalld на VPS-2"
   # 6. SSH: ключ с ограничениями (только с loopback и внутреннего WG-адреса, без форвардинга)
   install -d -m 700 /root/.ssh; touch /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys
   sed -i '/ rp@vps1$/d' /root/.ssh/authorized_keys
@@ -2428,11 +2893,14 @@ rp_main() {
           /var/lib/rp/active /var/lib/rp/since
     rp_msg "Новая установка: прежний ручной режим VPS-2 сброшен в auto"
   fi
-  if [[ $RP_SAFE == 1 ]] && ! systemctl is-active --quiet rp-rollback-run.timer; then rp_fail "Таймер отката пропал во время установки"; fi
+  if [[ $RP_SAFE == 1 ]] && ! systemctl is-active --quiet rp-transaction-rollback.timer; then rp_fail "Таймер отката пропал во время установки"; fi
   # Full T1/T2/T3 for EVERY configured transport on both fresh install and push.
   # The selected manual transport is enforced only for final activation.
-  /usr/local/bin/rp select
+  RP_TX_INTERNAL=1 /usr/local/bin/rp select
   local rc=$?
+  if [[ $RP_SAFE == 1 && $rc == 0 ]]; then
+    python3 /var/lib/rp/transaction/runner.py ready || rc=1
+  fi
   echo
   rp_msg "Отпечаток host key (сверьте при первом rp ssh):"
   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null || ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub 2>/dev/null
@@ -2559,7 +3027,7 @@ self_install() {
 # Update self from the configured GitHub URL and migrate only after the new
 # executable has passed independent validation. Roll back executable on failure.
 self_upgrade() {
-  local tmp nv prev old_version rc=0
+  local tmp nv old_version rc=0
   need_root; mkdir -p "$STATE" "$BK_DIR"
   tmp=$(mktemp "${TMPDIR:-/tmp}/rp-update.XXXXXXXX") || return 1
   if ! self_fetch "$tmp"; then
@@ -2652,6 +3120,14 @@ conf_migrate() {
   conf_set CONF_VER 2
   ok "Конфигурация обновлена до v1.1: транспорты «$new»"
 }
+conf_exit_mtu_migrate() {
+  # The old 1080-byte factory MTU cannot carry QUIC's 1200-byte UDP Initial.
+  # Keep operator values; the renderer rejects values incompatible with QUIC.
+  if [[ -z $(cf EXIT_MTU) || $(cf EXIT_MTU) == 1080 ]]; then
+    conf_set EXIT_MTU 1280
+    note "MTU внутреннего WireGuard: 1280 (для QUIC/HTTP3). Выполните rp push для обновления VPS-2"
+  fi
+}
 cmd_migrate() {
   need_root; need_vps1
   banner "Применение rp $SELF_VERSION" "обновление действующей конфигурации"
@@ -2660,11 +3136,16 @@ cmd_migrate() {
   self_install || die "Не удалось сохранить исполняемый rp; миграция остановлена"
   py_install || die "Не удалось установить rp.py"
   conf_migrate
+  conf_exit_mtu_migrate
   conf_set TRANSPORT_ORDER "$(tr_sort "$(cf TRANSPORT_ORDER)")"
   # Upgrade existing installations without replacing the user's explicit browser preset.
   [[ $(cf RL_FP random) == random ]] && conf_set RL_FP chrome
-  [[ -n $(cf WATCH_MIN) ]] || conf_set WATCH_MIN 15
-  [[ -n $(cf WATCH_MAX) ]] || conf_set WATCH_MAX 35
+  # Migrate the previous factory defaults; preserve other operator settings.
+  if [[ $(cf WATCH_MIN 15) == 15 && $(cf WATCH_MAX 35) == 35 ]]; then
+    conf_set WATCH_MIN 10 WATCH_MAX 15
+  fi
+  [[ -n $(cf WATCH_MIN) ]] || conf_set WATCH_MIN 10
+  [[ -n $(cf WATCH_MAX) ]] || conf_set WATCH_MAX 15
   units_vps1
   systemctl is-active --quiet rp-net || systemctl start rp-net >/dev/null 2>&1
   tr_has hy2-wg && ! [[ -x $HY2_BIN ]] && run "Hysteria2" hy2_install "$(cf HY2_VER "$HY2_PINNED")"
@@ -2693,19 +3174,27 @@ vps1_install() {
   os_check; arch_map xray >/dev/null
   ok "$(. /etc/os-release; echo "$PRETTY_NAME"), $(uname -m), фаервол: $(fw_kind), SELinux: $(getenforce 2>/dev/null || echo —)"
   conf_load
-  section "Параметры" "Единственный канал без маскировки — WG клиент → VPS-1; всё остальное идёт внутри туннеля, устойчивого к ТСПУ."
-  local ip order adv=n
+  section "Параметры" "WG клиент → VPS-1 → выбранный обратный туннель. Устойчивость к фильтрации требует отдельных измерений."
+  local ip order adv=n transport_default=all ru_default=y
+  local -a transport_options=()
   ip=$(cf PUBLIC_IP "${PUBLIC_IP:-}"); [[ -n $ip ]] || ip=$(public_ip)
   PUBLIC_IP=${PUBLIC_IP:-$ip}; ask PUBLIC_IP "Публичный IPv4 этого сервера" "$ip" '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' "Нужен IPv4-адрес"
   WG_PORT=${WG_PORT:-$(cf WG_PORT $((20000 + RANDOM % 30000)))}
   ask WG_PORT "UDP-порт WireGuard для клиентов" "$WG_PORT" '^[0-9]+$' "Нужен номер порта" valid_port
-  choose TRANSPORT_CHOICE "Транспорты туннеля к VPS-2" all \
+  if [[ -n $(cf TRANSPORT_ORDER) ]]; then
+    transport_default=keep
+    transport_options+=("keep|Сохранить текущий набор|$(cf TRANSPORT_ORDER)")
+  fi
+  choose TRANSPORT_CHOICE "Транспорты туннеля к VPS-2" "$transport_default" "${transport_options[@]}" \
     "all|Все четыре (рекомендуется)|XHTTP packet-up → XHTTP stream-up → HY2 → HY2+Salamander; отказавшие остаются резервом" \
     "udp|Только Hysteria2 (без и с obfs)|если TCP режется ТСПУ" \
     "tcp|Только VLESS Reality · XHTTP (два варианта)|если UDP/QUIC недоступен"
-  case ${TRANSPORT_CHOICE:-all} in udp) order="hy2-wg hy2o-wg" ;; tcp) order="reality-xhttp2 reality-xhttp" ;; *) order="${TR_RANK[*]}" ;; esac
+  case ${TRANSPORT_CHOICE:-all} in keep) order=$(cf TRANSPORT_ORDER) ;; udp) order="hy2-wg hy2o-wg" ;; tcp) order="reality-xhttp2 reality-xhttp" ;; *) order="${TR_RANK[*]}" ;; esac
   yesno "Дополнительные параметры (порты туннелей)?" n && adv=y
-  HY2_PORT=${HY2_PORT:-443}; HY2O_PORT=${HY2O_PORT:-8443}; RXH_PORT=${RXH_PORT:-443}; RXH2_PORT=${RXH2_PORT:-8443}
+  HY2_PORT=${HY2_PORT:-$(cf HY2_PORT 443)}; HY2O_PORT=${HY2O_PORT:-$(cf HY2O_PORT 8443)}
+  RXH_PORT=${RXH_PORT:-$(cf RXH_PORT 443)}; RXH2_PORT=${RXH2_PORT:-$(cf RXH2_PORT 8443)}
+  HY2_MASQ_HOST=${HY2_MASQ_HOST:-$(cf HY2_SNI)}
+  RXH_SNI=${RXH_SNI:-$(cf RXH_SNI)}; RXH2_SNI=${RXH2_SNI:-$(cf RXH2_SNI)}
   if [[ $adv == y ]]; then
     ord_has "$order" hy2-wg && ask HY2_PORT "UDP-порт Hysteria2" "$HY2_PORT" '^[0-9]+$' "Нужен номер порта" valid_port
     ord_has "$order" hy2o-wg && ask HY2O_PORT "UDP-порт Hysteria2 с obfs" "$HY2O_PORT" '^[0-9]+$' "Нужен номер порта" valid_port
@@ -2715,14 +3204,15 @@ vps1_install() {
   [[ $order == *hy2* ]] && sni_choose HY2_MASQ_HOST "Сайт для маскировки Hysteria2 (SNI и masquerade, HTTP/3)" masq
   ord_has "$order" reality-xhttp && sni_choose RXH_SNI "SNI для Reality (XHTTP, вариант 1)" reality
   ord_has "$order" reality-xhttp2 && sni_choose RXH2_SNI "SNI для Reality (XHTTP packet-up, вариант 2; лучше другой сайт)" reality "${RXH_SNI:-}"
-  local ru=y; yesno "Российские сайты напрямую с VPS-1 (списки .dat)?" y || ru=n
+  [[ $(cf RU_DIRECT 1) == 0 ]] && ru_default=n
+  local ru=y; yesno "Российские сайты напрямую с VPS-1 (списки .dat)?" "$ru_default" || ru=n
   printf '\n'; card "Проверьте настройки"
   kv "Публичный IP" "$PUBLIC_IP"; kv "WG клиентов" "UDP/$WG_PORT"; kv "Транспорты" "$order"
   ord_has "$order" hy2-wg && kv "Hysteria2" "UDP/$HY2_PORT · ${HY2_MASQ_HOST:-}"
   ord_has "$order" hy2o-wg && kv "Hysteria2 + obfs" "UDP/$HY2O_PORT · Salamander"
   ord_has "$order" reality-xhttp && kv "XHTTP (stream-up)" "TCP/$RXH_PORT · ${RXH_SNI:-—}"
   ord_has "$order" reality-xhttp2 && kv "XHTTP (packet-up)" "TCP/$RXH2_PORT · ${RXH2_SNI:-—}"
-  kv "DNS через туннель" "DoH: Quad9, затем Cloudflare"
+  kv "DNS через туннель" "DoH: $(cf DNS_REMOTE 'quad9 cloudflare')"
   kv "Списки РФ" "$([[ $ru == y ]] && echo напрямую || echo выключены)"; card_end
   yesno "Начать установку?" y || die "Отменено"
 
@@ -2732,13 +3222,14 @@ vps1_install() {
   run "Служебный пользователь" bash -c 'id rp >/dev/null 2>&1 || useradd -r -s /sbin/nologin -M rp'
   systemctl enable --now chronyd >/dev/null 2>&1 || true
   mkdir -p "$ETC" "$LIB" "$STATE" "$ASSETS" "$BK_DIR"; chown root:rp "$ETC"; chmod 750 "$ETC"; chmod 755 "$STATE" "$ASSETS"
-  conf_set ROLE vps1 PUBLIC_IP "$PUBLIC_IP" WG_PORT "$WG_PORT" WG_NET "10.66.0.0/24" WG_NET_GW "10.66.0.1" WG_MTU 1380 \
-    TRANSPORT_ORDER "$order" TRANSPORT_FORCE "" HY2_PORT "$HY2_PORT" HY2O_PORT "$HY2O_PORT" RXH_PORT "$RXH_PORT" RXH2_PORT "$RXH2_PORT" \
-    RXH_SNI "${RXH_SNI:-www.microsoft.com}" RXH2_SNI "${RXH2_SNI:-www.asus.com}" XHTTP_PATH "/$(rand_hex 4)" XHTTP2_PATH "/$(rand_hex 4)" \
-    HY2_MASQ "https://${HY2_MASQ_HOST:-www.microsoft.com}" EXIT_MTU 1080 DOORS "ssh=2222=127.0.0.1:22" \
-    RU_DIRECT "$([[ $ru == y ]] && echo 1 || echo 0)" RU_GUARD 1 RU_GEOIP 1 DNS_RU "77.88.8.8" DNS_REMOTE "quad9 cloudflare" \
-    DISABLE_IPV6 1 SNIFF 1 RL_FP chrome WATCH_MIN 15 WATCH_MAX 35 CONF_VER 2
-  chown root:root "$CONF"; : >"$CLIENTS"; chmod 600 "$CLIENTS"
+  conf_set ROLE vps1 PUBLIC_IP "$PUBLIC_IP" WG_PORT "$WG_PORT" WG_NET "$(cf WG_NET '10.66.0.0/24')" WG_NET_GW "$(cf WG_NET_GW '10.66.0.1')" WG_MTU "$(cf WG_MTU 1380)" \
+    TRANSPORT_ORDER "$order" TRANSPORT_FORCE "$(cf TRANSPORT_FORCE)" HY2_PORT "$HY2_PORT" HY2O_PORT "$HY2O_PORT" RXH_PORT "$RXH_PORT" RXH2_PORT "$RXH2_PORT" \
+    RXH_SNI "${RXH_SNI:-www.microsoft.com}" RXH2_SNI "${RXH2_SNI:-www.asus.com}" XHTTP_PATH "$(cf XHTTP_PATH "/$(rand_hex 4)")" XHTTP2_PATH "$(cf XHTTP2_PATH "/$(rand_hex 4)")" \
+    HY2_MASQ "$(cf HY2_MASQ "https://${HY2_MASQ_HOST:-www.microsoft.com}")" EXIT_MTU "$(cf EXIT_MTU 1280)" DOORS "$(cf DOORS 'ssh=2222=127.0.0.1:22')" \
+    RU_DIRECT "$([[ $ru == y ]] && echo 1 || echo 0)" RU_GUARD "$(cf RU_GUARD 1)" RU_GEOIP "$(cf RU_GEOIP 1)" DNS_RU "$(cf DNS_RU '77.88.8.8')" DNS_REMOTE "$(cf DNS_REMOTE 'quad9 cloudflare')" \
+    DISABLE_IPV6 "$(cf DISABLE_IPV6 1)" SNIFF "$(cf SNIFF 1)" RL_FP "$(cf RL_FP chrome)" WATCH_MIN "$(cf WATCH_MIN 10)" WATCH_MAX "$(cf WATCH_MAX 15)" CONF_VER 2
+  conf_exit_mtu_migrate
+  chown root:root "$CONF"; touch "$CLIENTS"; chmod 600 "$CLIENTS"
 
   step "Xray и Hysteria2"
   run "Xray $(cf XRAY_VER "$XRAY_PINNED")" xray_install "$(cf XRAY_VER "$XRAY_PINNED")" || die "Не удалось поставить Xray"
@@ -2746,9 +3237,9 @@ vps1_install() {
   run "Хэши релизов для VPS-2" pin_release || warn "Хэши для VPS-2 не получены — блок можно будет собрать позже (rp block)"
 
   step "Ключи и сертификат"
-  py_install; secrets_wg || die "Не удалось создать ключи WireGuard"
-  secrets_reality || die "Не удалось создать ключи Reality"
-  secrets_extra; conf_set HY2_PASS "$(rand_pass)"
+  py_install; secrets_ensure secrets_wg WG_PRIV WG_PUB EXIT_PRIV1 EXIT_PUB1 EXIT_PRIV2 EXIT_PUB2 EXIT_PSK || die "Не удалось создать ключи WireGuard"
+  secrets_ensure secrets_reality RL_PRIV RL_PUB RL_SID RL_UUID_X RL_UUID_T RL_UUID_PX RL_UUID_PT || die "Не удалось создать ключи Reality"
+  secrets_extra; [[ -n $(cf HY2_PASS) ]] || conf_set HY2_PASS "$(rand_pass)"
   [[ $order == *hy2* ]] && { hy2_cert "${HY2_MASQ_HOST:-www.microsoft.com}" || die "Сертификат не создан"; }
   ssh_key; ok "Ключи созданы (секреты только в $CONF, права 600)"
 
@@ -2794,7 +3285,7 @@ cl_show() { # cl_show имя — конфиг и QR
   [[ -n $n ]] || pick_from n "Клиент" "${_l[@]}" || { warn "Клиентов нет"; return 1; }
   local conf; conf=$(py client "$n") || return 1
   printf '\n%s\n' "$conf"
-  mkdir -p -m 700 /root/rp-clients; chmod 700 /root/rp-clients; printf '%s\n' "$conf" >"/root/rp-clients/$n.conf"; chmod 600 "/root/rp-clients/$n.conf"
+  install -d -m 700 /root/rp-clients; printf '%s\n' "$conf" >"/root/rp-clients/$n.conf"; chmod 600 "/root/rp-clients/$n.conf"
   printf '\n'; py qr "/root/rp-clients/$n.conf" || note "QR не построен (конфиг длиннее 458 байт?) — используйте файл"; printf '\n'
   note "Файл: /root/rp-clients/$n.conf"
 }
@@ -2976,16 +3467,27 @@ route_target_for() {
     *) return 1 ;;
   esac
 }
-route_api_override() { # баланcировщик, тег|clear
-  local bal=$1 target=$2
+route_api_override() { # apply and verify the actual in-memory RoutingService state
+  local bal=$1 target=$2 response
   [[ $bal == exit || $bal == rev ]] || return 2
   case $target in
     to-exit|r-xhttp|r-xhttp2)
-      "$XRAY_BIN" api bo --server=127.0.0.1:10085 -b "$bal" "$target" >/dev/null 2>&1 ;;
+      "$XRAY_BIN" api bo --server=127.0.0.1:10085 -b "$bal" "$target" >/dev/null 2>&1 || return 1 ;;
     clear)
-      "$XRAY_BIN" api bo --server=127.0.0.1:10085 -b "$bal" -r >/dev/null 2>&1 ;;
+      "$XRAY_BIN" api bo --server=127.0.0.1:10085 -b "$bal" -r >/dev/null 2>&1 || return 1 ;;
     *) return 2 ;;
   esac
+  # Xray 26.4.25 exposes structured output with --json (verified on the lab).
+  response=$("$XRAY_BIN" api bi --server=127.0.0.1:10085 --json "$bal" 2>/dev/null) || return 1
+  printf '%s\n' "$response" | python3 -I -c '
+import json, sys
+try:
+    result = json.load(sys.stdin)["balancer"]["override"]
+    expected = "" if sys.argv[1] == "clear" else sys.argv[1]
+    assert isinstance(result, dict) and result.get("target", "") == expected
+except (ValueError, KeyError, TypeError, AssertionError):
+    sys.exit(1)
+' "$target"
 }
 route_rev_has() { # Detect whether this outbound is valid for the separate management balancer.
   local tag=$1
@@ -3496,6 +3998,25 @@ EOF
   ok "Обновление запущено на VPS-2 (откат через 30 минут, если не подтвердить)"
 }
 
+# Require exactly one successful result per configured transport. Empty, partial,
+# duplicated and unrecognised results are UNKNOWN/FAILED, never FULL_OK.
+push_results_ok() {
+  local results=$1 t line name value
+  local -A expected=() seen=()
+  for t in $(cf TRANSPORT_ORDER); do
+    case $t in reality-xhttp2|reality-xhttp|hy2-wg|hy2o-wg) expected[$t]=1 ;; *) return 1 ;; esac
+  done
+  ((${#expected[@]} > 0)) || return 1
+  while IFS= read -r line; do
+    [[ $line == *=* ]] || return 1
+    name=${line%%=*}; value=${line#*=}
+    [[ -n $name && $value == ok ]] || return 1
+    [[ -n ${expected[$name]:-} && -z ${seen[$name]:-} ]] || return 1
+    seen[$name]=1
+  done <<<"$results"
+  ((${#seen[@]} == ${#expected[@]}))
+}
+
 # push_wait — до 27 минут: все четыре транспорта и полные T1/T2/T3,
 # оставляя запас до 30-минутного отката для подтверждения.
 push_wait() {
@@ -3507,7 +4028,8 @@ push_wait() {
     rc=""; sleep 6; t=$((t + 6))
   done
   [[ -n $rc ]] || { err "VPS-2 не вернулся на связь за 27 минут (автоматический откат через 30 минут)"; return 1; }
-  if ((rc != 0)); then
+  [[ $rc =~ ^[0-9]{1,3}$ ]] || { err "Недостоверный код установки: обновление НЕ подтверждено"; return 1; }
+  if ((10#$rc != 0)); then
     err "Установка на VPS-2 завершилась с ошибкой (код $rc)"
     local tail_log
     tail_log=$(RP_READ_RETRIES=1 vps2_read 'tail -n 32 /var/lib/rp/push.log' 2>/dev/null || true)
@@ -3519,21 +4041,23 @@ push_wait() {
     warn "Повторный rp push пока не выполняйте: сначала выясните причину ошибки"
     return 1
   fi
-  route_sync_locked >/dev/null 2>&1 || warn "VPS-2 доступен, но маршрут Xray VPS-1 пока не согласован"
+  local res_now
+  res_now=$(tr_results 2>/dev/null) && push_results_ok "$res_now" || {
+    err "FAILED/UNKNOWN: нет полного успешного результата T1–T3 всех транспортов; обновление НЕ подтверждено"
+    return 1
+  }
+  route_sync_locked >/dev/null 2>&1 || {
+    err "Маршрут Xray VPS-1 не согласован: обновление НЕ подтверждено"; return 1
+  }
   wait_exit || { err "Выход через VPS-2 не работает после обновления (откат на VPS-2 сработает сам)"; return 1; }
   touch "$STATE/linked"
   local cf_try cf_ok=0
-  for cf_try in 1 2 3; do
+  for ((cf_try=1; cf_try<=3; cf_try++)); do
     vps2_run '/usr/local/bin/rp confirm' >/dev/null 2>&1 && { cf_ok=1; break; }
     sleep 3
   done
   ((cf_ok)) || { err "VPS-2 не подтвердил обновление: выполните там  rp confirm  до истечения 30 минут, иначе сработает откат"; return 1; }
-  local res_now; res_now=$(tr_results 2>/dev/null || true)
-  if grep -q '=fail' <<<"$res_now"; then
-    warn "Итог: DEGRADED — часть транспортов не прошла T1–T3 (rp transports)"
-  else
-    ok "Итог: FULL_OK — все транспорты прошли T1–T3"
-  fi
+  ok "Итог: FULL_OK — все транспорты прошли T1–T3"
   ok "VPS-2 обновлён и подтверждён"
   route_sync_locked >/dev/null 2>&1 || warn "Маршрут VPS-1 пока не подтверждён; выполните rp tunnel sync"
 }
@@ -3986,15 +4510,22 @@ cmd_uninstall() {
   # по одной: общий «disable --now» со списком обрывается на первой несуществующей службе (rp-hy2o нет в установках 1.0),
   # и остальные, включая rp-xray, продолжают работать
   systemctl stop rp-serve >/dev/null 2>&1   # временный unit без файла: disable для него не сработает
-  local u; for u in rp-serve rp-xray rp-hy2 rp-hy2o rp-echo rp-ru.timer rp-route-sync.timer rp-route-sync.service rp-net wg-quick@wg0 wg-quick@wg-exit; do
+  local u; for u in rp-ru.timer rp-route-sync.timer rp-serve rp-xray rp-hy2 rp-hy2o rp-echo rp-ru.service rp-route-sync.service rp-net wg-quick@wg0 wg-quick@wg-exit; do
     systemctl disable --now "$u" >/dev/null 2>&1 || true
   done
   fw_close "$(cf LINK_PORT 8444)/tcp"
   nft delete table inet rp_guard 2>/dev/null; nft delete table ip rp_tp 2>/dev/null; nft delete table ip6 rp_block6 2>/dev/null
   while ip rule del fwmark 1 lookup 100 2>/dev/null; do :; done; while ip rule del fwmark 255 lookup 200 2>/dev/null; do :; done
   fw_close "$(cf WG_PORT)/udp"; fw_close "$(cf HY2_PORT)/udp"; fw_close "$(cf HY2O_PORT)/udp"; fw_close "$(cf RXH_PORT)/tcp"; fw_close "$(cf RXH2_PORT)/tcp"; fw_close "$(cf RTCP_PORT)/tcp"
-  rm -f /etc/systemd/system/rp-*.service /etc/systemd/system/rp-*.timer /etc/wireguard/wg0.conf /etc/wireguard/wg-exit.conf /etc/sysctl.d/99-rp.conf
-  rm -rf /etc/systemd/system/wg-quick@wg0.service.d "$LIB" "$STATE"
+  # Remove only files generated by rp, preserving unrelated units and drop-ins.
+  for u in rp-xray.service rp-hy2.service rp-hy2o.service rp-echo.service rp-ru.service \
+    rp-ru.timer rp-route-sync.timer rp-route-sync.service rp-net.service; do
+    rm -f "/etc/systemd/system/$u"
+  done
+  rm -f /etc/wireguard/wg0.conf /etc/wireguard/wg-exit.conf /etc/sysctl.d/99-rp.conf
+  rm -f /etc/systemd/system/wg-quick@wg0.service.d/rp.conf
+  rmdir /etc/systemd/system/wg-quick@wg0.service.d 2>/dev/null || true
+  rm -rf "$LIB" "$STATE"
   if yesno "Удалить и настройки с секретами ($ETC)?" n; then rm -rf "$ETC" /root/rp-clients /root/rp-block; fi
   systemctl daemon-reload; ok "Удалено. Бинарники xray/hysteria оставлены в /usr/local/bin"
 }
@@ -4145,16 +4676,16 @@ menu_clients() {
   local c
   while :; do cls; banner "Клиенты WG" "OpenWrt и другие"; cl_list
     mhead "Действия"; mi 1 "Добавить"; mi 2 "Конфиг и QR"; mi 3 "Удалить"; mi 0 "Назад"; mpick c
-    case $c in 1) (cl_add); pause ;; 2) (cl_show); pause ;; 3) (cl_del); pause ;; 0) return ;; *) warn "Введите число от 0 до 3"; sleep 1 ;; esac
+    case $c in 1) (lock; cl_add); pause ;; 2) (cl_show); pause ;; 3) (lock; cl_del); pause ;; 0) return ;; *) warn "Введите число от 0 до 3"; sleep 1 ;; esac
   done
 }
 menu_ru() {
   local c
   while :; do cls; banner "Российские сайты напрямую" "списки .dat"; cmd_ru status
     mhead "Действия"; mi 1 "Обновить списки"; mi 2 "Включить"; mi 3 "Выключить"; mi 4 "Исключение: через туннель"; mi 5 "Исключение: напрямую"; mi 0 "Назад"; mpick c
-    case $c in 1) (cmd_ru update); pause ;; 2) (cmd_ru on); pause ;; 3) (cmd_ru off); pause ;;
-      4) local d=""; ask d "Домен" "" '^[A-Za-z0-9.-]+\.[A-Za-z0-9-]+$' "Нужен домен"; (cmd_ru proxy "$d"); pause ;;
-      5) local d=""; ask d "Домен" "" '^[A-Za-z0-9.-]+\.[A-Za-z0-9-]+$' "Нужен домен"; (cmd_ru direct "$d"); pause ;;
+    case $c in 1) (lock; cmd_ru update); pause ;; 2) (lock; cmd_ru on); pause ;; 3) (lock; cmd_ru off); pause ;;
+      4) local d=""; ask d "Домен" "" '^[A-Za-z0-9.-]+\.[A-Za-z0-9-]+$' "Нужен домен"; (lock; cmd_ru proxy "$d"); pause ;;
+      5) local d=""; ask d "Домен" "" '^[A-Za-z0-9.-]+\.[A-Za-z0-9-]+$' "Нужен домен"; (lock; cmd_ru direct "$d"); pause ;;
       0) return ;; *) warn "Введите число от 0 до 5"; sleep 1 ;; esac
   done
 }
@@ -4163,9 +4694,9 @@ menu_dns() {
   while :; do cls; banner "DNS" "DoH через туннель"; cmd_dns show
     mhead "Действия"; mi 1 "Выбрать серверы"; mi 2 "Проверить серверы"; mi 3 "Быстро: Quad9 + Cloudflare"; mi 4 "Быстро: только Quad9"; mi 5 "Российский DNS (IPv4)"; mi 0 "Назад"; mpick c
     case $c in
-      1) v=""; ask v "Серверы через пробел (quad9 cloudflare google adguard или https://…/dns-query)" "$(cf DNS_REMOTE)" '^[A-Za-z0-9:/._ -]+$' "Недопустимые символы"; (cmd_dns set "$v"); pause ;;
-      2) (cmd_dns test); pause ;; 3) (cmd_dns set quad9 cloudflare); pause ;; 4) (cmd_dns set quad9); pause ;;
-      5) v=""; ask v "IPv4 российского DNS (yandex или адрес)" "$(cf DNS_RU 77.88.8.8)" '^[A-Za-z0-9.]+$' "Укажите IPv4"; (cmd_dns ru "$v"); pause ;;
+      1) v=""; ask v "Серверы через пробел (quad9 cloudflare google adguard или https://…/dns-query)" "$(cf DNS_REMOTE)" '^[A-Za-z0-9:/._ -]+$' "Недопустимые символы"; (lock; cmd_dns set "$v"); pause ;;
+      2) (lock; cmd_dns test); pause ;; 3) (lock; cmd_dns set quad9 cloudflare); pause ;; 4) (lock; cmd_dns set quad9); pause ;;
+      5) v=""; ask v "IPv4 российского DNS (yandex или адрес)" "$(cf DNS_RU 77.88.8.8)" '^[A-Za-z0-9.]+$' "Укажите IPv4"; (lock; cmd_dns ru "$v"); pause ;;
       0) return ;; *) warn "Введите число от 0 до 5"; sleep 1 ;; esac
   done
 }
@@ -4181,7 +4712,7 @@ menu_tunnel() {
   while :; do cls; banner "Туннель к VPS-2" "$(cf TRANSPORT_ORDER)"; cmd_door list
     mhead "Действия"; mi 1 "Строка для VPS-2 (он сам скачает блок)"; mi 2 "Блок для VPS-2 (вставка вручную)"; mi 3 "Обновить VPS-2 по SSH (откат 30 мин)"; mi 4 "SSH на VPS-2"
     mi 5 "Двери (Reality)"; mi 6 "Сменить секреты"; mi 7 "Проверка сайтов SNI"; mi 8 "Транспорты: результаты проверки"; mi 9 "Исключить неработающие транспорты"; mi 10 "Выбрать активный транспорт (авто / вручную)"; mi 0 "Назад"; mpick c
-    case $c in 1) (lock; cmd_link); pause ;; 2) (cmd_block); pause ;; 3) (lock; cmd_push); pause ;; 4) (cmd_ssh); pause ;; 5) (cmd_door list); pause ;; 6) (lock; cmd_rotate); pause ;; 7) (cmd_sni); pause ;;
+    case $c in 1) (lock; cmd_link); pause ;; 2) (lock; cmd_block); pause ;; 3) (lock; cmd_push); pause ;; 4) (cmd_ssh); pause ;; 5) (cmd_door list); pause ;; 6) (lock; cmd_rotate); pause ;; 7) (cmd_sni); pause ;;
       8) (cmd_transports); pause ;; 9) (lock; cmd_prune); pause ;; 10) (lock; cmd_tunnel select); pause ;; 0) return ;; *) warn "Введите число от 0 до 10"; sleep 1 ;; esac
   done
 }
@@ -4190,7 +4721,7 @@ menu_main() {
   conf_load
   if (($(cf CONF_VER 1) < 2)); then   # конфигурация от версии 1.0: без перехода меню покажет устаревшие значения
     warn "Конфигурация создана версией 1.0 — нужен переход на $SELF_VERSION (ключи и клиенты сохраняются)"
-    yesno "Выполнить rp migrate сейчас?" y && { (cmd_migrate); pause; }
+    yesno "Выполнить rp migrate сейчас?" y && { (lock; cmd_migrate); pause; }
   fi
   while :; do
     conf_load; cls; banner "rp" "VPS-1 · $(cf PUBLIC_IP) · v$SELF_VERSION"
@@ -4207,9 +4738,9 @@ menu_main() {
     mi 13 "Сохранить эту версию как команду rp"; mi 14 "Обновить rp из GitHub"; mi 0 "Выход"; mpick c
     case $c in
       1) menu_clients ;; 2) menu_tunnel ;; 3) menu_ru ;; 4) menu_dns ;;
-      5) (cmd_test); pause ;; 6) (cmd_diag --fix); pause ;; 7) (cmd_doctor); pause ;; 8) (cmd_status); pause ;; 9) (cmd_logs 60); pause ;;
-      10) menu_upd ;; 11) (cmd_restart); pause ;; 12) (cmd_uninstall); pause; [[ -d $STATE ]] || exit 0 ;;   # после удаления меню не нужно
-      13) (self_install); pause ;; 14) (self_upgrade); pause ;;
+      5) (lock; cmd_test); pause ;; 6) (lock; cmd_diag --fix); pause ;; 7) (cmd_doctor); pause ;; 8) (cmd_status); pause ;; 9) (cmd_logs 60); pause ;;
+      10) menu_upd ;; 11) (lock; cmd_restart); pause ;; 12) (lock; cmd_uninstall); pause; [[ -d $STATE ]] || exit 0 ;;   # после удаления меню не нужно
+      13) (lock; self_install); pause ;; 14) (lock; self_upgrade); pause ;;
       0) exit 0 ;; *) warn "Введите число от 0 до 14"; sleep 1 ;;
     esac
   done
@@ -4239,7 +4770,7 @@ maybe_save_launched_build() {
   fi
   note "Запущен rp $SELF_VERSION, в команде rp установлено: ${src_version:-ничего}"
   if yesno "Сохранить запущенную версию как команду rp?" y; then
-    self_install || warn "Версия не сохранена; используйте меню 'Сохранить' или проверьте RP_URL"
+    (lock; self_install) || warn "Версия не сохранена; используйте меню 'Сохранить' или проверьте RP_URL"
   fi
 }
 usage() {
@@ -4285,16 +4816,16 @@ cmd_install() {
     local act=""; choose act "rp уже установлен на этом VPS-1" menu \
       "menu|Открыть управление|" "migrate|Перейти на версию $SELF_VERSION|обновить конфигурацию и службы, ключи сохраняются" \
       "reinstall|Изменить настройки|заново пройти вопросы (ключи клиентов сохранятся)" "update|Обновить списки РФ|только списки"
-    case $act in menu) maybe_save_launched_build; menu_main; return ;; migrate) cmd_migrate; return ;; update) ru_update --latest; return ;; esac
+    case $act in menu) maybe_save_launched_build; menu_main; return ;; migrate) lock; cmd_migrate; return ;; update) lock; ru_update --latest; return ;; esac
   fi
   banner "rp $SELF_VERSION" "установка"
   choose ROLE_CHOICE "Роль этого сервера" vps1 \
     "vps1|VPS-1 (Россия)|принимает WG-клиентов и ведёт трафик в туннель" \
     "vps2|VPS-2 (за границей)|выход в интернет; ставится блоком, созданным на VPS-1"
-  case $ROLE_CHOICE in vps1) vps1_install ;; vps2) vps2_entry ;; esac
+  case $ROLE_CHOICE in vps1) lock; vps1_install ;; vps2) vps2_entry ;; esac
 }
 
-lock() { exec 9>/run/rp.lock; flock -n 9 || die "Другая операция rp уже выполняется"; }
+lock() { exec 9>/run/rp.lock; flock -w 5 9 || die "Другая операция rp уже выполняется"; }
 
 main() {
   local cmd=${1:-}; shift || true
@@ -4306,12 +4837,12 @@ main() {
   case $cmd in
     ""|menu) need_root; conf_load; if [[ $(cf ROLE) == vps1 ]]; then maybe_save_launched_build; menu_main; else cmd_install; fi ;;
     install) cmd_install ;;
-    install-self|save) need_root; self_install ;;
+    install-self|save) need_root; lock; self_install ;;
     migrate) need_root; lock; cmd_migrate ;;
     version|-v|--version) echo "rp $SELF_VERSION" ;;
     help|-h|--help) usage ;;
     client) need_root; need_vps1; case ${1:-list} in add) lock; cl_add "${2:-}" ;; del) lock; cl_del "${2:-}" ;; list) cl_list ;; show) cl_show "${2:-}" ;; *) die "rp client add|del|list|show [имя]" ;; esac ;;
-    block) need_root; cmd_block "$@" ;;
+    block) need_root; lock; cmd_block "$@" ;;
     link) need_root; lock; cmd_link "$@" ;;
     _link_close) link_close "$@" ;;     # служебная: вызывает systemd после остановки rp-serve (без lock)
     push) need_root; lock; cmd_push ;;
@@ -4353,6 +4884,7 @@ import json
 import re
 import os
 import socket
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -4362,6 +4894,7 @@ CONF = os.environ.get("RP_CONF", "/etc/rp/rp.conf")
 CLIENTS = os.environ.get("RP_CLIENTS", "/etc/rp/clients.tsv")
 ETC = os.environ.get("RP_ETC", "/etc/rp")
 TPROXY_PORT = 14205
+DNS_HIJACK_PORT = 14206
 SOCKS_PORT = 1080
 ECHO_PORT = 7000
 EXIT_MARK = 255          # метка исходящих пакетов Xray в режимах hy2 (ip rule → таблица 200)
@@ -4613,6 +5146,11 @@ def xray_server(cfg):
     if cfg.get("SNIFF", "1") == "1":
         wg_tp["sniffing"] = sniff
     inb = [wg_tp,
+           # Conntrack reverses the DNS redirect to the resolver originally
+           # queried by the client. A normal socket avoids Xray full-cone
+           # sessions reusing the first resolver's transparent reply address.
+           {"tag": "dns-hijack", "listen": "0.0.0.0", "port": DNS_HIJACK_PORT, "protocol": "tunnel",
+            "settings": {"network": "tcp,udp", "address": "127.0.0.1", "port": 53}},
            # локальный SOCKS только с паролем (127.0.0.1): пароль в rp.conf, в аргументы процессов не попадает
            {"tag": "socks-in", "listen": "127.0.0.1", "port": SOCKS_PORT, "protocol": "socks",
             "settings": {"auth": "password", "accounts": [{"user": cfg["SOCKS_USER"], "pass": cfg["SOCKS_PASS"]}],
@@ -4678,6 +5216,7 @@ def xray_server(cfg):
         return kw
 
     rules = [rule(inboundTag=["socks-in"], **exit_ref),
+             rule(inboundTag=["dns-hijack"], outboundTag="dns-out"),
              rule(inboundTag=["wg-tp"], port="53", network="tcp,udp", outboundTag="dns-out")]
     if in_tags:
         rules.append(rule(inboundTag=in_tags, ip=["127.0.0.1"], port=str(ECHO_PORT), outboundTag="local-echo"))
@@ -4755,16 +5294,45 @@ def xray_server(cfg):
 
 # ── Hysteria2, WireGuard ────────────────────────────────────────────────
 
+def hy2_bind_ip(cfg):
+    """Bind only an assigned underlay IPv4, including servers behind NAT.
+
+    A wildcard UDP/443 listener prevents Xray's transparent UDP reply socket
+    from binding a foreign destination such as 1.1.1.1:443 (EADDRINUSE).
+    """
+    try:
+        interfaces = json.loads(subprocess.check_output(
+            ['ip', '-j', '-4', 'address', 'show'], text=True, timeout=5))
+        assigned = {a['local'] for iface in interfaces
+                    if iface.get('ifname') not in ('lo', 'wg0', 'wg-exit')
+                    for a in iface.get('addr_info', []) if a.get('family') == 'inet'}
+        address = cfg.get('HY2_BIND_IP', '')
+        if not address:
+            public = str(ipaddress.IPv4Address(cfg['PUBLIC_IP']))
+            if public in assigned:
+                address = public
+            else:
+                route = json.loads(subprocess.check_output(
+                    ['ip', '-j', '-4', 'route', 'get', public], text=True, timeout=5))
+                address = route[0].get('prefsrc', '')
+        parsed = ipaddress.IPv4Address(address)
+        if parsed.is_unspecified or parsed.is_loopback or str(parsed) not in assigned:
+            raise ValueError('HY2_BIND_IP must be an assigned underlay IPv4 address')
+        return str(parsed)
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError) as exc:
+        die('Не удалось выбрать локальный адрес Hysteria2; задайте HY2_BIND_IP: %s' % exc)
+
+
 def hy2_server(cfg, obfs=False):
     port = "HY2O_PORT" if obfs else "HY2_PORT"
     need(cfg, port, "HY2_PASS", "HY2_MASQ")
     if obfs:
         need(cfg, "HY2O_OBFS")
     etc = cfg.get("ETC", ETC)
-    s = ("listen: :%s\n"
+    s = ("listen: %s:%s\n"
          "tls:\n  cert: %s/hy2.crt\n  key: %s/hy2.key\n  sniGuard: disable\n"
          "auth:\n  type: password\n  password: \"%s\"\n"
-         % (cfg[port], etc, etc, cfg["HY2_PASS"]))
+         % (hy2_bind_ip(cfg), cfg[port], etc, etc, cfg["HY2_PASS"]))
     if obfs:
         s += "obfs:\n  type: salamander\n  salamander:\n    password: \"%s\"\n" % cfg["HY2O_OBFS"]
     s += ("masquerade:\n  type: proxy\n  proxy:\n    url: %s\n    rewriteHost: true\n"
@@ -4795,9 +5363,19 @@ def hy2_client(cfg, obfs=False):
     return s
 
 
+def exit_mtu(cfg):
+    value = str(cfg.get("EXIT_MTU", "1280"))
+    # IPv4 (20) + UDP (8) + minimum QUIC datagram (1200); no DF-clearing hack.
+    # Hysteria fragments/reassembles its UDP payload above the outer QUIC layer.
+    if not re.fullmatch(r"[0-9]+", value) or not 1228 <= int(value) <= 65535:
+        die("EXIT_MTU должен быть 1228..65535 для QUIC/HTTP3; рекомендуется 1280. "
+            "Измените на VPS-1, выполните rp apply и rp push")
+    return value
+
+
 def wg_exit_server(cfg):
     need(cfg, "EXIT_PRIV1", "EXIT_PUB2", "EXIT_PSK")
-    mtu = cfg.get("EXIT_MTU", "1080")
+    mtu = exit_mtu(cfg)
     # rp_filter=2 (loose): ответы из интернета приходят в wg-exit, а обратный маршрут к их адресам
     # в основной таблице ведёт в публичный интерфейс — при strict (1) ядро такие ответы выбрасывает.
     return ("[Interface]\nAddress = 10.77.0.1/30\nListenPort = 51821\nPrivateKey = %s\nMTU = %s\nTable = off\n"
@@ -4816,7 +5394,7 @@ def wg_exit_client(cfg):
             "# Bootstrap handshake via probe; refresh inner WG link at a non-default 28s.\n"
             "# VPS-2 initiates to loopback; WG is encapsulated by Hysteria2, not public UDP.\n"
             "PersistentKeepalive = 28\n"
-            % (cfg["EXIT_PRIV2"], cfg.get("EXIT_MTU", "1080"), cfg["EXIT_PUB1"], cfg["EXIT_PSK"]))
+            % (cfg["EXIT_PRIV2"], exit_mtu(cfg), cfg["EXIT_PUB1"], cfg["EXIT_PSK"]))
 
 
 def wg0_server(cfg):
@@ -4842,7 +5420,7 @@ def client_conf(cfg, name):
 
 
 def nft_rules(cfg):
-    """Fail-closed: forward с/на wg0 запрещён, TCP/UDP уходит в TPROXY, IPv6 блокируется."""
+    """Fail-closed: WG forward blocked; DNS redirected, other TCP/UDP TPROXY, IPv6 blocked."""
     net = cfg.get("WG_NET", "10.66.0.0/24")
     return """#!/usr/sbin/nft -f
 # Сгенерировано rp. Правка вручную не сохраняется — используйте rp apply.
@@ -4856,6 +5434,8 @@ table inet rp_guard {
   }
   chain input {
     type filter hook input priority -100; policy accept;
+    # DNS interception is accessible only through the client WG interface.
+    iifname != "wg0" iifname != "lo" meta l4proto { tcp, udp } th dport %(dns)d drop
     # WG между VPS слушает только loopback: снаружи порт закрыт
     iifname != "lo" udp dport 51821 drop
     # эхо-сервер для проб доступен только с loopback и из внутреннего WG-интерфейса
@@ -4867,10 +5447,16 @@ delete table ip rp_tp
 table ip rp_tp {
   chain pre {
     type filter hook prerouting priority -150; policy accept;
+    # Let conntrack redirect DNS at dstnat priority; never forward it directly.
+    iifname "wg0" meta l4proto { tcp, udp } th dport 53 return
     iifname "wg0" ip daddr %(gw)s icmp type echo-request accept
     iifname "wg0" meta l4proto tcp tproxy to :%(tp)d meta mark set 1 accept
     iifname "wg0" meta l4proto udp tproxy to :%(tp)d meta mark set 1 accept
     iifname "wg0" drop
+  }
+  chain dns_redirect {
+    type nat hook prerouting priority dstnat; policy accept;
+    iifname "wg0" meta l4proto { tcp, udp } th dport 53 redirect to :%(dns)d
   }
   chain in {
     type filter hook input priority -50; policy accept;
@@ -4885,7 +5471,7 @@ table ip6 rp_block6 {
     iifname "wg0" drop
   }
 }
-""" % {"tp": TPROXY_PORT, "net": net, "gw": cfg.get("WG_NET_GW", "10.66.0.1")}
+""" % {"tp": TPROXY_PORT, "dns": DNS_HIJACK_PORT, "net": net, "gw": cfg.get("WG_NET_GW", "10.66.0.1")}
 
 
 # ── Пакет для VPS-2 ──────────────────────────────────────────────────────
@@ -4937,7 +5523,7 @@ def vps2_conf(cfg, order):
              'TRANSPORT_ORDER="%s"' % " ".join(order)]
     for k in keys:
         lines.append('%s="%s"' % (k, cfg.get(k, "1" if k == "DISABLE_IPV6" else "")))
-    # 15..35 s default: random interval between VPS-2 health/activity probes.
+    # 10..15 s default: bounded health cadence; full transport tests unchanged.
     # Keep values in rp2.conf to avoid changes silently reverting on rp push.
     def watch_interval(key, default):
         try:
@@ -4947,8 +5533,8 @@ def vps2_conf(cfg, order):
         if n < 5 or n > 120:
             die("%s: допустимо 5..120 секунд" % key)
         return n
-    wmin = watch_interval("WATCH_MIN", 15)
-    wmax = watch_interval("WATCH_MAX", 35)
+    wmin = watch_interval("WATCH_MIN", 10)
+    wmax = watch_interval("WATCH_MAX", 15)
     if wmax < wmin:
         die("WATCH_MAX должен быть >= WATCH_MIN")
     lines += [f'WATCH_MIN="{wmin}"', f'WATCH_MAX="{wmax}"']
