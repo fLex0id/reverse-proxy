@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.4"
+SELF_VERSION="1.2.9-lab.5"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -4126,7 +4126,65 @@ prune_offer() { # Никакого автоматического удалени
 
 # ── Диагностика по участкам ──────────────────────────────────────────────
 DOH_Q='AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE'   # запрос A example.com для DoH (RFC 8484, GET)
-doh_test() { local n; n=$(sx -m 10 -H 'accept: application/dns-message' "$1?dns=$DOH_Q" 2>/dev/null | wc -c); ((n > 28)); }
+doh_test() {
+  local tmp stats curl_rc=0 rc=0
+  tmp=$(mktemp -d "$STATE/doh-probe.XXXXXX") || return 1
+  stats=$(sx -m 10 -H 'accept: application/dns-message' -o "$tmp/body" \
+    -w '%{http_code}\n%{content_type}\n%{time_total}' "$1?dns=$DOH_Q" 2>"$tmp/curl-error") || curl_rc=$?
+  python3 -I - "$tmp" "$curl_rc" "$stats" >"$tmp/result.json" <<'PY_DOH_CHECK' || rc=$?
+import json, pathlib, struct, sys, time
+root = pathlib.Path(sys.argv[1])
+stats = sys.argv[3].splitlines()
+report = dict(time=time.time(), curl_rc=int(sys.argv[2]), http=stats[0] if stats else '',
+              content_type=stats[1] if len(stats)>1 else '', seconds=stats[2] if len(stats)>2 else '',
+              result='FAIL', error='')
+def require(condition, reason):
+    if not condition: raise ValueError(reason)
+try:
+    require(report['curl_rc']==0, 'curl failed; partial data is not success')
+    require(report['http']=='200', 'unexpected HTTP status')
+    require(report['content_type'].split(';',1)[0].strip().lower()=='application/dns-message', 'unexpected content type')
+    data = (root/'body').read_bytes()
+    report['bytes'] = len(data)
+    require(12 <= len(data) <= 65535, 'invalid DNS message size')
+    ident, flags, qd, an, ns, ar = struct.unpack('!6H', data[:12])
+    require(ident==0 and flags&0x8000 and not flags&0x7a4f and qd==1 and an>0, 'invalid DNS header or unsuccessful answer')
+    def name(pos):
+        seen=set(); labels=[]; end=None
+        while True:
+            require(pos<len(data) and pos not in seen, 'invalid DNS name pointer')
+            seen.add(pos); size=data[pos]; pos+=1
+            if size==0: return '.'.join(labels).lower(), end if end is not None else pos
+            if size&0xc0==0xc0:
+                require(pos<len(data), 'truncated DNS pointer')
+                if end is None: end=pos+1
+                pos=((size&0x3f)<<8)|data[pos]; continue
+            require(size<=63 and pos+size<=len(data), 'invalid DNS label')
+            labels.append(data[pos:pos+size].decode('ascii')); pos+=size
+    question, pos = name(12)
+    qtype, qclass = struct.unpack('!HH', data[pos:pos+4]); pos+=4
+    require(question=='example.com' and qtype==1 and qclass==1, 'unexpected DNS question')
+    address=False
+    for index in range(an+ns+ar):
+        _, pos = name(pos)
+        kind, cls, ttl, length = struct.unpack('!HHIH', data[pos:pos+10]); pos+=10
+        require(pos+length<=len(data), 'truncated DNS record')
+        if index<an and kind==1 and cls==1 and length==4: address=True
+        pos+=length
+    require(pos==len(data) and address, 'incomplete DNS A answer')
+    report['result']='PASS'
+except (ValueError, OSError, IndexError, struct.error, UnicodeError) as exc:
+    report['error']=str(exc)
+report['curl_error']=(root/'curl-error').read_text(errors='replace')[:2000]
+print(json.dumps(report))
+sys.exit(0 if report['result']=='PASS' else 1)
+PY_DOH_CHECK
+  chmod 600 "$tmp/result.json"
+  if ((rc)); then install -m 600 "$tmp/result.json" "$STATE/doh-last-failure.json" || true; fi
+  mv -f "$tmp/result.json" "$STATE/doh-last.json" || rc=1
+  rm -rf "${tmp:?}"
+  return "$rc"
+}
 # rp diag [--fix]: каждый участок пути проверяется отдельно, чтобы причина была названа, а не угадана
 cmd_diag() {
   need_vps1
@@ -4229,7 +4287,14 @@ cmd_dns() {
       [[ -n $v ]] || die "rp dns set quad9 cloudflare   (пресеты: quad9 cloudflare google adguard; или https://адрес/dns-query)"
       vps1_set DNS_REMOTE "$v" && ok "DNS через туннель: $v" ;;
     test)
-      for u in $(py dns); do if doh_test "$u"; then ok "$u (DoH) отвечает"; else err "$u (DoH) не отвечает"; fi; done ;;
+      local urls failed=0
+      urls=$(py dns) || { err "Не удалось получить список DoH-серверов"; return 1; }
+      [[ -n $urls ]] || { err "Список DoH-серверов пуст"; return 1; }
+      for u in $urls; do
+        if doh_test "$u"; then ok "$u (DoH) отвечает"
+        else err "$u (DoH) не прошёл проверку; подробности: $STATE/doh-last-failure.json"; failed=1; fi
+      done
+      return "$failed" ;;
     ru)
       local addr="${2:-}"
       if [[ -z $addr ]]; then note "Российский DNS: $(cf DNS_RU 77.88.8.8) (напрямую с VPS-1)"; return 0; fi
@@ -4349,7 +4414,7 @@ cmd_test() {
     t_res T5 fail "IP выхода отличается от IP VPS-2 (выход $(mask_ip "$ip"), VPS-2 $(mask_ip "$want"))"
   fi
   d1=$(py dns | head -1)
-  doh_test "$d1" && t_res T6 ok "DoH через туннель ($d1)" || t_res T6 fail "DoH через туннель не отвечает ($d1)"
+  doh_test "$d1" && t_res T6 ok "DoH через туннель ($d1)" || t_res T6 fail "DoH не прошёл проверку ($d1); подробности: $STATE/doh-last-failure.json"
   code=$(sx -m 12 -o /dev/null -I -w '%{http_code}' https://www.instagram.com/ 2>/dev/null || true)
   [[ -n $code && $code != 000 ]] && t_res T6b ok "тестовый HTTPS-ресурс ответил (HTTP $code)" || t_res T6b fail "тестовый HTTPS-ресурс не ответил"
   note "UDP/DNS клиентов wg0 проверьте с клиента: nslookup example.com"

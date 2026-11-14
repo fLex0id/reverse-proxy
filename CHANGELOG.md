@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.9-lab.5 (unreleased, NOT_READY)
+
+- Validate DoH HTTP status/content type, transfer completion, DNS question,
+  response flags, record boundaries and an actual A answer. Reject HTML,
+  truncated/error responses and partial transfers instead of accepting byte count.
+- Store private structured probe diagnostics, including curl's failure reason.
+  `rp dns test` now returns failure for any failed resolver, an empty resolver list
+  or an error generating the list, while still checking all configured servers.
+
 ## 1.2.9-lab.4 (unreleased, NOT_READY)
 
 - Preserve the requested resolver address in intercepted DNS replies when a

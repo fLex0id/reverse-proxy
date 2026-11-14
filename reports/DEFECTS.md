@@ -1,5 +1,17 @@
 # Defect register (work in progress)
 
+## RP-014 P1: DoH diagnostic accepts invalid responses and returns false success
+The baseline DoH probe considered any body longer than 28 bytes successful,
+discarding curl's status through a wc pipeline. Eight negative fixtures reproduce
+false success: HTML, wrong content type/status/ID, truncated/error/empty-answer
+DNS and a failed transfer containing partial data. Also, `rp dns test` returns
+zero when resolvers fail or its resolver list is empty/cannot be generated;
+four command-status fixtures reproduce that behavior.
+Candidate lab.5 validates transport and DNS structure, keeps a private structured
+diagnostic and returns failure without skipping other configured resolvers.
+Fourteen probe/command-status cases pass locally; live qualification is pending.
+This correction does not yet explain the intermittent real Quad9 failure RP-005.
+
 ## RP-013 P1: DNS reply source reused across resolver destinations
 The lab.2 full regression had one timeout out of 768 DNS behaviors. Packet
 analysis confirms a real reply-address defect, not just a slow RU resolver:
