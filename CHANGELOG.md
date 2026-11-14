@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.9-lab.4 (unreleased, NOT_READY)
+
+- Preserve the requested resolver address in intercepted DNS replies when a
+  client reuses its UDP source port. Redirect WG DNS through conntrack to a
+  dedicated Xray inbound, retaining the existing split-DNS policy and kill switch.
+  Restrict the new listener to WG/loopback ingress. General UDP forwarding and
+  the pinned Xray version are unchanged.
+- Add repeated same-source-port DNS checks to each transport regression.
+
 ## 1.2.9-lab.3 (unreleased, NOT_READY)
 
 - Serialize mutating menu actions, installation, save and bundle creation with

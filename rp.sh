@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.3"
+SELF_VERSION="1.2.9-lab.4"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -4894,6 +4894,7 @@ CONF = os.environ.get("RP_CONF", "/etc/rp/rp.conf")
 CLIENTS = os.environ.get("RP_CLIENTS", "/etc/rp/clients.tsv")
 ETC = os.environ.get("RP_ETC", "/etc/rp")
 TPROXY_PORT = 14205
+DNS_HIJACK_PORT = 14206
 SOCKS_PORT = 1080
 ECHO_PORT = 7000
 EXIT_MARK = 255          # метка исходящих пакетов Xray в режимах hy2 (ip rule → таблица 200)
@@ -5145,6 +5146,11 @@ def xray_server(cfg):
     if cfg.get("SNIFF", "1") == "1":
         wg_tp["sniffing"] = sniff
     inb = [wg_tp,
+           # Conntrack reverses the DNS redirect to the resolver originally
+           # queried by the client. A normal socket avoids Xray full-cone
+           # sessions reusing the first resolver's transparent reply address.
+           {"tag": "dns-hijack", "listen": "0.0.0.0", "port": DNS_HIJACK_PORT, "protocol": "tunnel",
+            "settings": {"network": "tcp,udp", "address": "127.0.0.1", "port": 53}},
            # локальный SOCKS только с паролем (127.0.0.1): пароль в rp.conf, в аргументы процессов не попадает
            {"tag": "socks-in", "listen": "127.0.0.1", "port": SOCKS_PORT, "protocol": "socks",
             "settings": {"auth": "password", "accounts": [{"user": cfg["SOCKS_USER"], "pass": cfg["SOCKS_PASS"]}],
@@ -5210,6 +5216,7 @@ def xray_server(cfg):
         return kw
 
     rules = [rule(inboundTag=["socks-in"], **exit_ref),
+             rule(inboundTag=["dns-hijack"], outboundTag="dns-out"),
              rule(inboundTag=["wg-tp"], port="53", network="tcp,udp", outboundTag="dns-out")]
     if in_tags:
         rules.append(rule(inboundTag=in_tags, ip=["127.0.0.1"], port=str(ECHO_PORT), outboundTag="local-echo"))
@@ -5413,7 +5420,7 @@ def client_conf(cfg, name):
 
 
 def nft_rules(cfg):
-    """Fail-closed: forward с/на wg0 запрещён, TCP/UDP уходит в TPROXY, IPv6 блокируется."""
+    """Fail-closed: WG forward blocked; DNS redirected, other TCP/UDP TPROXY, IPv6 blocked."""
     net = cfg.get("WG_NET", "10.66.0.0/24")
     return """#!/usr/sbin/nft -f
 # Сгенерировано rp. Правка вручную не сохраняется — используйте rp apply.
@@ -5427,6 +5434,8 @@ table inet rp_guard {
   }
   chain input {
     type filter hook input priority -100; policy accept;
+    # DNS interception is accessible only through the client WG interface.
+    iifname != "wg0" iifname != "lo" meta l4proto { tcp, udp } th dport %(dns)d drop
     # WG между VPS слушает только loopback: снаружи порт закрыт
     iifname != "lo" udp dport 51821 drop
     # эхо-сервер для проб доступен только с loopback и из внутреннего WG-интерфейса
@@ -5438,10 +5447,16 @@ delete table ip rp_tp
 table ip rp_tp {
   chain pre {
     type filter hook prerouting priority -150; policy accept;
+    # Let conntrack redirect DNS at dstnat priority; never forward it directly.
+    iifname "wg0" meta l4proto { tcp, udp } th dport 53 return
     iifname "wg0" ip daddr %(gw)s icmp type echo-request accept
     iifname "wg0" meta l4proto tcp tproxy to :%(tp)d meta mark set 1 accept
     iifname "wg0" meta l4proto udp tproxy to :%(tp)d meta mark set 1 accept
     iifname "wg0" drop
+  }
+  chain dns_redirect {
+    type nat hook prerouting priority dstnat; policy accept;
+    iifname "wg0" meta l4proto { tcp, udp } th dport 53 redirect to :%(dns)d
   }
   chain in {
     type filter hook input priority -50; policy accept;
@@ -5456,7 +5471,7 @@ table ip6 rp_block6 {
     iifname "wg0" drop
   }
 }
-""" % {"tp": TPROXY_PORT, "net": net, "gw": cfg.get("WG_NET_GW", "10.66.0.1")}
+""" % {"tp": TPROXY_PORT, "dns": DNS_HIJACK_PORT, "net": net, "gw": cfg.get("WG_NET_GW", "10.66.0.1")}
 
 
 # ── Пакет для VPS-2 ──────────────────────────────────────────────────────

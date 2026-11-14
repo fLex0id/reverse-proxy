@@ -9,7 +9,8 @@ below `lab/private` (both ignored, mode 0700).
   independent WireGuard client namespace with a veth underlay. It adds only its
   own NAT table, but enables host IPv4 forwarding; previous value is recorded.
 - `transport_matrix.py --lab1 ALIAS --lab2 ALIAS --client ALIAS --output DIR`:
-  select each transport, run built-in checks, generate actual client HTTPS/DNS,
+  historical baseline runner; use `full_transport_regression.py` for new runs.
+  Select each transport, run built-in checks, generate actual client HTTPS/DNS,
   and capture packets on both external interfaces. A successful capture command
   alone is not a leak-test PASS. Review skipped T8/static T7 explicitly.
 - `dns-probe.py RESOLVER NAME [--type NUMBER] [--tcp]`: standard-library DNS probe
@@ -30,7 +31,28 @@ below `lab/private` (both ignored, mode 0700).
   Install `dns-probe.py` at `/root/rp-lab/dns-probe.py` on the auxiliary host first.
 - `application_matrix.py` takes the same arguments; install `application_probe.py`
   under `/root/rp-lab/` on the auxiliary host. Tests HTTP, HTTPS, DoH, DoT, HTTP/3,
-  STUN and the explicitly disabled IPv6 case. Requires curl with HTTP/3 support.
+  Google and Cloudflare STUN independently, and the explicitly disabled IPv6 case.
+  Requires curl with HTTP/3 support. A failure at one STUN endpoint is retained
+  even if the other succeeds; compare the same numeric destination directly.
+- `full_transport_regression.py` takes the same four host/output arguments:
+  verify the deployed script hash, select each transport, run complete built-in
+  checks including restart, repeat full T3 30 times, then run DNS/application
+  matrices with three simultaneous PCAP streams and 90 same-port DNS queries.
+  Install `dns_source_reuse.py` under `/root/rp-lab/` on the auxiliary host first.
+  Restores auto after completion.
+  Stop and inspect remote state on a harness/SSH timeout; do not blindly rerun.
+- `mtu_probe.py` takes the same arguments and compares actual application traffic
+  at inner WG MTU 1080 and 1280 on both Hysteria transports. Runtime changes have
+  independent systemd restoration timers; saved configuration is unchanged.
+- `prepare_enospc.py`: run on LAB-2 with the same helper path as transaction E2E.
+  Cause real ENOSPC in a 128-KiB transaction-directory tmpfs, verify recovery,
+  then unmount it. The root filesystem is not filled.
+- `dns_source_reuse.py`: run inside the client namespace; send DNS queries to
+  three resolver addresses from one UDP source port and validate the reply source.
+- `dns_redirect_trial.py`: LAB-1-only experimental regression fixture. Temporarily
+  redirect DNS through conntrack into a separate inbound with the existing DNS
+  policy. Validates nft/Xray first; restores files/services after 180 seconds or
+  via an independent 240-second timer. It is not part of the installed candidate.
 - `failover.py --lab1 ALIAS --lab2 ALIAS --client ALIAS --lab1-ip IP --output DIR`:
   block only LAB-2's packet-up TCP/8443 and measure real client recovery, with
   an independent timed rule cleanup. Other configured ports require adapting
@@ -55,3 +77,8 @@ when locally assigned, otherwise the local source of the route to PUBLIC_IP
 (NAT deployments). Set `HY2_BIND_IP` in rp.conf for an explicit local interface
 address. Unassigned/wildcard addresses are rejected. Apply configuration again
 after interface-address changes; the current CLI accepts an IPv4 public endpoint.
+
+The inner WireGuard factory MTU is now 1280. `rp migrate` replaces the former
+factory value 1080, preserving other operator values; `rp push` updates the peer.
+Both runtime link MTUs must match their generated files. Values below 1228 cannot
+carry QUIC's minimum UDP datagram over IPv4 and are rejected during rendering.

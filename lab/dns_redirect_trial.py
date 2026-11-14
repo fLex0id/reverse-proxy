@@ -6,7 +6,6 @@ existing Xray DNS policy and general UDP forwarding; no global cone toggle.
 """
 import json
 from pathlib import Path
-import shutil
 import subprocess
 import time
 import uuid
@@ -14,8 +13,10 @@ import uuid
 root = Path('/root/rp-lab/dns-redirect-' + uuid.uuid4().hex[:8])
 root.mkdir(mode=0o700)
 paths = [Path('/etc/rp/xray.json'), Path('/etc/rp/rp.nft')]
+if any(x['tag'] == 'dns-hijack' for x in json.loads(paths[0].read_text())['inbounds']):
+    raise SystemExit('Use a pre-fix candidate: this installation already has DNS redirect')
 for path in paths:
-    shutil.copy2(path, root / path.name)
+    subprocess.run(['cp', '-p', str(path), str(root / path.name)], check=True)
 restore = root / 'restore.sh'
 restore.write_text('#!/bin/bash\nset -e\n' + ''.join(
     'cp -p ' + str(root / path.name) + ' ' + str(path) + '\n' for path in paths) +

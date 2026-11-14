@@ -72,4 +72,7 @@ done
         good=len(items)==expected_count and not bad
         record(name,'PASS' if good else 'FAIL',{'cases':len(items),'nonpassing':bad,
             'leak_analysis':'UNKNOWN until PCAP attribution reviewed'},started)
+        if suite == 'dns_matrix.py':
+            remote(a.client, shlex.join(['ip', 'netns', 'exec', 'rp-lab-client', 'python3',
+                '/root/rp-lab/dns_source_reuse.py', '--rounds', '30']), transport+'-dns-source-reuse')
 remote(a.lab1,'rp tunnel auto','restore-auto')

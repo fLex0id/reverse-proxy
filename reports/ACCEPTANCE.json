@@ -51,8 +51,12 @@
     },
     {
       "id": "F10",
-      "result": "NOT_TESTED",
-      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+      "result": "FAIL",
+      "reason": "RP-013: packet-confirmed DNS reply uses a previous resolver address when a client UDP source port is reused; other DNS acceptance scenarios still pending",
+      "evidence": [
+        "reports/DEFECTS.md#rp-013-p1-dns-reply-source-reused-across-resolver-destinations",
+        "lab/dns_source_reuse.py"
+      ]
     },
     {
       "id": "F11",

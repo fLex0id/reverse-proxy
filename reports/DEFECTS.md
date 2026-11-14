@@ -9,6 +9,18 @@ The connected UDP client correctly rejected it. Both resolvers are intercepted;
 this does not show a direct foreign DNS leak. Deterministic source-port reuse
 reproduction and a correction are pending. Do not extend timeouts to conceal it.
 
+Follow-up: a deterministic single-socket probe reproduced 6 wrong-source replies
+out of 9 with matching DNS IDs. Xray 26.4.25 groups full-cone UDP by client source;
+the DNS outbound emits responses without destination metadata, so dokodemo uses
+the session's first transparent reply socket. A laboratory prototype redirects
+DNS through conntrack into a separate ordinary inbound. It preserves the existing
+DNS outbound/RU/DoH policy and leaves general UDP/full-cone behavior unchanged.
+After startup, 90 same-port queries and all 192 ordinary DNS behaviors pass;
+HTTP/HTTPS/DoH/DoT/HTTP3/Cloudflare STUN also pass. Google STUN remains FAIL.
+Four initial five-second DNS timeouts after the prototype restart are retained
+separately, not counted as success. Candidate lab.4 includes the correction;
+full deployment, four-transport and fail-closed acceptance remain pending.
+
 ## RP-012 follow-up: live WireGuard MTU was not applied
 Real migration changed the generated file to 1280 but the link stayed at 1080:
 `wg syncconf` strips wg-quick fields including MTU. Apply now explicitly sets

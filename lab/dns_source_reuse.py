@@ -5,6 +5,7 @@ import json
 import secrets
 import socket
 import struct
+import time
 
 p = argparse.ArgumentParser()
 p.add_argument('--rounds', type=int, default=3)
@@ -20,8 +21,15 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             query += b'\x07example\x03com\0' + struct.pack('!HH', 1, 1)
             sock.sendto(query, (target, 53))
             try:
-                reply, source = sock.recvfrom(65535)
-                ri, flags, qd, an, ns, ar = struct.unpack('!6H', reply[:12])
+                deadline = time.monotonic() + 5
+                while True:
+                    sock.settimeout(max(0.001, deadline - time.monotonic()))
+                    reply, source = sock.recvfrom(65535)
+                    ri, flags, qd, an, ns, ar = struct.unpack('!6H', reply[:12])
+                    if ri == ident:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError('no matching DNS reply before deadline')
                 ok = source == (target, 53) and ri == ident and flags & 0x8000 and flags & 15 == 0 and an > 0
                 row = dict(round=repeat, destination=target, source=source,
                            id=ident, reply_id=ri, local_port=sock.getsockname()[1],
