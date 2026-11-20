@@ -18,6 +18,7 @@ import uuid
 p = argparse.ArgumentParser()
 for arg in ['lab1', 'lab2', 'client-ip', 'output']:
     p.add_argument('--' + arg, required=True)
+p.add_argument('--expect', choices=['route', 'guard-drop'], default='route')
 a = p.parse_args()
 socket.inet_aton(a.client_ip)
 out = Path(a.output)
@@ -29,6 +30,16 @@ port = 45973
 
 def ssh(host, cmd):
     return subprocess.run(['ssh', '-o', 'BatchMode=yes', host, cmd], text=True, capture_output=True, timeout=25)
+
+def drops():
+    result = ssh(a.lab1, 'nft -j list chain inet rp_guard output')
+    if result.returncode:
+        if a.expect == 'route':
+            return 0  # The baseline deliberately has no output guard.
+        raise RuntimeError('output guard absent')
+    return sum(expr['counter']['packets']
+               for item in json.loads(result.stdout)['nftables'] if 'rule' in item
+               for expr in item['rule']['expr'] if 'counter' in expr)
 
 inject = r'''import socket, struct, sys
 src = socket.inet_aton(sys.argv[1]); dst = socket.inet_aton('10.77.0.1')
@@ -69,6 +80,7 @@ def packets(path):
                    sport=int.from_bytes(tcp[:2], 'big'), dport=int.from_bytes(tcp[2:4], 'big'),
                    flags=tcp[13])
 
+before = drops()
 try:
     check = ssh(a.lab1, "ss -H -lnt 'sport = :45973'")
     if check.returncode or check.stdout.strip():
@@ -102,7 +114,10 @@ observed = {label: list(packets(out / (label + '.pcap'))) for label in ['underla
 sent = any(x['source'] == a.client_ip and x['target'] == '10.77.0.1' and x['flags'] == 16 for x in observed['inner'])
 leaks = [x for x in observed['underlay'] if x['source'] == '10.77.0.1' and x['flags'] & 4]
 returned = [x for x in observed['inner'] if x['source'] == '10.77.0.1' and x['flags'] & 4]
-report = dict(result='PASS' if sent and returned and not leaks else 'FAIL',
+delta = drops() - before
+expected = bool(returned) if a.expect == 'route' else not returned and delta >= 1
+report = dict(result='PASS' if sent and expected and not leaks else 'FAIL', expectation=a.expect,
+              output_guard_drops=delta,
               injected_ack_seen=sent, underlay_resets=len(leaks), inner_resets=len(returned), packets=observed)
 (out / 'results.json').write_text(json.dumps(report, indent=2) + '\n')
 print(json.dumps(report), flush=True)

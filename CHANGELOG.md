@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.9-lab.7 (unreleased, NOT_READY)
+
+- On VPS-2, query installed RPM dependencies before requesting only missing
+  packages from DNF. Code updates no longer refresh repositories or upgrade
+  already installed base packages unnecessarily. Missing dependencies remain
+  fatal; verify installed packages and required commands before proceeding.
+- Keep DNF diagnostics in a private package log instead of discarding them.
+
 ## 1.2.9-lab.6 (unreleased, NOT_READY)
 
 - Route kernel-generated replies from the inner WG address through its exit

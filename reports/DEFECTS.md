@@ -1,5 +1,18 @@
 # Defect register (work in progress)
 
+## RP-016 P2: code update unnecessarily depends on OS package mirrors
+Real lab.6 push failed at unconditional `dnf install` because the configured
+Rocky mirror returned HTTP 404 for repository metadata. All five requested base
+packages were already installed, with usable commands. Automatic rollback
+restored the previous tunnel and reached ROLLED_BACK; the failure was not hidden.
+
+Candidate lab.7 queries RPM first, installs only missing packages, then verifies
+the complete required package set and commands. It does not change repositories,
+disable verification or perform unrelated OS upgrades. DNF errors are preserved
+in a private log. Five fixture cases cover existing dependencies with unavailable
+repositories, missing-only/fresh installation, failed DNF and falsely successful
+DNF without an installed dependency. Live repeat push is pending.
+
 ## RP-015 P1: unmarked kernel TCP resets escape through VPS-1 underlay
 During paired Quad9 probes, LAB-1 emitted 18 unencrypted TCP RST packets on ens18
 with source 10.77.0.1 and resolver destinations. They contained no DNS payload,
@@ -15,7 +28,10 @@ VPN reliability or DNS resolver is needed to reproduce the defect.
 Candidate lab.6 routes source 10.77.0.1/32 through the existing fail-closed table
 200 and drops any remaining output from that address outside WG/loopback.
 The source rule is explicitly removed on uninstall and checked by static T7.
-Live candidate validation is pending.
+Real candidate validation: the same ACK now returns one RST through wg-exit and
+zero on ens18. With the source rule deliberately removed, the independent output
+guard drops the reset (counter +1); no underlay reset escapes. Rule restored.
+See DOH-2026-11-20.md. Full four-transport regression is still required.
 
 ## RP-014 P1: DoH diagnostic accepts invalid responses and returns false success
 The baseline DoH probe considered any body longer than 28 bytes successful,
@@ -26,8 +42,9 @@ zero when resolvers fail or its resolver list is empty/cannot be generated;
 four command-status fixtures reproduce that behavior.
 Candidate lab.5 validates transport and DNS structure, keeps a private structured
 diagnostic and returns failure without skipping other configured resolvers.
-Fourteen probe/command-status cases pass locally; live qualification is pending.
-This correction does not yet explain the intermittent real Quad9 failure RP-005.
+Fourteen probe/command-status cases pass locally. Sourced candidate functions
+collected 80 real four-transport probes and 120 paired direct/proxied probes,
+preserving actual TLS failures. See DOH-2026-11-20.md for RP-005 attribution.
 
 ## RP-013 P1: DNS reply source reused across resolver destinations
 The lab.2 full regression had one timeout out of 768 DNS behaviors. Packet
@@ -48,7 +65,9 @@ After startup, 90 same-port queries and all 192 ordinary DNS behaviors pass;
 HTTP/HTTPS/DoH/DoT/HTTP3/Cloudflare STUN also pass. Google STUN remains FAIL.
 Four initial five-second DNS timeouts after the prototype restart are retained
 separately, not counted as success. Candidate lab.4 includes the correction;
-full deployment, four-transport and fail-closed acceptance remain pending.
+the deployed lab.4 subsequently passed all 360 same-port and 768 ordinary DNS
+checks across four transports. Sustained Xray outage blocked the tested requests.
+Complete DNS policy/outage/native-IPv6 acceptance remains pending.
 
 ## RP-012 follow-up: live WireGuard MTU was not applied
 Real migration changed the generated file to 1280 but the link stayed at 1080:
@@ -137,6 +156,15 @@ During the four-transport matrix, hy2-wg T6 to Quad9 failed once while client HT
 and DNS succeeded. Other transports passed that probe. Not dismissed as flaky;
 repeat and packet capture required to distinguish upstream refusal from transport
 or probe implementation defects.
+
+Follow-up 2026-11-20: 120 paired probes show seven proxied and ten direct Quad9
+TLS failures, while all 40 Cloudflare probes pass. Incoming Quad9-addressed TCP
+resets are visible on LAB-2. Both named/SNI and IP URLs fail independently of rp.
+Classification: ENVIRONMENT_DEPENDENT, external origin probable but exact source
+unproven. The operator confirms VPN/TSPU conditions outside the lab. Preserve
+the failures and proceed with other work; do not treat them as PASS or block
+development indefinitely. A separate local reset leak was found and fixed as
+RP-015. See DOH-2026-11-20.md.
 
 ## Candidate regression: rollback readiness
 Real rollback restored the old files and started the correct transport, but an

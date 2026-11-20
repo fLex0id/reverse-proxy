@@ -54,6 +54,19 @@ below `lab/private` (both ignored, mode 0700).
   HTTPS. Requires independent management SSH; never overlap another fault suite.
 - `dns_source_reuse.py`: run inside the client namespace; send DNS queries to
   three resolver addresses from one UDP source port and validate the reply source.
+- `doh_probe_matrix.py --lab1 ALIAS --candidate REMOTE_RP_PATH --output DIR`:
+  source an uploaded candidate's strict DoH probe without installation, test
+  all configured resolvers on each transport, retain every diagnostic and restore auto.
+- `doh_path_compare.py --lab1 ALIAS --lab2 ALIAS --candidate REMOTE_RP_PATH --output DIR`:
+  upload the same candidate path on both hosts first. Compare proxied and direct
+  probes to identical numeric resolver destinations, both IP and hostname/SNI
+  URLs, while capturing both underlays. `--transport` selects the tested tunnel.
+- `wg_reset_probe.py --lab1 ALIAS --lab2 ALIAS --client-ip LAB_CLIENT_IPV4 --output DIR`:
+  one synthetic TCP ACK through inner WG to a closed LAB-1 port must get its
+  reset through WG, never LAB-1 underlay. The source address must be the authorized
+  lab client. `--expect guard-drop` verifies the secondary output guard with
+  counter evidence when the source rule is deliberately absent. The fixture
+  does not remove that rule itself; arm independent restoration before doing so.
 - `dns_redirect_trial.py`: LAB-1-only experimental regression fixture. Temporarily
   redirect DNS through conntrack into a separate inbound with the existing DNS
   policy. Validates nft/Xray first; restores files/services after 180 seconds or

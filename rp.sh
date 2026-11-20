@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.6"
+SELF_VERSION="1.2.9-lab.7"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -2791,6 +2791,16 @@ rp_msg() {
 }
 rp_fail() { rp_msg "ERROR: $*" >&2; exit 1; }
 rp_dl() { local d=2; for _ in 1 2 3 4 5; do curl -fsSL --connect-timeout 10 -m 180 -o "$2" "$1" && [[ -s $2 ]] && return 0; sleep $d; d=$((d * 2)); done; return 1; }
+rp_pkg_install() {
+  local p; local -a missing=()
+  for p in "$@"; do rpm -q "$p" >/dev/null 2>&1 || missing+=("$p"); done
+  # A code update must not depend on repository availability or upgrade already
+  # installed OS packages. Fresh installations still require every dependency.
+  if ((${#missing[@]})); then
+    dnf -y install "${missing[@]}" || return 1
+  fi
+  rpm -q "$@" >/dev/null 2>&1
+}
 rp_main() {
   exec </dev/null   # скрипт уже прочитан целиком (rp_main — последняя строка): команды не должны читать остаток потока
   [[ $EUID -eq 0 ]] || rp_fail "Нужен root"
@@ -2817,7 +2827,11 @@ rp_main() {
   rp_msg "rp: установка VPS-2"
   # 2. пакеты
   rp_msg "Пакеты"
-  dnf -y install chrony nftables curl unzip tar >/dev/null 2>&1 || rp_fail "dnf: не поставились базовые пакеты"
+  install -m 600 /dev/null /var/lib/rp/packages.log || rp_fail "Не удалось создать журнал пакетов"
+  rp_pkg_install chrony nftables curl unzip tar >"/var/lib/rp/packages.log" 2>&1 || rp_fail "Не установлены базовые пакеты; подробности: /var/lib/rp/packages.log"
+  local tool; for tool in chronyd nft curl unzip tar; do
+    command -v "$tool" >/dev/null || rp_fail "Пакет установлен, но команда $tool отсутствует; восстановите пакет"
+  done
   command -v wg >/dev/null || { dnf -y install wireguard-tools >/dev/null 2>&1 || { dnf -y install epel-release >/dev/null 2>&1 && dnf -y install wireguard-tools >/dev/null 2>&1; }; }
   command -v wg >/dev/null || rp_fail "wireguard-tools не установились (нужен EPEL на Rocky 9)"
   systemctl enable --now chronyd >/dev/null 2>&1
