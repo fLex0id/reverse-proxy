@@ -22,10 +22,17 @@ Read both supplied specifications in full. Implementation must preserve all four
 transports, full SNI coverage, T1-T3, and the F01-F13 acceptance matrix.
 Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
 
-## Current checkpoint (2026-11-20)
+## Current checkpoint (2026-11-21)
 
-Both endpoints now run source e50929e, 1.2.9-lab.11, after successful pushes
-and complete XHTTP-pair and Hysteria-pair 4-to-2-to-4 deployment cycles.
+Both endpoints now run source 29f65ed, 1.2.9-lab.12. Migration and ordinary push
+passed complete T1–T3 on all four transports and reached COMMITTED, with auto mode
+and watcher active. Actual failed/inactive-service restart tests pass on both
+roles, including immediate Type=simple process exit; see RESTART-2026-11-20.md.
+124 local tests and generated-code static checks pass. A lab.12 NAT-failure and
+kill/reboot recovery repeat, followed by a full four-transport regression, is
+currently running under `lab/artifacts/lab12-validation-20261121`.
+
+Lab.11 completed XHTTP-pair and Hysteria-pair 4-to-2-to-4 deployment cycles.
 Lab.9 push passed all four complete T1–T3 and reached COMMITTED. Its installed
 `rp diag` passed on each of four transports after fixing both false-success
 statuses and the incorrect firewalld intra-zone check. A real stopped-rp-net
@@ -47,8 +54,12 @@ complete T1–T3 and committed. RP-020's baseline cycle exposed retained unused
 WG secrets and a legacy TCP configuration. Lab.11 removes them correctly; both
 repeat pair cycles passed 39 checks each, including client HTTPS/DNS/HTTP3,
 identity/settings preservation, full four-transport restoration and auto mode.
-See TRANSPORT-CLEANUP-2026-11-20.md. 118 local regression tests and generated-code
-static checks pass.
+See TRANSPORT-CLEANUP-2026-11-20.md. That checkpoint passed 118 local tests.
+Nine additional lab.11 download/checksum/extraction/network faults all caused
+automatic rollback and restored hashes/watch/client. Three actual installer
+SIGKILL/reboot points passed installed boot recovery in approximately 30 seconds.
+The first download fixture had an invalid sysctl passthrough and required explicit
+recovery; its failure is retained separately from the corrected passing repeat.
 Final clean installation and six-hour soak have NOT started.
 
 All three machines became available again on 2026-11-20; their clocks were
@@ -80,6 +91,10 @@ New commits since dcee312:
   include binary staging files in durable restoration.
 - e50929e: omit unused inner-WG credentials and remove obsolete VPS-2 configs;
   cover every nonempty transport subset and real pair round trips.
+- 67e289b: record diagnostic, installer, packet and transport-cleanup evidence.
+- 7a72456: exercise download/integrity/extraction/network and installer kill/reboot faults.
+- 29f65ed: restart inactive client WG/echo, propagate errors and verify readiness
+  before reporting successful restart on both roles.
 
 Actual ENOSPC during transaction preparation: 6/6 checks PASS, cleanup complete.
 HTTP/3 with each Hysteria variant: FAIL at MTU 1080, PASS at 1280, with simultaneous
@@ -112,8 +127,8 @@ backup/pending removed, watch/live tunnel healthy, manual pin preserved, client
 HTTPS working. This used controlled owned-file mutation, not every installer
 failure point. Full clean/reboot/load/concurrency acceptance is still pending.
 
-Next priorities: actual installer interruption at publication/cleanup points;
-remaining download/extract/service failures and concurrent operations; complete self-update
+Next priorities: complete the current lab.12 regression; remaining installer
+interruption/SSH/concurrent-operation coverage; complete self-update
 rollback (the current self-updater restores only its executable on migration
 failure and releases its operation lock before starting migration); full CLI/menu,
 policy, load and failover coverage. Installer writes that are not explicitly
