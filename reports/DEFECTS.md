@@ -1,5 +1,22 @@
 # Defect register (work in progress)
 
+## RP-018 P2: egress diagnostics inspect the wrong firewalld setting
+Real `rp egress` returned `fw_forward=no` plus an orphan second `no` although
+HTTP/3, TCP and DNS traversed the active rp-tunnel-egress ACCEPT policy. The
+diagnostic queried intra-zone forwarding, while rp uses an inter-zone policy.
+The duplicated output came from echoing `no` after firewall-cmd had already
+printed it before returning status 1. See the upstream
+[zone documentation](https://firewalld.org/documentation/man-pages/firewalld.zone.html)
+and [policy documentation](https://firewalld.org/documentation/man-pages/firewalld.policies.html).
+
+Candidate lab.9 checks the active runtime policy, ACCEPT target, ingress and
+egress zones. Failed queries remain unknown; an absent firewalld is explicitly
+not applicable. It does not broaden firewall rules or confuse permanent XML
+with runtime state. Six fixtures cover healthy, inactive/rejecting/wrong-direction,
+unavailable and mismatched-zone cases. The sourced candidate reports yes against
+the real active policy, where the installed baseline reports no. Full deployment
+and four-transport diagnostic checks are next.
+
 ## RP-017 P1: diagnostic errors still return success
 `rp diag` unconditionally returned zero after printing service, route, NAT,
 SOCKS or DoH failures. Unknown control/egress state and absent DNS configuration
@@ -11,7 +28,11 @@ Candidate lab.8 accumulates failed/unconfirmed checks, preserves curl status,
 checks all configured DoH endpoints and validates arguments. `--fix` executes a
 fresh read-only diagnostic pass, so its result describes verified final state.
 The seven test methods include all negative scenarios, successful repairs and
-failed repairs. Live four-transport diagnostic coverage is pending.
+failed repairs. On the real lab, stopping rp-net while the SOCKS/inner path remained
+available produced installed lab.7 rc=0 and candidate lab.8 rc=1. The service stayed
+inactive through both probes; a separate timer was armed first. Network/client WG
+were restored, all three services checked individually and client HTTPS recovered.
+Live four-transport diagnostic coverage is pending.
 
 ## RP-016 P2: code update unnecessarily depends on OS package mirrors
 Real lab.6 push failed at unconditional `dnf install` because the configured

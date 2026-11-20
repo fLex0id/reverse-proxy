@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.8"
+SELF_VERSION="1.2.9-lab.9"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -2104,8 +2104,29 @@ cmd_setorder() { # rp _setorder список — оставить только �
   say "Приоритеты: $l (остальные намеренно исключены администратором)"
 }
 # egress — отчёт «ключ=значение» о том, может ли VPS-2 пропускать трафик VPS-1 в интернет
+fw_egress_state() {
+  local zone=$1 external=$2 info rc
+  [[ -n $zone && -n $external ]] || { echo unknown; return; }
+  [[ $zone == rp-tunnel && $external != rp-tunnel ]] || { echo no; return; }
+  # --query-forward describes INTRA-zone forwarding. Our managed path uses
+  # an active INTER-zone policy; inspect runtime state, not permanent XML.
+  info=$(LC_ALL=C firewall-cmd --info-policy=rp-tunnel-egress 2>/dev/null) || { echo unknown; return; }
+  if ! grep -Eq '^rp-tunnel-egress[[:space:]]+\(active\)$' <<<"$info" ||
+     ! grep -Eq '^[[:space:]]+target:[[:space:]]+ACCEPT$' <<<"$info"; then
+    echo no; return
+  fi
+  local query
+  for query in "--query-ingress-zone=$zone" "--query-egress-zone=$external"; do
+    if firewall-cmd --policy=rp-tunnel-egress "$query" >/dev/null 2>&1; then :
+    else
+      rc=$?; if ((rc == 1)); then echo no; else echo unknown; fi
+      return
+    fi
+  done
+  echo yes
+}
 cmd_egress() {
-  local z ez
+  local z ez external
   say "ip_forward=$(sysctl -n net.ipv4.ip_forward 2>/dev/null)"
   say "rp_filter_all=$(sysctl -n net.ipv4.conf.all.rp_filter 2>/dev/null)"
   say "nat=$(nft list table ip rp_nat >/dev/null 2>&1 && echo yes || echo NO)"
@@ -2113,11 +2134,13 @@ cmd_egress() {
   say "default_if=$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')"
   if systemctl is-active --quiet firewalld; then
     ez=$(ip -4 route show default | awk '{print $5; exit}')
-    z=$(firewall-cmd --get-zone-of-interface=rp-wg 2>/dev/null)
+    z=$(firewall-cmd --get-zone-of-interface=rp-wg 2>/dev/null) || z=""
+    external=$(firewall-cmd --get-zone-of-interface="$ez" 2>/dev/null) || external=""
+    [[ -n $external ]] || external=$(firewall-cmd --get-default-zone 2>/dev/null) || external=""
     say "fw_zone_wg=${z:-—}"
-    say "fw_zone_ext=$(firewall-cmd --get-zone-of-interface="$ez" 2>/dev/null || echo —)"
-    say "fw_forward=$([[ -n $z ]] && firewall-cmd --zone="$z" --query-forward 2>/dev/null || echo no)"
-  else say "fw_zone_wg=нет-firewalld"; fi
+    say "fw_zone_ext=${external:-—}"
+    say "fw_forward=$(fw_egress_state "$z" "$external")"
+  else say "fw_zone_wg=нет-firewalld"; say "fw_forward=not-applicable"; fi
   say "internet=$(curl -4 -fsS -m 8 -o /dev/null https://1.1.1.1/cdn-cgi/trace && echo ok || echo FAIL)"
 }
 # fixnet — привести пересылку и NAT в рабочее состояние (идемпотентно)
@@ -4269,7 +4292,10 @@ cmd_diag() {
       local fixv2=0
       [[ ${E[ip_forward]:-} == 1 ]] && ok "VPS-2: пересылка IPv4 включена" || { err "VPS-2: IPv4 forwarding выключен"; fixv2=1; }
       [[ ${E[nat]:-} == yes ]] && ok "VPS-2: NAT для WG присутствует" || { err "VPS-2: NAT для WG отсутствует"; fixv2=1; }
-      [[ ${E[fw_forward]:-} == yes ]] || { err "VPS-2: WG forwarding ограничен или не подтверждён"; fixv2=1; }
+      case ${E[fw_forward]:-} in
+        yes|not-applicable) : ;;
+        *) err "VPS-2: политика firewalld для WG не подтверждена"; fixv2=1 ;;
+      esac
       if ((fixv2)); then
         failed=1
         if ((fix)); then vps2_run '/usr/local/bin/rp fixnet' && ok "Команда восстановления NAT на VPS-2 выполнена" || err "Не удалось исправить NAT на VPS-2"

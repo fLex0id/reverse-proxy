@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.9-lab.9 (unreleased, NOT_READY)
+
+- VPS-2 egress diagnostics inspect the active runtime `rp-tunnel-egress` policy,
+  its ACCEPT target and both zone directions. The unrelated intra-zone switch
+  no longer falsely reports a broken inter-zone route. Runtime-query failures
+  are unknown; no firewalld is explicitly not applicable. Firewall rules are
+  unchanged and each report field occupies one line.
+
 ## 1.2.9-lab.8 (unreleased, NOT_READY)
 
 - `rp diag` returns a nonzero status for failed or unconfirmed checks and checks
