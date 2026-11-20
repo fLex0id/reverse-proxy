@@ -1,0 +1,2 @@
+ChatGPT GitHub integration smoke test, 2026-11-21.
+Test-only file committed to isolated branch. No production code modified.
