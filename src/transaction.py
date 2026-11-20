@@ -27,6 +27,7 @@ UNITS = ['rp-watch.service', 'rp-xray@xhttp.service', 'rp-xray@xhttp2.service',
          'rp-hy2.service', 'rp-hy2o.service', 'wg-quick@rp-wg.service', 'rp-nat.service']
 BASE_PATHS = ['etc/rp', 'usr/local/lib/rp', 'usr/local/bin/rp',
               'usr/local/bin/xray', 'usr/local/bin/hysteria', 'usr/local/share/rp',
+              'usr/local/bin/xray.new', 'usr/local/bin/hysteria.new',
               'etc/wireguard/rp-wg.conf', 'etc/sysctl.d/99-rp.conf',
               'etc/firewalld/zones/rp-tunnel.xml',
               'etc/firewalld/policies/rp-tunnel-egress.xml']

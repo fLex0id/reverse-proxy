@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.9"
+SELF_VERSION="1.2.9-lab.10"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -1273,6 +1273,7 @@ UNITS = ['rp-watch.service', 'rp-xray@xhttp.service', 'rp-xray@xhttp2.service',
          'rp-hy2.service', 'rp-hy2o.service', 'wg-quick@rp-wg.service', 'rp-nat.service']
 BASE_PATHS = ['etc/rp', 'usr/local/lib/rp', 'usr/local/bin/rp',
               'usr/local/bin/xray', 'usr/local/bin/hysteria', 'usr/local/share/rp',
+              'usr/local/bin/xray.new', 'usr/local/bin/hysteria.new',
               'etc/wireguard/rp-wg.conf', 'etc/sysctl.d/99-rp.conf',
               'etc/firewalld/zones/rp-tunnel.xml',
               'etc/firewalld/policies/rp-tunnel-egress.xml']
@@ -2857,8 +2858,8 @@ rp_main() {
   done
   command -v wg >/dev/null || { dnf -y install wireguard-tools >/dev/null 2>&1 || { dnf -y install epel-release >/dev/null 2>&1 && dnf -y install wireguard-tools >/dev/null 2>&1; }; }
   command -v wg >/dev/null || rp_fail "wireguard-tools не установились (нужен EPEL на Rocky 9)"
-  systemctl enable --now chronyd >/dev/null 2>&1
-  id xray >/dev/null 2>&1 || useradd -r -s /sbin/nologin -M xray
+  systemctl enable --now chronyd >/dev/null 2>&1 || rp_fail "Не удалось запустить chronyd"
+  id xray >/dev/null 2>&1 || useradd -r -s /sbin/nologin -M xray || rp_fail "Не удалось создать пользователя xray"
   # 3. бинарники: закреплённые URL и SHA256
   case $(uname -m) in
     x86_64) xurl=$RP_X_URL_64; xsha=$RP_X_SHA_64; hurl=$RP_H_URL_AMD64; hsha=$RP_H_SHA_AMD64 ;;
@@ -2869,11 +2870,12 @@ rp_main() {
   rp_dl "$xurl" "$tmp/x.zip" || rp_fail "не скачался Xray"
   [[ $(sha256sum "$tmp/x.zip" | awk '{print $1}') == "$xsha" ]] || rp_fail "SHA256 Xray не совпала"
   unzip -qo "$tmp/x.zip" xray geoip.dat geosite.dat -d "$tmp/x" || rp_fail "не распаковался Xray"
-  install -m 755 "$tmp/x/xray" /usr/local/bin/xray.new && mv /usr/local/bin/xray.new /usr/local/bin/xray
-  install -d -m 755 /usr/local/share/rp; install -m 644 "$tmp/x/geoip.dat" "$tmp/x/geosite.dat" /usr/local/share/rp/
+  install -m 755 "$tmp/x/xray" /usr/local/bin/xray.new && mv /usr/local/bin/xray.new /usr/local/bin/xray || rp_fail "Не удалось записать/заменить Xray"
+  install -d -m 755 /usr/local/share/rp || rp_fail "Не удалось создать каталог данных Xray"
+  install -m 644 "$tmp/x/geoip.dat" "$tmp/x/geosite.dat" /usr/local/share/rp/ || rp_fail "Не удалось записать данные Xray"
   rp_dl "$hurl" "$tmp/h" || rp_fail "не скачалась Hysteria2"
   [[ $(sha256sum "$tmp/h" | awk '{print $1}') == "$hsha" ]] || rp_fail "SHA256 Hysteria2 не совпала"
-  install -m 755 "$tmp/h" /usr/local/bin/hysteria.new && mv /usr/local/bin/hysteria.new /usr/local/bin/hysteria
+  install -m 755 "$tmp/h" /usr/local/bin/hysteria.new && mv /usr/local/bin/hysteria.new /usr/local/bin/hysteria || rp_fail "Не удалось записать/заменить Hysteria2"
   # 4. files: distinguish an ordinary code update from re-provisioning after
   # VPS-1 was deleted and its management key was regenerated.  A stale manual
   # transport on VPS-2 otherwise pins the wrong newly installed bridge.
@@ -2885,44 +2887,49 @@ rp_main() {
     rp_msg "Обнаружен новый ключ управления VPS-1: прежняя фиксация транспорта не переносится"
     if [[ $RP_SAFE == 1 ]]; then
       for f in mode active since; do
-        if [[ -f /var/lib/rp/$f ]]; then cp -p /var/lib/rp/$f /var/lib/rp/$f.before-identity; fi
+        if [[ -f /var/lib/rp/$f ]]; then cp -p /var/lib/rp/$f /var/lib/rp/$f.before-identity || rp_fail "Не удалось сохранить состояние $f"; fi
       done
     fi
   fi
   rp_msg "Конфигурация и службы"
-  install -d -m 755 /var/lib/rp
+  install -d -m 755 /var/lib/rp || rp_fail "Не удалось создать каталог состояния"
   tar -xzf "$tmp/b.tgz" -C / || rp_fail "не распаковался бандл"
-  chown root:xray /etc/rp; chmod 750 /etc/rp
+  chown root:xray /etc/rp && chmod 750 /etc/rp || rp_fail "Не удалось защитить каталог конфигурации"
   local f; for f in /etc/rp/rp2.conf /etc/rp/hy2.yaml /etc/rp/hy2o.yaml /etc/rp/xray-xhttp.json /etc/rp/xray-xhttp2.json; do
-    [[ -f $f ]] && { chown root:xray "$f"; chmod 640 "$f"; }
+    if [[ -f $f ]]; then
+      chown root:xray "$f" && chmod 640 "$f" || rp_fail "Не удалось защитить $f"
+    fi
   done
-  install -d -m 700 /etc/wireguard; install -m 600 /etc/rp/rp-wg.conf /etc/wireguard/rp-wg.conf; chmod 600 /etc/rp/rp-wg.conf
+  install -d -m 700 /etc/wireguard && install -m 600 /etc/rp/rp-wg.conf /etc/wireguard/rp-wg.conf &&
+    chmod 600 /etc/rp/rp-wg.conf || rp_fail "Не удалось установить защищённый конфиг WireGuard"
   # shellcheck disable=SC1091
-  . /etc/rp/rp2.conf
+  . /etc/rp/rp2.conf || rp_fail "Не удалось прочитать настройки VPS-2"
   # конфиги исключённых транспортов не должны оставаться от прежнего бандла
   local ord=" ${TRANSPORT_ORDER:-} "
-  [[ $ord == *" hy2-wg "* ]] || rm -f /etc/rp/hy2.yaml
-  [[ $ord == *" hy2o-wg "* ]] || rm -f /etc/rp/hy2o.yaml
-  [[ $ord == *" reality-xhttp "* ]] || rm -f /etc/rp/xray-xhttp.json
-  [[ $ord == *" reality-xhttp2 "* ]] || rm -f /etc/rp/xray-xhttp2.json
+  [[ $ord == *" hy2-wg "* ]] || rm -f /etc/rp/hy2.yaml || rp_fail "Не удалён устаревший конфиг HY2"
+  [[ $ord == *" hy2o-wg "* ]] || rm -f /etc/rp/hy2o.yaml || rp_fail "Не удалён устаревший конфиг HY2 obfs"
+  [[ $ord == *" reality-xhttp "* ]] || rm -f /etc/rp/xray-xhttp.json || rp_fail "Не удалён устаревший конфиг XHTTP"
+  [[ $ord == *" reality-xhttp2 "* ]] || rm -f /etc/rp/xray-xhttp2.json || rp_fail "Не удалён устаревший конфиг XHTTP2"
   # VPS-2 may host unrelated services; never toggle its global IPv6 or
   # global rp_filter. ip_forward is necessary for the inner WG egress only.
   printf '# Managed by rp (VPS-2); do not disable global IPv6/rp_filter\nnet.ipv4.ip_forward=1\n' \
-    >/etc/sysctl.d/99-rp.conf
-  sysctl -q -p /etc/sysctl.d/99-rp.conf >/dev/null 2>&1
+    >/etc/sysctl.d/99-rp.conf || rp_fail "Не удалось записать sysctl"
+  sysctl -q -p /etc/sysctl.d/99-rp.conf >/dev/null 2>&1 || rp_fail "Не удалось применить sysctl"
   if [[ $(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null) == 1 ]]; then
     rp_msg '! IPv6 сейчас выключен на VPS-2 (возможно, прежней версией rp). rp его не включает автоматически; проверьте настройки других сервисов.'
   fi
-  command -v restorecon >/dev/null && restorecon -R /etc/rp /usr/local/bin /usr/local/lib/rp /usr/local/share/rp 2>/dev/null
-  systemctl daemon-reload
+  if command -v restorecon >/dev/null; then
+    restorecon -R /etc/rp /usr/local/bin /usr/local/lib/rp /usr/local/share/rp 2>/dev/null || rp_fail "Не восстановлены контексты SELinux"
+  fi
+  systemctl daemon-reload || rp_fail "Не удалось перечитать службы systemd"
   # 5. NAT и пересылка, фаервол (порты наружу не открываются); rp fixnet — единая реализация
   rp_msg "NAT и пересылка"
   RP_TX_INTERNAL=1 /usr/local/bin/rp fixnet || rp_fail "не удалось включить NAT/firewalld на VPS-2"
   # 6. SSH: ключ с ограничениями (только с loopback и внутреннего WG-адреса, без форвардинга)
-  install -d -m 700 /root/.ssh; touch /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys
-  sed -i '/ rp@vps1$/d' /root/.ssh/authorized_keys
-  printf 'from="127.0.0.1,10.77.0.1",restrict,pty %s rp@vps1\n' "$(grep '^SSH_PUB=' /etc/rp/rp2.conf | cut -d'"' -f2)" >>/root/.ssh/authorized_keys
-  systemctl is-active --quiet sshd || systemctl enable --now sshd >/dev/null 2>&1
+  install -d -m 700 /root/.ssh && touch /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys || rp_fail "Не удалось подготовить SSH"
+  sed -i '/ rp@vps1$/d' /root/.ssh/authorized_keys || rp_fail "Не удалось обновить ключ управления"
+  printf 'from="127.0.0.1,10.77.0.1",restrict,pty %s rp@vps1\n' "$(grep '^SSH_PUB=' /etc/rp/rp2.conf | cut -d'"' -f2)" >>/root/.ssh/authorized_keys || rp_fail "Не удалось записать ключ управления"
+  systemctl is-active --quiet sshd || systemctl enable --now sshd >/dev/null 2>&1 || rp_fail "Не удалось запустить SSH"
   local prl; prl=$(sshd -T 2>/dev/null | awk '/^permitrootlogin/{print $2}')
   [[ $prl == no ]] && rp_msg "! В sshd запрещён вход root (PermitRootLogin no): ключ rp работать не будет"
   # 7. Fresh provisioning intentionally resets old manual pin/state from a
@@ -2930,7 +2937,7 @@ rp_main() {
   # An ordinary safe 'rp push' preserves the operator's manual mode.
   if [[ $RP_SAFE != 1 || $rp_new_identity == 1 ]]; then
     rm -f /var/lib/rp/mode /var/lib/rp/mode-request /var/lib/rp/mode-result \
-          /var/lib/rp/active /var/lib/rp/since
+          /var/lib/rp/active /var/lib/rp/since || rp_fail "Не удалось очистить прежний режим"
     rp_msg "Новая установка: прежний ручной режим VPS-2 сброшен в auto"
   fi
   if [[ $RP_SAFE == 1 ]] && ! systemctl is-active --quiet rp-transaction-rollback.timer; then rp_fail "Таймер отката пропал во время установки"; fi

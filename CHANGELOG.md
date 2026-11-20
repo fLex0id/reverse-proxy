@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.9-lab.10 (unreleased, NOT_READY)
+
+- Abort VPS-2 installation when binary/data writes, publication, configuration
+  permissions, WG installation, sysctl, service reload or management-key updates
+  fail. Safe updates enter rollback instead of reaching READY using old files.
+- Include owned binary staging paths in durable rollback, so interrupted
+  publication does not leave newly created `.new` binaries behind.
+
 ## 1.2.9-lab.9 (unreleased, NOT_READY)
 
 - VPS-2 egress diagnostics inspect the active runtime `rp-tunnel-egress` policy,

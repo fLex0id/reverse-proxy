@@ -1,5 +1,21 @@
 # Defect register (work in progress)
 
+## RP-019 P1: failed installer writes continue to READY
+Six binary/data write and rename fixtures return false success on lab.9. A real
+VPS-2 installer run with a scoped one-shot failure of the Xray staging write
+confirmed the defect: the error was printed, installer rc=0, transaction READY
+after complete T1–T3 using the old Xray. The harness explicitly rolled it back;
+old configuration/binary hashes, watch and client traffic were restored.
+
+Candidate lab.10 makes these failures fatal and applies the same checked-error
+handling to configuration permissions, WG install, stale-file removal, sysctl,
+service reload and management-key writes. Durable backup roots include the two
+owned binary staging paths, permitting cleanup after publication failure or
+interruption. Six negative binary/data fixtures and the healthy path now pass.
+The repeat real fault matrix is pending; complete installer atomicity is not yet
+accepted. Faults are scoped to the installer environment and exact commands,
+without filling the root disk or changing global PATH.
+
 ## RP-018 P2: egress diagnostics inspect the wrong firewalld setting
 Real `rp egress` returned `fw_forward=no` plus an orphan second `no` although
 HTTP/3, TCP and DNS traversed the active rp-tunnel-egress ACCEPT policy. The
@@ -14,8 +30,9 @@ egress zones. Failed queries remain unknown; an absent firewalld is explicitly
 not applicable. It does not broaden firewall rules or confuse permanent XML
 with runtime state. Six fixtures cover healthy, inactive/rejecting/wrong-direction,
 unavailable and mismatched-zone cases. The sourced candidate reports yes against
-the real active policy, where the installed baseline reports no. Full deployment
-and four-transport diagnostic checks are next.
+the real active policy, where the installed baseline reports no. Lab.9 migration
+and push completed all four T1–T3 and COMMITTED. Installed `rp diag` then passed
+on each of four transports; the real egress report has one `fw_forward=yes` line.
 
 ## RP-017 P1: diagnostic errors still return success
 `rp diag` unconditionally returned zero after printing service, route, NAT,
@@ -32,7 +49,8 @@ failed repairs. On the real lab, stopping rp-net while the SOCKS/inner path rema
 available produced installed lab.7 rc=0 and candidate lab.8 rc=1. The service stayed
 inactive through both probes; a separate timer was armed first. Network/client WG
 were restored, all three services checked individually and client HTTPS recovered.
-Live four-transport diagnostic coverage is pending.
+Installed lab.9 diagnostic runs passed on all four transports. This does not
+close every repair/failure-mode case in F07.
 
 ## RP-016 P2: code update unnecessarily depends on OS package mirrors
 Real lab.6 push failed at unconditional `dnf install` because the configured
