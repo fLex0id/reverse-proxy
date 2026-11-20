@@ -11,7 +11,9 @@ the complete required package set and commands. It does not change repositories,
 disable verification or perform unrelated OS upgrades. DNF errors are preserved
 in a private log. Five fixture cases cover existing dependencies with unavailable
 repositories, missing-only/fresh installation, failed DNF and falsely successful
-DNF without an installed dependency. Live repeat push is pending.
+DNF without an installed dependency. Live repeat push passed with the same
+installed dependencies and unchanged repository configuration: all four full
+T1–T3 succeeded and the transaction reached COMMITTED. The package log is 0600.
 
 ## RP-015 P1: unmarked kernel TCP resets escape through VPS-1 underlay
 During paired Quad9 probes, LAB-1 emitted 18 unencrypted TCP RST packets on ens18

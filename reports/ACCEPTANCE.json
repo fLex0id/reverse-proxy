@@ -52,7 +52,7 @@
     {
       "id": "F10",
       "result": "UNKNOWN",
-      "reason": "RP-013 candidate fix installed after deterministic reproduction; full lab.4 regression and resolver outage/reapply/reboot acceptance pending",
+      "reason": "Lab.4 passed 360 same-source and 768 ordinary DNS behaviors across four transports; strict DoH validation added. Paired Quad9 failures reproduced directly outside rp. Full resolver-outage/policy/reboot acceptance pending",
       "evidence": [
         "reports/DEFECTS.md#rp-013-p1-dns-reply-source-reused-across-resolver-destinations",
         "lab/dns_source_reuse.py"

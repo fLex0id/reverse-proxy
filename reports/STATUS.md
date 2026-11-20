@@ -22,12 +22,30 @@ Read both supplied specifications in full. Implementation must preserve all four
 transports, full SNI coverage, T1-T3, and the F01-F13 acceptance matrix.
 Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
 
-## Current checkpoint (2026-11-14)
+## Current checkpoint (2026-11-20)
 
-Installed candidate: 61dbdf5, 1.2.9-lab.4. Ordinary VPS-1 migration and VPS-2
-push completed; all four full T1-T3 passed and transaction reached COMMITTED.
-82 local regression tests and generated-code static checks pass.
+Installed source candidate: 9fdb646, 1.2.9-lab.7. Lab.6 installed on VPS-1 and passed
+deterministic reset-routing/secondary-guard checks. Its VPS-2 push encountered
+an actual Rocky package-mirror HTTP 404, correctly failed and rolled back.
+Lab.7 removes unnecessary repository access when dependencies are installed;
+migration and repeat push passed all four complete T1–T3 and reached COMMITTED.
+Expanded four-transport qualification is in progress.
+101 local regression tests and generated-code static checks pass.
 Final clean installation and six-hour soak have NOT started.
+
+All three machines became available again on 2026-11-20; their clocks were
+checked and the isolated WG namespace rebuilt. The operator confirms that the
+lab and controller use VPN under TSPU conditions. Independently reproduced
+external failures must be documented without blocking unrelated engineering
+indefinitely; they remain failures/limitations, never silently converted to PASS.
+
+Quad9: 120 paired direct/proxied probes produced 17 TLS failures (7 through rp,
+10 direct LAB-2); all 40 Cloudflare probes passed. Incoming Quad9-source resets
+are visible on LAB-2. Exact origin is unproven; an external cause is probable.
+RP-015, a separate local reset leak, reproduced without any external endpoint:
+unmarked kernel RST escaped LAB-1 underlay. Source routing plus an independent
+output guard passed both normal and deliberately missing-rule tests. See
+DOH-2026-11-20.md for counts, captures, limitations and exact test scope.
 
 New commits since dcee312:
 - 4650bdd: serialize mutating menu/installer/save/bundle entry points.
@@ -49,7 +67,10 @@ from LAB-2; an additional independent Cloudflare STUN case is now retained.
 RP-013 candidate fix is installed: conntrack-backed DNS redirect preserves the
 queried resolver address without changing general UDP behavior or split-DNS policy.
 The prototype passed 90 same-port and 192 ordinary DNS checks after startup;
-four initial timeout probes remain recorded. Full lab.4 regression is next.
+four initial timeout probes remain recorded. Full lab.4 regression subsequently
+passed 360 same-port and 768 ordinary DNS cases, all four HTTP/3 and Cloudflare
+STUN probes and 120 additional T3 checks. Quad9 and Google STUN failures remain
+recorded separately; complete packet attribution and fault coverage are pending.
 
 Lab.4 sustained-Xray-outage test: HTTPS/IPv6 blocked, DNS refused with no answer,
 no direct control-destination flow or foreign control-name DNS on LAB-1; HTTPS

@@ -1,5 +1,24 @@
 # Intermediate four-transport regression
 
+## Subsequent lab.4 checkpoint
+
+Candidate `61dbdf5` completed the same full four-transport run on existing hosts:
+all four VPS-2 T1–T3 checks, 120 additional T3 repetitions, 768 ordinary DNS
+behaviors and 360 same-source-port DNS queries passed. HTTP/3 and Cloudflare STUN
+passed on all four transports. Google STUN failed on all four; direct LAB-2
+comparison to the same numeric Google endpoint also failed, while Cloudflare
+worked directly and through WG. Built-in VPS-1 runs failed T6/Quad9 on packet-up
+and HY2; the stream-up and Salamander built-in runs passed. These failures are
+retained, not overwritten by a later successful probe. See DOH-2026-11-20.md for
+the subsequent direct/proxied Quad9 comparison and external-path limitations.
+
+Lab.4 packet captures have not received a complete attribution review; no blanket
+no-leak conclusion is drawn. Later TLS-reset testing found a separate LAB-1
+kernel-reset leak (RP-015), so lab.4 is not a final candidate. The sustained Xray
+fault and real transaction-reboot checks are summarized in STATUS.md.
+
+## Lab.3 checkpoint
+
 Candidate: `a1f7ba6`, rp 1.2.9-lab.3, Xray 26.4.25, Hysteria2 2.8.2.
 Both endpoints are Rocky Linux 10.2; the isolated WG client is on Debian 13.
 Existing installations, not the final clean-install acceptance. Verdict: **NOT_READY**.

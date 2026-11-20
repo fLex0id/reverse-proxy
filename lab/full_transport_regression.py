@@ -75,4 +75,20 @@ done
         if suite == 'dns_matrix.py':
             remote(a.client, shlex.join(['ip', 'netns', 'exec', 'rp-lab-client', 'python3',
                 '/root/rp-lab/dns_source_reuse.py', '--rounds', '30']), transport+'-dns-source-reuse')
+    if transport in ['hy2-wg', 'hy2o-wg']:
+        # Use the management address of the authorized lab client as the synthetic
+        # source; this probe does not contact a public endpoint.
+        client_ip = subprocess.check_output(['ssh', '-G', a.client], text=True)
+        client_ip = next(line.split()[1] for line in client_ip.splitlines() if line.startswith('hostname '))
+        name = transport + '-kernel-reset'; started = time.time()
+        with (out/(name+'.log')).open('w') as log:
+            r = subprocess.run([sys.executable, str(root/'lab/wg_reset_probe.py'),
+                '--lab1', a.lab1, '--lab2', a.lab2, '--client-ip', client_ip,
+                '--output', str(out/name)], stdout=log, stderr=subprocess.STDOUT, timeout=90)
+        result_path = out/name/'results.json'
+        if not result_path.exists():
+            record(name, 'UNKNOWN', 'Reset fixture failed; inspect log', started)
+            raise SystemExit('Reset fixture failure')
+        reset = json.loads(result_path.read_text())
+        record(name, 'PASS' if r.returncode == 0 and reset['result'] == 'PASS' else 'FAIL', reset, started)
 remote(a.lab1,'rp tunnel auto','restore-auto')
