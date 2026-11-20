@@ -78,6 +78,22 @@ below `lab/private` (both ignored, mode 0700).
   status/transaction state, restore even a falsely successful baseline, verify
   original hashes, staging cleanup, watcher and client. The scoped wrapper does
   not alter global PATH or exhaust the disk. Do not overlap other mutations.
+  Additional stages cover download exhaustion, corrupted checksums, extraction,
+  NAT service, firewalld reload and sysctl. Download failures retain all five
+  attempts and original backoff. `--failure kill-reboot` sends SIGKILL to the
+  exact installer PID/start identity, observes INSTALLING, then really reboots
+  VPS-2 and waits for its installed boot-recovery service. It never shortens the
+  production 30-minute deadline or calls rollback before observing boot recovery.
+- `restart_fault_probe.py --lab1 ALIAS --client ALIAS --candidate REMOTE_RP_PATH --output DIR`:
+  compare restart behavior after stopping actual client WG and echo services,
+  then use a private runtime drop-in to make WG start fail. Verify command status,
+  actual service state and restored client HTTPS; an independent 180-second timer
+  removes the exact drop-in and restores the core services if interrupted.
+- `restart_vps2_fault.py --lab2 ALIAS --client ALIAS --candidate REMOTE_VPS2_CLI --output DIR`:
+  stop the watcher, inject a private runtime ExecStart failure into the currently
+  selected transport, and compare installed/candidate restart results against
+  actual systemd failure state. An independent timer restores the exact service;
+  require the functional reverse probe, watcher and client HTTPS after recovery.
 - `transport_roundtrip.py --lab1 ALIAS --lab2 ALIAS --client ALIAS --output DIR`:
   retain a selected pair (`--keep TRANSPORT TRANSPORT`, defaults to both XHTTP),
   deploy it, check stale/current configs and client HTTPS/DNS/HTTP3, then restore

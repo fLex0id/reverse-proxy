@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.11"
+SELF_VERSION="1.2.9-lab.12"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -2215,7 +2215,25 @@ cmd_status() {
 }
 cmd_version() { echo "xray $(/usr/local/bin/xray version 2>/dev/null | awk 'NR==1{print $2}') hysteria $(/usr/local/bin/hysteria version 2>/dev/null | awk '/^Version:/{print $2}')"; }
 cmd_logs() { journalctl -u rp-watch -u rp-hy2 -u rp-hy2o -u 'rp-xray@*' -u wg-quick@rp-wg -n "${1:-80}" --no-pager; }
-cmd_restart() { local t; t=$(active); [[ -n $t ]] || { say "Транспорт не выбран: rp select"; return 1; }; tr_start "$t"; say "Перезапущено: $t"; }
+restart_ready() {
+  # Type=simple can report a successful start before the process immediately
+  # exits. Verify the reverse tunnel, with a bounded lightweight probe; full
+  # selection/update T1-T3 are unchanged. _fn does not acquire the mutation lock.
+  local t=$1 attempt
+  for attempt in 1 2 3 4 5; do
+    unit_failed "$t" && return 1
+    timeout -k 2 8 /bin/bash "$0" _fn func_ok "$t" && return 0
+    ((attempt == 5)) || sleep 2
+  done
+  return 1
+}
+cmd_restart() {
+  local t; t=$(active)
+  [[ -n $t ]] || { say "Транспорт не выбран: rp select"; return 1; }
+  tr_start "$t" || { say "Ошибка перезапуска: $t" >&2; return 1; }
+  restart_ready "$t" || { say "Туннель не восстановился после перезапуска: $t" >&2; return 1; }
+  say "Перезапущено: $t"
+}
 cmd_remove() {
   read -rp "Удалить rp с VPS-2 (туннель, конфиги, ключ SSH)? [y/N] " a; [[ ${a,,} == y ]] || return 0
   # Exact owned units only: another application may also use the rp- prefix.
@@ -4645,7 +4663,22 @@ cmd_status() {
   kv "Клиентов WG" "$(client_names | wc -l)"; kv "Выход VPS-2" "$([[ -n $(cf VPS2_IPH) ]] && echo "проверен (адрес не хранится)" || echo "ещё не проверялся: rp test")"; card_end
 }
 cmd_logs() { journalctl -u rp-xray -u rp-hy2 -u rp-hy2o -u rp-net -u wg-quick@wg0 -u wg-quick@wg-exit -n "${1:-80}" --no-pager; }
-cmd_restart() { need_vps1; systemctl restart rp-net rp-xray; tr_has hy2-wg && systemctl restart rp-hy2; tr_has hy2o-wg && systemctl restart rp-hy2o; [[ $(cf TRANSPORT_ORDER) == *hy2* ]] && systemctl restart wg-quick@wg-exit; ok "Перезапущено"; }
+cmd_restart() {
+  need_vps1
+  local rc=0
+  # Restart explicitly includes inactive client WG and the functional probe
+  # service. Requires= alone does not start an already inactive dependent.
+  systemctl restart rp-net rp-xray rp-echo wg-quick@wg0 || rc=1
+  if tr_has hy2-wg; then systemctl restart rp-hy2 || rc=1; fi
+  if tr_has hy2o-wg; then systemctl restart rp-hy2o || rc=1; fi
+  if [[ $(cf TRANSPORT_ORDER) == *hy2* ]]; then systemctl restart wg-quick@wg-exit || rc=1; fi
+  if ((rc)); then err "Не все службы перезапущены; проверьте rp diag и rp logs"; return 1; fi
+  vps1_check || { err "Службы не прошли проверку после перезапуска"; return 1; }
+  if [[ $(cf TRANSPORT_ORDER) == *hy2* ]]; then
+    unit_up wg-quick@wg-exit || { err "Внутренний WireGuard не поднялся после перезапуска"; return 1; }
+  fi
+  ok "Службы перезапущены"
+}
 cmd_uninstall() {
   need_vps1; yesno "Удалить rp с VPS-1 (клиенты потеряют выход)?" n || return 0
   # по одной: общий «disable --now» со списком обрывается на первой несуществующей службе (rp-hy2o нет в установках 1.0),

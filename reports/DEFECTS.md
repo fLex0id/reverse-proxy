@@ -1,5 +1,29 @@
 # Defect register (work in progress)
 
+## RP-021 P1: restart commands hide service errors and omit inactive services
+Both role-specific `cmd_restart` functions unconditionally print success after
+their service/transport command fails. Five negative fixture cases reproduced
+rc=0 on lab.11. VPS-1 also omits explicit restart of client wg0 and rp-echo;
+an already inactive service is not included in the requested restart set.
+
+The real VPS-1 comparison confirms lab.11 returns zero while both stopped services
+remain inactive and client HTTPS times out. The first lab.12 candidate restores
+them and rejects a real wg0 ExecStart failure. A separate real VPS-2 test exposes
+an additional asynchronous start case: systemd reports successful Type=simple
+start, but the process immediately exits; both baseline and first candidate
+incorrectly report success while the unit is failed.
+
+Final lab.12 candidate propagates start errors AND verifies readiness: VPS-2 uses
+bounded functional reverse-tunnel probes plus failed-unit checks; VPS-1 validates
+its local services/listeners/rules and inner WG. Full update/selection T1–T3 stay
+unchanged. Core restart includes client WG and echo, with existing systemd network
+ordering preserved. Six fixture methods cover failures, readiness and success;
+124 tests and static checks pass. The final VPS-2 repeat rejects the real immediate
+process exit (baseline rc=0, candidate rc=1), with functional/client recovery.
+VPS-1's repeat restores inactive WG/echo and rejects a real WG start failure;
+final restoration is verified on the client. Artifacts and startup limitations
+are described in RESTART-2026-11-20.md.
+
 ## RP-020 P2: excluded inner-WG secrets and legacy TCP config remain on VPS-2
 A real lab.10 4-to-2-XHTTP-to-4 cycle completed its pushes and client checks but
 retained both `/etc/rp/rp-wg.conf` and `/etc/wireguard/rp-wg.conf` with unused WG

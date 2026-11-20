@@ -22,7 +22,7 @@
     {
       "id": "F04",
       "result": "UNKNOWN",
-      "reason": "Scoped pushes, 30-minute rollback, SIGKILL/ENOSPC preparation, real reboot, races and nine installer command failures pass. Both pair 4-to-2-to-4 cycles pass stale-config, real-client and identity checks. Full interruption/concurrency and download/extraction coverage pending"
+      "reason": "Scoped pushes, unchanged 30-minute rollback, SIGKILL/ENOSPC preparation and races pass. Eighteen installer write/download/checksum/extraction/network command failures automatically restore files/watch/client; three actual installer SIGKILL/reboot points pass boot recovery. Both pair 4-to-2-to-4 cycles pass stale-config, client and identity checks. Full interruption/SSH/concurrency acceptance remains pending"
     },
     {
       "id": "F05",
@@ -65,8 +65,8 @@
     },
     {
       "id": "F12",
-      "result": "NOT_TESTED",
-      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+      "result": "UNKNOWN",
+      "reason": "Restart false-success reproduced and corrected on both hosts, including actual inactive WG/echo and immediate process-start failure. Scoped restoration/client checks pass; full upgrade/uninstall/restart-dependency and coexistence acceptance remains pending"
     },
     {
       "id": "F13",

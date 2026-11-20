@@ -44,6 +44,18 @@ if r.returncode or r.stdout.split()[0]!=local_hash:raise SystemExit('Local/deplo
 for transport in ['reality-xhttp2','reality-xhttp','hy2-wg','hy2o-wg']:
     if remote(a.lab1,'rp tunnel '+transport,transport+'-pin').returncode:
         raise SystemExit('Pin failed; leave state for inspection')
+    remote(a.lab1, 'rp restart', transport+'-restart-vps1')
+    remote(a.lab2, 'rp restart', transport+'-restart-vps2')
+    readiness = '''
+for ((i=1; i<=6; i++)); do
+  if ip netns exec rp-lab-client curl -4 -fsS --max-time 8 https://1.1.1.1/cdn-cgi/trace -o /dev/null; then
+    printf 'attempt=%d rc=0 seconds=%d\\n' "$i" "$SECONDS"; exit 0
+  else rc=$?; printf 'attempt=%d rc=%d seconds=%d\\n' "$i" "$rc" "$SECONDS"; fi
+  ((i==6)) || sleep 2
+done
+exit 1
+'''
+    remote(a.client, shlex.join(['bash', '-c', readiness]), transport+'-restart-client-readiness', timeout=90)
     remote(a.lab1,'rp test --restart',transport+'-T1-T8-restart',allow_skips=True)
     remote(a.lab2,'rp test',transport+'-T1-T3')
     script='''
