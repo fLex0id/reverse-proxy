@@ -1,5 +1,18 @@
 # Defect register (work in progress)
 
+## RP-017 P1: diagnostic errors still return success
+`rp diag` unconditionally returned zero after printing service, route, NAT,
+SOCKS or DoH failures. Unknown control/egress state and absent DNS configuration
+also counted as success; only the first configured DoH endpoint was checked.
+Fixtures reproduce 14 failing/unconfirmed checks plus two ineffective `--fix`
+scenarios returning zero. This can mislead automated monitoring.
+
+Candidate lab.8 accumulates failed/unconfirmed checks, preserves curl status,
+checks all configured DoH endpoints and validates arguments. `--fix` executes a
+fresh read-only diagnostic pass, so its result describes verified final state.
+The seven test methods include all negative scenarios, successful repairs and
+failed repairs. Live four-transport diagnostic coverage is pending.
+
 ## RP-016 P2: code update unnecessarily depends on OS package mirrors
 Real lab.6 push failed at unconditional `dnf install` because the configured
 Rocky mirror returned HTTP 404 for repository metadata. All five requested base

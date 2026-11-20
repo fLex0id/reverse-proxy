@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.9-lab.8 (unreleased, NOT_READY)
+
+- `rp diag` returns a nonzero status for failed or unconfirmed checks and checks
+  every configured DoH endpoint. A partial failed HTTPS transfer cannot count
+  as success just because its recorded HTTP status is 204.
+- `rp diag --fix` repeats diagnostics after repair; a successful repair command
+  alone no longer implies a healthy system. Reject unsupported arguments.
+
 ## 1.2.9-lab.7 (unreleased, NOT_READY)
 
 - On VPS-2, query installed RPM dependencies before requesting only missing

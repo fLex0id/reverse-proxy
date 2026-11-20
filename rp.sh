@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.7"
+SELF_VERSION="1.2.9-lab.8"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -4208,12 +4208,15 @@ PY_DOH_CHECK
 # rp diag [--fix]: каждый участок пути проверяется отдельно, чтобы причина была названа, а не угадана
 cmd_diag() {
   need_vps1
-  local fix=0 u active="" mark="" rf rfi eff pr="" code probe_ok=0 eg k v
+  local fix=0 failed=0 u active="" mark="" rf rfi eff pr="" code probe_ok=0 eg k v
   local -A E=()
-  [[ ${1:-} == --fix ]] && fix=1
+  if (($#)); then
+    [[ $# == 1 && $1 == --fix ]] || { err "rp diag [--fix]"; return 2; }
+    fix=1
+  fi
   banner "Диагностика выхода в интернет" "$( ((fix)) && echo 'с исправлением' || echo 'только проверка')"
   for u in rp-net rp-xray; do
-    systemctl is-active -q "$u" && ok "$u работает" || err "$u не работает (journalctl -u $u)"
+    systemctl is-active -q "$u" && ok "$u работает" || { err "$u не работает (journalctl -u $u)"; failed=1; }
   done
   active=$(vps2_read 'cat /var/lib/rp/active' 2>/dev/null | tr -d '\r\n' || true)
   mark=$(control_method "$active" 2>/dev/null || true)
@@ -4222,6 +4225,7 @@ cmd_diag() {
   elif sx -m 10 https://api.ipify.org >/dev/null 2>&1; then
     warn "Выход через SOCKS есть, но активный транспорт не удалось получить по SSH; вероятно, переходное состояние"
     note "Для уточнения: повторите rp diag после стабилизации сторожа VPS-2"
+    failed=1
   else
     err "Нет подтверждённой связи с VPS-2 ни по SSH, ни через SOCKS"
     return 1
@@ -4233,6 +4237,7 @@ cmd_diag() {
       ok "Внутренний WG активного Hysteria2: свежий handshake"
     else
       warn "VPS-2 выбрал Hysteria2, но WG handshake отсутствует или устарел"
+      failed=1
     fi
   elif [[ -n $active ]]; then
     note "Проба wg-exit не требуется: активный маршрут — XHTTP Reverse"
@@ -4242,6 +4247,7 @@ cmd_diag() {
   eff=$((rf > rfi ? rf : rfi))
   if [[ $mark == hy2 ]] && ((eff == 1)); then
     err "Строгий rp_filter мешает wg-exit (all=$rf, wg-exit=$rfi)"
+    failed=1
     if ((fix)); then
       sysctl -q -w net.ipv4.conf.all.rp_filter=2 net.ipv4.conf.default.rp_filter=2 net.ipv4.conf.wg-exit.rp_filter=2 >/dev/null 2>&1 && ok "rp_filter переведён в loose"
     fi
@@ -4249,11 +4255,11 @@ cmd_diag() {
     ok "rp_filter: all=$rf wg-exit=$rfi (актуально при Hysteria2)"
   fi
   if [[ $mark == hy2 ]] && hy2_live; then
-    ip -4 route get 1.1.1.1 mark 255 2>/dev/null | grep -q 'wg-exit' && ok "Маршрут mark 255 ведёт в wg-exit" || err "Нет маршрута с mark 255 через wg-exit"
+    ip -4 route get 1.1.1.1 mark 255 2>/dev/null | grep -q 'wg-exit' && ok "Маршрут mark 255 ведёт в wg-exit" || { err "Нет маршрута с mark 255 через wg-exit"; failed=1; }
     pr=$(py probe 1.1.1.1 443)
     case $pr in
       ok*) probe_ok=1; ok "Прямая проба через внутренний WG: ${pr#ok } мс" ;;
-      *) warn "Внутренний WG не прошёл пробу: $pr (маршрут/переключение/NAT; не доказательство блокировки)" ;;
+      *) warn "Внутренний WG не прошёл пробу: $pr (маршрут/переключение/NAT; не доказательство блокировки)"; failed=1 ;;
     esac
   fi
   # VPS-2 egress reports routing/NAT for the inner WG transport; only relevant when HY2 is active.
@@ -4263,23 +4269,29 @@ cmd_diag() {
       local fixv2=0
       [[ ${E[ip_forward]:-} == 1 ]] && ok "VPS-2: пересылка IPv4 включена" || { err "VPS-2: IPv4 forwarding выключен"; fixv2=1; }
       [[ ${E[nat]:-} == yes ]] && ok "VPS-2: NAT для WG присутствует" || { err "VPS-2: NAT для WG отсутствует"; fixv2=1; }
-      [[ ${E[fw_forward]:-yes} == yes ]] || { err "VPS-2: firewalld ограничивает WG forwarding"; fixv2=1; }
+      [[ ${E[fw_forward]:-} == yes ]] || { err "VPS-2: WG forwarding ограничен или не подтверждён"; fixv2=1; }
       if ((fixv2)); then
+        failed=1
         if ((fix)); then vps2_run '/usr/local/bin/rp fixnet' && ok "Команда восстановления NAT на VPS-2 выполнена" || err "Не удалось исправить NAT на VPS-2"
         else warn "Для исправления NAT: rp diag --fix"; fi
       fi
-    else warn "SSH к VPS-2 временно недоступен, сведения о NAT не получены"; fi
+    else warn "SSH к VPS-2 временно недоступен, сведения о NAT не получены"; failed=1; fi
   fi
   if [[ $mark == hy2 && $fix == 1 && $probe_ok == 0 ]]; then
     sleep 2
     pr=$(py probe 1.1.1.1 443)
     [[ $pr == ok* ]] && ok "Повторная проба внутреннего WG: ${pr#ok } мс" || warn "Проба после исправления не прошла: $pr"
   fi
-  code=$(sx -m 12 -o /dev/null -w '%{http_code}' https://www.gstatic.com/generate_204 2>/dev/null || true)
-  [[ $code == 204 ]] && ok "Через Xray (SOCKS) интернет доступен" || err "Проба выхода через SOCKS не прошла (HTTP ${code:-нет ответа})"
-  local first; first=$(py dns | head -1)
-  [[ -n $first ]] && { doh_test "$first" && ok "DoH через туннель отвечает ($first)" || err "DoH через туннель не отвечает ($first)"; }
-  return 0
+  if code=$(sx -m 12 -o /dev/null -w '%{http_code}' https://www.gstatic.com/generate_204 2>/dev/null) && [[ $code == 204 ]]; then
+    ok "Через Xray (SOCKS) интернет доступен"
+  else err "Проба выхода через SOCKS не прошла (HTTP ${code:-нет ответа})"; failed=1; fi
+  cmd_dns test || failed=1
+  if ((fix)); then
+    note "Повторная диагностика после исправлений; итог определяется фактическими проверками"
+    cmd_diag
+    return $?
+  fi
+  return "$failed"
 }
 
 # ── DNS ──────────────────────────────────────────────────────────────────
