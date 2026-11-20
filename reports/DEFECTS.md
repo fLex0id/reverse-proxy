@@ -1,5 +1,20 @@
 # Defect register (work in progress)
 
+## RP-020 P2: excluded inner-WG secrets and legacy TCP config remain on VPS-2
+A real lab.10 4-to-2-XHTTP-to-4 cycle completed its pushes and client checks but
+retained both `/etc/rp/rp-wg.conf` and `/etc/wireguard/rp-wg.conf` with unused WG
+keys. It also retained a controlled legacy `/etc/rp/xray-tcp.json` fixture.
+The generator unconditionally shipped inner-WG credentials, and the installer
+only removed excluded modern transport configs. The cycle restored all four
+transports and removed its owned fixture after recording failures.
+
+Candidate lab.11 ships inner-WG config only for a selected Hysteria variant.
+It stops/verifies an existing inner-WG interface BEFORE removing the two configs,
+and deletes the obsolete TCP config. Private VPS-1 identity is retained for future
+re-enablement. Tests cover all 15 nonempty transport subsets and an XHTTP-only
+config without unused WG keys. Baseline had three surplus-config failures and
+one unnecessary-key error; candidate passes. Real repeat cycles are pending.
+
 ## RP-019 P1: failed installer writes continue to READY
 Six binary/data write and rename fixtures return false success on lab.9. A real
 VPS-2 installer run with a scoped one-shot failure of the Xray staging write
@@ -12,9 +27,11 @@ handling to configuration permissions, WG install, stale-file removal, sysctl,
 service reload and management-key writes. Durable backup roots include the two
 owned binary staging paths, permitting cleanup after publication failure or
 interruption. Six negative binary/data fixtures and the healthy path now pass.
-The repeat real fault matrix is pending; complete installer atomicity is not yet
-accepted. Faults are scoped to the installer environment and exact commands,
-without filling the root disk or changing global PATH.
+The real repeat matrix passes all nine scoped command failures: automatic
+ROLLED_BACK, original hashes/watch/client restored and new staging files removed.
+See INSTALLER-FAULTS-2026-11-20.md. Complete installer atomicity is not yet accepted.
+Faults are scoped to the installer environment and exact commands, without
+filling the root disk or changing global PATH.
 
 ## RP-018 P2: egress diagnostics inspect the wrong firewalld setting
 Real `rp egress` returned `fw_forward=no` plus an orphan second `no` although

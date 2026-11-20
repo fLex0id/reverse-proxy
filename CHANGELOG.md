@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.9-lab.11 (unreleased, NOT_READY)
+
+- Omit inner-WG credentials from VPS-2 bundles when neither Hysteria variant is
+  selected. Stop and verify any old inner-WG interface before removing its
+  generated/installed configs. Remove the unsupported legacy TCP config.
+- Add all-subset bundle checks and real 4-to-2-to-4 deployment/client/identity
+  regression tooling. Retain complete T1–T3 checks for every configured transport.
+
 ## 1.2.9-lab.10 (unreleased, NOT_READY)
 
 - Abort VPS-2 installation when binary/data writes, publication, configuration

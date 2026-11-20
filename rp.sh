@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.10"
+SELF_VERSION="1.2.9-lab.11"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -2900,12 +2900,23 @@ rp_main() {
       chown root:xray "$f" && chmod 640 "$f" || rp_fail "Не удалось защитить $f"
     fi
   done
-  install -d -m 700 /etc/wireguard && install -m 600 /etc/rp/rp-wg.conf /etc/wireguard/rp-wg.conf &&
-    chmod 600 /etc/rp/rp-wg.conf || rp_fail "Не удалось установить защищённый конфиг WireGuard"
   # shellcheck disable=SC1091
   . /etc/rp/rp2.conf || rp_fail "Не удалось прочитать настройки VPS-2"
-  # конфиги исключённых транспортов не должны оставаться от прежнего бандла
   local ord=" ${TRANSPORT_ORDER:-} "
+  if [[ $ord == *" hy2-wg "* || $ord == *" hy2o-wg "* ]]; then
+    install -d -m 700 /etc/wireguard && install -m 600 /etc/rp/rp-wg.conf /etc/wireguard/rp-wg.conf &&
+      chmod 600 /etc/rp/rp-wg.conf || rp_fail "Не удалось установить защищённый конфиг WireGuard"
+  else
+    # wg-quick needs the old configuration to tear the link down. Never remove
+    # it first and strand an active interface during an interrupted update.
+    if ip link show rp-wg >/dev/null 2>&1; then
+      systemctl stop wg-quick@rp-wg || rp_fail "Не удалось остановить исключённый внутренний WG"
+      if ip link show rp-wg >/dev/null 2>&1; then rp_fail "Внутренний WG остался активным; конфиг сохранён"; fi
+    fi
+    rm -f /etc/rp/rp-wg.conf /etc/wireguard/rp-wg.conf || rp_fail "Не удалён исключённый конфиг WireGuard"
+  fi
+  # конфиги исключённых транспортов не должны оставаться от прежнего бандла
+  rm -f /etc/rp/xray-tcp.json || rp_fail "Не удалён устаревший конфиг TCP"
   [[ $ord == *" hy2-wg "* ]] || rm -f /etc/rp/hy2.yaml || rp_fail "Не удалён устаревший конфиг HY2"
   [[ $ord == *" hy2o-wg "* ]] || rm -f /etc/rp/hy2o.yaml || rp_fail "Не удалён устаревший конфиг HY2 obfs"
   [[ $ord == *" reality-xhttp "* ]] || rm -f /etc/rp/xray-xhttp.json || rp_fail "Не удалён устаревший конфиг XHTTP"
@@ -5683,8 +5694,9 @@ def build_bundle(cfg, outdir, extra_files):
     order = transports(cfg)
     files = {
         "etc/rp/rp2.conf": (vps2_conf(cfg, order).encode(), 0o640),
-        "etc/rp/rp-wg.conf": (wg_exit_client(cfg).encode(), 0o600),
     }
+    if any(t in order for t in ("hy2-wg", "hy2o-wg")):
+        files["etc/rp/rp-wg.conf"] = (wg_exit_client(cfg).encode(), 0o600)
     if "hy2-wg" in order:
         files["etc/rp/hy2.yaml"] = (hy2_client(cfg).encode(), 0o640)
     if "hy2o-wg" in order:
