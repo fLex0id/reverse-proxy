@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.9-lab.6 (unreleased, NOT_READY)
+
+- Route kernel-generated replies from the inner WG address through its exit
+  table even after the application socket loses its mark. Keep the prohibit
+  route and add an output firewall guard against direct underlay escape.
+- Add a deterministic, lab-only closed-socket TCP reset leak probe and paired
+  direct/proxied strict DoH diagnostics with packet capture.
+
 ## 1.2.9-lab.5 (unreleased, NOT_READY)
 
 - Validate DoH HTTP status/content type, transfer completion, DNS question,

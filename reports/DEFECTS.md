@@ -1,5 +1,22 @@
 # Defect register (work in progress)
 
+## RP-015 P1: unmarked kernel TCP resets escape through VPS-1 underlay
+During paired Quad9 probes, LAB-1 emitted 18 unencrypted TCP RST packets on ens18
+with source 10.77.0.1 and resolver destinations. They contained no DNS payload,
+but exposed connection metadata and bypassed the required exit path.
+Application sockets carry SO_MARK 255; late kernel replies after socket teardown
+can lack that mark and use the main routing table. The existing forward guard
+does not cover locally generated packets.
+
+Independent local reproduction uses one raw ACK through inner WG to a confirmed
+closed LAB-1 port, with the authorized Debian client as its source. Baseline:
+ACK observed on wg-exit, one RST on ens18, zero RST on wg-exit. No public service,
+VPN reliability or DNS resolver is needed to reproduce the defect.
+Candidate lab.6 routes source 10.77.0.1/32 through the existing fail-closed table
+200 and drops any remaining output from that address outside WG/loopback.
+The source rule is explicitly removed on uninstall and checked by static T7.
+Live candidate validation is pending.
+
 ## RP-014 P1: DoH diagnostic accepts invalid responses and returns false success
 The baseline DoH probe considered any body longer than 28 bytes successful,
 discarding curl's status through a wc pipeline. Eight negative fixtures reproduce
