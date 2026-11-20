@@ -59,6 +59,8 @@ finally:
         proc.wait(timeout=20);data.close();log.close()
         remote='/root/rp-lab/app-'+token+'-'+label+'.pcap'
         subprocess.run(['scp','-q',str(out/(label+'.pcap')),a.client+':'+remote],check=True)
-        filt='src host 192.168.91.221' if label=='lab1' else 'ip or ip6'
+        # Include unexpected internal-source output (e.g. unmarked kernel RST),
+        # not only packets sourced from LAB-1's underlay address.
+        filt='ip or ip6'
         r=ssh(a.client,shlex.join(['tcpdump','-nn','-r',remote,filt]))
         (out/(label+'-packets.log')).write_text(r.stdout+r.stderr)

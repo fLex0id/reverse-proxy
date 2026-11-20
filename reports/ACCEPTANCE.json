@@ -22,7 +22,7 @@
     {
       "id": "F04",
       "result": "UNKNOWN",
-      "reason": "Scoped ordinary push, 30-minute rollback, SIGKILL/ENOSPC preparation, real reboot recovery and races pass; complete installer failure/concurrency matrix pending"
+      "reason": "Scoped pushes, 30-minute rollback, SIGKILL/ENOSPC preparation, real reboot, races and nine installer command failures pass. Both pair 4-to-2-to-4 cycles pass stale-config, real-client and identity checks. Full interruption/concurrency and download/extraction coverage pending"
     },
     {
       "id": "F05",
@@ -37,7 +37,7 @@
     {
       "id": "F07",
       "result": "UNKNOWN",
-      "reason": "Built-in checks including restart exercised; static T7 kept separate; complete diagnostic failure/UNKNOWN semantics pending"
+      "reason": "Diagnostic false-success and firewalld false-negative corrected; actual stopped-network-service comparison and four healthy transport diagnostics pass. Full repair/failure/UNKNOWN semantics and CLI coverage pending"
     },
     {
       "id": "F08",

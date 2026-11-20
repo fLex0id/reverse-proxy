@@ -78,7 +78,7 @@ done
     if transport in ['hy2-wg', 'hy2o-wg']:
         # Use the management address of the authorized lab client as the synthetic
         # source; this probe does not contact a public endpoint.
-        client_ip = subprocess.check_output(['ssh', '-G', a.client], text=True)
+        client_ip = subprocess.check_output(['ssh', '-T', '-G', a.client], text=True)
         client_ip = next(line.split()[1] for line in client_ip.splitlines() if line.startswith('hostname '))
         name = transport + '-kernel-reset'; started = time.time()
         with (out/(name+'.log')).open('w') as log:

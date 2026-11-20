@@ -85,7 +85,7 @@ finally:
         if r.returncode:
             (out/(label+'-capture-error.log')).write_text(r.stderr)
             continue  # Always stop/collect the remaining hosts too.
-        filt='src host 192.168.91.221 and dst port 53' if label=='lab1' else 'port 53'
+        filt='port 53'
         r=ssh(a.client,shlex.join(['tcpdump','-nn','-vv','-r',path,filt]))
         (out/(label+'-dns-packets.log')).write_text(r.stdout+r.stderr)
 print(json.dumps({'cases':len(results),'nonpassing':sum(r['result']!='PASS' for r in results),

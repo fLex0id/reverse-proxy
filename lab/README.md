@@ -67,6 +67,28 @@ below `lab/private` (both ignored, mode 0700).
   lab client. `--expect guard-drop` verifies the secondary output guard with
   counter evidence when the source rule is deliberately absent. The fixture
   does not remove that rule itself; arm independent restoration before doing so.
+- `diag_fault_probe.py --lab1 ALIAS --client ALIAS --candidate REMOTE_RP_PATH --output DIR`:
+  temporarily stop the actual network service, compare installed/candidate
+  diagnostics, restore it and client WG, verify client HTTPS. Arms an independent
+  120-second restoration timer. Never overlap a transport/capture/fault suite.
+- `installer_write_fault.py --lab1 ALIAS --lab2 ALIAS --client ALIAS --output DIR`:
+  generate the installed VPS-1 bundle and inject one exact command failure into
+  its real VPS-2 safe installer. `--stage` selects binary/data writes/publication,
+  WG installation, configuration permissions or systemd reload. Record return
+  status/transaction state, restore even a falsely successful baseline, verify
+  original hashes, staging cleanup, watcher and client. The scoped wrapper does
+  not alter global PATH or exhaust the disk. Do not overlap other mutations.
+- `transport_roundtrip.py --lab1 ALIAS --lab2 ALIAS --client ALIAS --output DIR`:
+  retain a selected pair (`--keep TRANSPORT TRANSPORT`, defaults to both XHTTP),
+  deploy it, check stale/current configs and client HTTPS/DNS/HTTP3, then restore
+  all four with full push validation. Preserve and compare original settings,
+  client keys and Hysteria identity; restore auto and clean only owned fixtures.
+  Its finally block restores the original configuration; independent SSH and
+  the private backup support recovery if the controller is interrupted.
+- `review_lab1_captures.py --directory ARTIFACT_DIRECTORY --reader ALIAS --output DIR`:
+  decode every LAB-1 PCAP using tcpdump on the authorized lab reader. Include all
+  source addresses, especially inner-WG kernel replies; collect addresses and DNS
+  questions for policy review. Zero packets alone is not an acceptance verdict.
 - `dns_redirect_trial.py`: LAB-1-only experimental regression fixture. Temporarily
   redirect DNS through conntrack into a separate inbound with the existing DNS
   policy. Validates nft/Xray first; restores files/services after 180 seconds or

@@ -24,13 +24,31 @@ Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
 
 ## Current checkpoint (2026-11-20)
 
-Installed source candidate: 9fdb646, 1.2.9-lab.7. Lab.6 installed on VPS-1 and passed
-deterministic reset-routing/secondary-guard checks. Its VPS-2 push encountered
-an actual Rocky package-mirror HTTP 404, correctly failed and rolled back.
-Lab.7 removes unnecessary repository access when dependencies are installed;
-migration and repeat push passed all four complete T1–T3 and reached COMMITTED.
-Expanded four-transport qualification is in progress.
-101 local regression tests and generated-code static checks pass.
+Both endpoints now run source e50929e, 1.2.9-lab.11, after successful pushes
+and complete XHTTP-pair and Hysteria-pair 4-to-2-to-4 deployment cycles.
+Lab.9 push passed all four complete T1–T3 and reached COMMITTED. Its installed
+`rp diag` passed on each of four transports after fixing both false-success
+statuses and the incorrect firewalld intra-zone check. A real stopped-rp-net
+test reproduced lab.7 rc=0 versus candidate lab.8 rc=1, with client recovery.
+
+Lab.7's expanded regression completed: all four T1–T3, 120 additional T3,
+768 ordinary DNS behaviors, 360 same-source DNS checks, HTTP/3 and Cloudflare
+STUN passed. Both Hysteria kernel-reset probes passed. Quad9 failed one built-in
+T6; Google STUN failed on all four. Complete scoped results and capture review:
+REGRESSION-2026-11-20.md. Final policy/fault/native-IPv6 coverage remains open.
+
+RP-019: a real scoped Xray staging-write failure on lab.9
+still returned rc=0 and READY. The fixture explicitly rolled it back and verified
+old hashes/watch/client recovery. Lab.10 adds checked writes/permissions/services
+and durable cleanup of owned staging files. All nine real command-failure cases
+passed with automatic rollback, old hashes/watch/client and staging cleanup.
+See INSTALLER-FAULTS-2026-11-20.md; ordinary lab.10 push then passed all four
+complete T1–T3 and committed. RP-020's baseline cycle exposed retained unused
+WG secrets and a legacy TCP configuration. Lab.11 removes them correctly; both
+repeat pair cycles passed 39 checks each, including client HTTPS/DNS/HTTP3,
+identity/settings preservation, full four-transport restoration and auto mode.
+See TRANSPORT-CLEANUP-2026-11-20.md. 118 local regression tests and generated-code
+static checks pass.
 Final clean installation and six-hour soak have NOT started.
 
 All three machines became available again on 2026-11-20; their clocks were
@@ -53,6 +71,15 @@ New commits since dcee312:
   actual ENOSPC/MTU comparison and four-transport regression tooling.
 - a1f7ba6: update live WG MTU on apply and restore it from rollback files.
 - 61dbdf5: preserve intercepted DNS reply addresses across reused UDP ports.
+- 65b3fed: reject malformed/partial DoH replies and propagate DNS test failures.
+- 87f4f3a: prevent unmarked kernel resets escaping through LAB-1 underlay.
+- 9fdb646: request only missing OS dependencies during repeated VPS-2 installs.
+- cf9ab6f: propagate diagnostic errors and revalidate after --fix.
+- 171a2c7: inspect the actual active inter-zone firewalld policy.
+- 7471fb3: fail and roll back on installer write/permission/service errors;
+  include binary staging files in durable restoration.
+- e50929e: omit unused inner-WG credentials and remove obsolete VPS-2 configs;
+  cover every nonempty transport subset and real pair round trips.
 
 Actual ENOSPC during transaction preparation: 6/6 checks PASS, cleanup complete.
 HTTP/3 with each Hysteria variant: FAIL at MTU 1080, PASS at 1280, with simultaneous
@@ -84,3 +111,10 @@ rollback completed in 30.365 seconds, old config hash restored, new owned file a
 backup/pending removed, watch/live tunnel healthy, manual pin preserved, client
 HTTPS working. This used controlled owned-file mutation, not every installer
 failure point. Full clean/reboot/load/concurrency acceptance is still pending.
+
+Next priorities: actual installer interruption at publication/cleanup points;
+remaining download/extract/service failures and concurrent operations; complete self-update
+rollback (the current self-updater restores only its executable on migration
+failure and releases its operation lock before starting migration); full CLI/menu,
+policy, load and failover coverage. Installer writes that are not explicitly
+checked require fault reproduction before any broader atomicity claim.

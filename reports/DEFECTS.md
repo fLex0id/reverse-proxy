@@ -13,7 +13,10 @@ It stops/verifies an existing inner-WG interface BEFORE removing the two configs
 and deletes the obsolete TCP config. Private VPS-1 identity is retained for future
 re-enablement. Tests cover all 15 nonempty transport subsets and an XHTTP-only
 config without unused WG keys. Baseline had three surplus-config failures and
-one unnecessary-key error; candidate passes. Real repeat cycles are pending.
+one unnecessary-key error; candidate passes. Both real lab.11 repeat cycles
+(XHTTP pair and Hysteria pair) pass 39 checks each: complete pushes, stale-file
+cleanup, HTTPS/DNS/HTTP3, settings/identity preservation and restored four/auto.
+See TRANSPORT-CLEANUP-2026-11-20.md; broader interruption coverage remains open.
 
 ## RP-019 P1: failed installer writes continue to READY
 Six binary/data write and rename fixtures return false success on lab.9. A real

@@ -46,7 +46,8 @@ if state()['phase'] not in ['COMMITTED', 'ROLLED_BACK']:
     raise SystemExit('Existing unresolved transaction; no fault injected')
 if remote(a.client, client_probe, 'client-before').returncode:
     raise SystemExit('Client not healthy; no fault injected')
-hash_cmd = 'sha256sum /etc/rp/rp2.conf /usr/local/bin/xray /usr/local/bin/hysteria /usr/local/bin/rp'
+hash_cmd = ('sha256sum /etc/rp/rp2.conf /usr/local/bin/xray /usr/local/bin/hysteria '
+            '/usr/local/bin/rp /usr/local/lib/rp/transaction.py /etc/wireguard/rp-wg.conf')
 before = remote(a.lab2, hash_cmd, 'hashes-before')
 if before.returncode:
     raise SystemExit('Cannot record baseline')
@@ -115,6 +116,7 @@ finally:
             r = remote(a.lab2, 'python3 /var/lib/rp/transaction/runner.py rollback', 'explicit-rollback', 180)
             if r.returncode:
                 raise RuntimeError('Recovery failed; keep fixture/evidence for inspection')
+        remote(a.lab2, 'systemctl reset-failed '+unit, 'clear-fixture-unit')
     for host in [a.lab1, a.lab2]:
         remote(host, shlex.join(['rm', '-rf', directory]), 'cleanup-'+host)
     (out/'block.sh').unlink(missing_ok=True)
