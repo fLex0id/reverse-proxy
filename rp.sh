@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.12"
+SELF_VERSION="1.2.9-lab.13"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -3134,8 +3134,8 @@ self_upgrade() {
     rm -rf "$stage"; rm -f "$tmp"; err "Установка прервана"; return 1
   fi
   rmdir "$stage" 2>/dev/null || true; rm -f "$tmp"
-  # Release the parent CLI lock before the new version acquires it in migrate.
-  flock -u 9 2>/dev/null || true
+  # The child inherits the same locked open-file description. Keep ownership
+  # throughout migration and rollback; lock() recognizes that descriptor.
   if ! "$SELF_BIN" migrate; then
     err "Миграция версии $nv не удалась"
     if [[ -n $backup ]]; then
@@ -5000,7 +5000,14 @@ cmd_install() {
   case $ROLE_CHOICE in vps1) lock; vps1_install ;; vps2) vps2_entry ;; esac
 }
 
-lock() { exec 9>/run/rp.lock; flock -w 5 9 || die "Другая операция rp уже выполняется"; }
+lock() {
+  # A self-update's migration child must share, not release/reopen, the lock.
+  # Check the actual descriptor/inode and acquire it: an environment variable
+  # alone is never proof of ownership. Other callers retain the bounded wait.
+  if [[ /proc/self/fd/9 -ef /run/rp.lock ]] && flock -n 9; then return 0; fi
+  exec 9>/run/rp.lock
+  flock -w 5 9 || die "Другая операция rp уже выполняется"
+}
 
 main() {
   local cmd=${1:-}; shift || true

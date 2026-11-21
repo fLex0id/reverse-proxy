@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.9-lab.13 (unreleased, NOT_READY)
+
+- Hold the operation lock across self-update, child migration and executable
+  rollback. Validate the inherited lock descriptor instead of releasing it
+  between commands. Four real-process regression cases pass locally and on Rocky.
+- Full configuration/service rollback remains pending; this change closes the
+  concurrent-operation window only.
+
 ## 1.2.9-lab.11 (unreleased, NOT_READY)
 
 - Omit inner-WG credentials from VPS-2 bundles when neither Hysteria variant is

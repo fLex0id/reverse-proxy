@@ -12,7 +12,7 @@
     {
       "id": "F02",
       "result": "UNKNOWN",
-      "reason": "Partial migration/reinstall fixtures pass; full self-update rollback and stream-launch acceptance pending"
+      "reason": "Self-update lock handover fixed: four real-process tests pass locally and on Rocky; full self-update state rollback and stream-launch acceptance remain pending"
     },
     {
       "id": "F03",

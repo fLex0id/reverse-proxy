@@ -22,7 +22,15 @@ Read both supplied specifications in full. Implementation must preserve all four
 transports, full SNI coverage, T1-T3, and the F01-F13 acceptance matrix.
 Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
 
-## Current checkpoint (2026-11-21)
+## Resumed work (2026-11-21)
+
+The working branch fast-forwarded to backup commit 0cb36b4 without rewriting
+history. Lab.13 closes the self-update lock handover gap: 128 local tests and
+static checks pass; four real-process lock tests also pass on Rocky 10.2. The
+installed endpoints still run lab.12. Full migration rollback remains open.
+See UPDATE-LOCK-2026-11-21.md. Final cleanup/soak has not started.
+
+## Previous installed checkpoint (2026-11-21)
 
 Both endpoints now run source 29f65ed, 1.2.9-lab.12. Migration and ordinary push
 passed complete T1–T3 on all four transports and reached COMMITTED, with auto mode
@@ -136,6 +144,6 @@ failure point. Full clean/reboot/load/concurrency acceptance is still pending.
 Next priorities: remaining installer
 interruption/SSH/concurrent-operation coverage; complete self-update
 rollback (the current self-updater restores only its executable on migration
-failure and releases its operation lock before starting migration); full CLI/menu,
+failure; the lock handover gap is fixed in lab.13); full CLI/menu,
 policy, load and failover coverage. Installer writes that are not explicitly
 checked require fault reproduction before any broader atomicity claim.
