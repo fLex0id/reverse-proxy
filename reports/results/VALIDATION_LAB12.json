@@ -1,0 +1,15 @@
+{
+  "historical_rp_sha256": "fd25577753ef68767556130b814f03f765aa0c1b0de03458ec96c343821dd27a",
+  "unit_tests": {
+    "result": "PASS",
+    "count": 124,
+    "seconds": 7.009,
+    "source": "lab/artifacts/unittest-lab12.log"
+  },
+  "static": {
+    "result": "PASS",
+    "checks": "Bash syntax, generated shells, ShellCheck warning+, Python compile/pyflakes, embedded helper consistency",
+    "source": "lab/artifacts/static-lab12.log"
+  },
+  "new_lab_tests_started": false
+}

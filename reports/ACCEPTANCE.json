@@ -1,0 +1,77 @@
+{
+  "verdict": "NOT_READY",
+  "baseline": "3d3077d8940ac136b25cae4a6667a26531843a11",
+  "soak_required_hours": 6,
+  "rocky9": "NOT_TESTED",
+  "items": [
+    {
+      "id": "F01",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F02",
+      "result": "UNKNOWN",
+      "reason": "Lab.16/lab.18 immutable-URL updates commit, preserve configuration/clients and repeat idempotently. Lab.18 failed rp update selects its candidate helper and restores measured state with nonzero status; subsequent client HTTPS and VPS-2/Xray exit/rev readback pass. Actual supervisor SIGKILL and reboot after unit mutation also restore baseline; first post-reboot HTTPS times out then passes. 155 local tests/static checks pass. Real deadline, other crash/disk/concurrency/stream/native-IPv6 and full candidate transport acceptance remain pending"
+    },
+    {
+      "id": "F03",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F04",
+      "result": "UNKNOWN",
+      "reason": "Scoped pushes, unchanged 30-minute rollback, SIGKILL/ENOSPC preparation and races pass. Eighteen installer write/download/checksum/extraction/network command failures automatically restore files/watch/client; three actual installer SIGKILL/reboot points pass boot recovery. Both pair 4-to-2-to-4 cycles pass stale-config, client and identity checks. Full interruption/SSH/concurrency acceptance remains pending"
+    },
+    {
+      "id": "F05",
+      "result": "UNKNOWN",
+      "reason": "Four transport pins, auto, sync and routing readback exercised; complete split-brain and failure matrix pending"
+    },
+    {
+      "id": "F06",
+      "result": "UNKNOWN",
+      "reason": "Four full transport checks plus repeated T3 pass; one failover scenario measured; complete watchdog/fault/load matrix pending"
+    },
+    {
+      "id": "F07",
+      "result": "UNKNOWN",
+      "reason": "Diagnostic false-success and firewalld false-negative corrected; actual stopped-network-service comparison and four healthy transport diagnostics pass. Full repair/failure/UNKNOWN semantics and CLI coverage pending"
+    },
+    {
+      "id": "F08",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F09",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F10",
+      "result": "UNKNOWN",
+      "reason": "Lab.4 passed 360 same-source and 768 ordinary DNS behaviors across four transports; strict DoH validation added. Paired Quad9 failures reproduced directly outside rp. Full resolver-outage/policy/reboot acceptance pending",
+      "evidence": [
+        "reports/DEFECTS.md#rp-013-p1-dns-reply-source-reused-across-resolver-destinations",
+        "lab/dns_source_reuse.py"
+      ]
+    },
+    {
+      "id": "F11",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F12",
+      "result": "UNKNOWN",
+      "reason": "Restart false-success reproduced and corrected on both hosts, including actual inactive WG/echo and immediate process-start failure. Scoped restoration/client checks pass; full upgrade/uninstall/restart-dependency and coexistence acceptance remains pending"
+    },
+    {
+      "id": "F13",
+      "result": "UNKNOWN",
+      "reason": "28 menu branch lock fixtures pass; complete interactive behavior and concurrent live operations pending"
+    }
+  ]
+}

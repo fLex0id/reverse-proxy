@@ -1,0 +1,24 @@
+{
+  "operation": "update",
+  "failure": "exit",
+  "result": "PASS",
+  "rc": 1,
+  "phase": "ROLLED_BACK",
+  "seconds": 48.844,
+  "mutation_reached": true,
+  "candidate_helper_used": true,
+  "hashes_restored": true,
+  "runtime_restored": true,
+  "services_restored": true,
+  "fallback_used": false,
+  "post_recovery_client_https_rc": 0,
+  "post_recovery_balancers": {
+    "vps2_mode": "auto",
+    "vps2_active": "reality-xhttp",
+    "exit": "r-xhttp",
+    "rev": "",
+    "route_target": "r-xhttp",
+    "route_policy": "auto",
+    "result": "PASS"
+  }
+}

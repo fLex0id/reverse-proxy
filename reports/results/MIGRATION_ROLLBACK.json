@@ -1,0 +1,34 @@
+{
+  "candidate_sha256": "96df8371251d61806c170aa5b13853240013c3c9300c7627c9742b714a916b5c",
+  "cases": [
+    {
+      "failure": "exit",
+      "result": "PASS",
+      "rc": 1,
+      "phase": "ROLLED_BACK",
+      "seconds": 48.687,
+      "mutation_reached": true,
+      "hashes_restored": true,
+      "runtime_restored": true,
+      "services_restored": true,
+      "fallback_used": false
+    },
+    {
+      "failure": "kill",
+      "result": "PASS",
+      "rc": 137,
+      "phase": "ROLLED_BACK",
+      "seconds": 66.786,
+      "mutation_reached": true,
+      "hashes_restored": true,
+      "runtime_restored": true,
+      "services_restored": true,
+      "fallback_used": false
+    }
+  ],
+  "post_recovery_client_https_rc": 0,
+  "terminal_recover_repeat_rc": 0,
+  "local_unit_tests": 152,
+  "local_static_checks": "PASS",
+  "scope": "Existing Rocky installation; not final clean acceptance or continuous outage measurement"
+}

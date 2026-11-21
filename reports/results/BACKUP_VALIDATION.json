@@ -1,0 +1,24 @@
+{
+  "version": "1.2.9-lab.12",
+  "lab_experiments_run": false,
+  "checks": [
+    {
+      "check": "bash-syntax",
+      "result": "PASS",
+      "rc": 0,
+      "seconds": 0.016
+    },
+    {
+      "check": "static",
+      "result": "PASS",
+      "rc": 0,
+      "seconds": 8.604
+    },
+    {
+      "check": "unit-tests",
+      "result": "PASS",
+      "rc": 0,
+      "seconds": 7.216
+    }
+  ]
+}
