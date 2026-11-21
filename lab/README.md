@@ -105,6 +105,14 @@ below `lab/private` (both ignored, mode 0700).
   decode every LAB-1 PCAP using tcpdump on the authorized lab reader. Include all
   source addresses, especially inner-WG kernel replies; collect addresses and DNS
   questions for policy review. Zero packets alone is not an acceptance verdict.
+- `hy2_acl_matrix.py --lab1 ALIAS --lab2 ALIAS --client ALIAS --client-ip IP --output DIR`:
+  launch private authenticated Hysteria 2.8.2 clients for both variants using the
+  existing certificate pin and credentials, with a dedicated loopback SOCKS port.
+  Test TCP denial to known reachable lab services and UDP delivery/denial using
+  unique payload markers in a real VPS-1 capture. The allowed UDP/51821 positive
+  control must succeed; otherwise negative results remain UNKNOWN. Server ACLs
+  are unchanged. Only owned lab destinations are probed. Temporary clients and
+  captures have bounded service runtimes; credentials/PCAPs stay private.
 - `dns_redirect_trial.py`: LAB-1-only experimental regression fixture. Temporarily
   redirect DNS through conntrack into a separate inbound with the existing DNS
   policy. Validates nft/Xray first; restores files/services after 180 seconds or

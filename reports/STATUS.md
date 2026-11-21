@@ -28,9 +28,15 @@ Both endpoints now run source 29f65ed, 1.2.9-lab.12. Migration and ordinary push
 passed complete T1–T3 on all four transports and reached COMMITTED, with auto mode
 and watcher active. Actual failed/inactive-service restart tests pass on both
 roles, including immediate Type=simple process exit; see RESTART-2026-11-20.md.
-124 local tests and generated-code static checks pass. A lab.12 NAT-failure and
-kill/reboot recovery repeat, followed by a full four-transport regression, is
-currently running under `lab/artifacts/lab12-validation-20261121`.
+124 local tests and generated-code static checks pass. The lab.12 NAT-failure
+and kill/reboot recovery repeat and full four-transport regression completed
+under `lab/artifacts/lab12-validation-20261121`. All complete T1–T3, 120 extra
+T3 checks, 768 DNS behaviors, 360 same-source DNS checks, HTTP/HTTPS/DoH/DoT/HTTP3
+and Cloudflare STUN passed. Google STUN failed on all four transports; its direct
+controls and external-path limitations remain documented. Auto mode was restored.
+The lab.12 boot rollback completed in 33.416 seconds; original hashes, watcher,
+staging cleanup and client HTTPS passed. See WORK_SUMMARY_RU.md and the sanitized
+snapshots in reports/results. These observations are not final acceptance.
 
 Lab.11 completed XHTTP-pair and Hysteria-pair 4-to-2-to-4 deployment cycles.
 Lab.9 push passed all four complete T1–T3 and reached COMMITTED. Its installed
@@ -127,7 +133,7 @@ backup/pending removed, watch/live tunnel healthy, manual pin preserved, client
 HTTPS working. This used controlled owned-file mutation, not every installer
 failure point. Full clean/reboot/load/concurrency acceptance is still pending.
 
-Next priorities: complete the current lab.12 regression; remaining installer
+Next priorities: remaining installer
 interruption/SSH/concurrent-operation coverage; complete self-update
 rollback (the current self-updater restores only its executable on migration
 failure and releases its operation lock before starting migration); full CLI/menu,

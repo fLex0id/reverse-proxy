@@ -62,5 +62,10 @@ finally:
         # Include unexpected internal-source output (e.g. unmarked kernel RST),
         # not only packets sourced from LAB-1's underlay address.
         filt='ip or ip6'
-        r=ssh(a.client,shlex.join(['tcpdump','-nn','-r',remote,filt]))
-        (out/(label+'-packets.log')).write_text(r.stdout+r.stderr)
+        try:
+            r=ssh(a.client,shlex.join(['tcpdump','-nn','-r',remote,filt]))
+            (out/(label+'-packets.log')).write_text(r.stdout+r.stderr)
+        finally:
+            # The original private capture is already retained on the controller.
+            r=ssh(a.client,shlex.join(['rm','-f',remote]))
+            (out/(label+'-reader-cleanup.log')).write_text(r.stdout+r.stderr)
