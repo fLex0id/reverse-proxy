@@ -31,7 +31,11 @@ installed endpoints still run lab.12. Full migration rollback remains open.
 See UPDATE-LOCK-2026-11-21.md. Lab.14 also fixes false success and configuration
 loss on write failure. Actual ENOSPC reproduced in a private Rocky tmpfs; the
 candidate preserved the original config and returned rc=1. See
-CONFIG-WRITE-2026-11-21.md. Final cleanup/soak has not started.
+CONFIG-WRITE-2026-11-21.md. Lab.15 propagates unit-generation and migration-stage
+errors and checks local readiness before success. All 137 local tests and static
+checks pass; all 13 newly added test methods pass on Rocky in isolated fixtures.
+See MIGRATE-ERRORS-2026-11-21.md. The installed endpoints remain lab.12, and full
+migration-state rollback is still the next priority. Final cleanup/soak has not started.
 
 ## Previous installed checkpoint (2026-11-21)
 

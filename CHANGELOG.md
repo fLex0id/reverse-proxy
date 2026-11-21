@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.9-lab.15 (unreleased, NOT_READY)
+
+- Reject failed VPS-1 unit/helper writes, permissions, sysctl application and
+  daemon reload instead of continuing installation/migration.
+- Require a private configuration backup, working network service, local service
+  readiness and the route-sync timer before reporting successful migration.
+- Remove the misleading claim of complete migration rollback after apply failure.
+  Full migration-state rollback remains pending.
+
 ## 1.2.9-lab.14 (unreleased, NOT_READY)
 
 - Preserve the previous configuration and return an error on copy/read/write,

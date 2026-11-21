@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.14"
+SELF_VERSION="1.2.9-lab.15"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -705,8 +705,8 @@ WantedBy=multi-user.target
 EOF
 }
 units_vps1() {
-  mkdir -p "$LIB"
-  cat >"$LIB/net-up.sh" <<'EOS'
+  mkdir -p "$LIB" || return 1
+  cat >"$LIB/net-up.sh" <<'EOS' || return 1
 #!/usr/bin/env bash
 # Правила сети VPS-1: kill switch, TPROXY, метка выхода hy2. Идемпотентно.
 set -u
@@ -725,15 +725,15 @@ sysctl -q -w net.ipv4.conf.all.rp_filter=2 net.ipv4.conf.default.rp_filter=2 >/d
 for i in wg0 wg-exit; do [[ -d /proc/sys/net/ipv4/conf/$i ]] && sysctl -q -w "net.ipv4.conf.$i.rp_filter=2" >/dev/null 2>&1; done
 exit 0
 EOS
-  cat >"$LIB/net-down.sh" <<'EOS'
+  cat >"$LIB/net-down.sh" <<'EOS' || return 1
 #!/usr/bin/env bash
 # Останов: снимаем перехват, но kill switch (rp_guard) остаётся.
 nft delete table ip rp_tp 2>/dev/null
 while ip rule del fwmark 1 lookup 100 2>/dev/null; do :; done
 exit 0
 EOS
-  chmod 755 "$LIB/net-up.sh" "$LIB/net-down.sh"
-  cat >/etc/systemd/system/rp-net.service <<EOF
+  chmod 755 "$LIB/net-up.sh" "$LIB/net-down.sh" || return 1
+  cat >/etc/systemd/system/rp-net.service <<EOF || return 1
 [Unit]
 Description=rp: правила сети (kill switch, TPROXY)
 Before=wg-quick@wg0.service
@@ -748,9 +748,9 @@ ExecStop=$LIB/net-down.sh
 [Install]
 WantedBy=multi-user.target
 EOF
-  mkdir -p /etc/systemd/system/wg-quick@wg0.service.d
-  printf '[Unit]\nRequires=rp-net.service\nAfter=rp-net.service\n' >/etc/systemd/system/wg-quick@wg0.service.d/rp.conf
-  cat >"$LIB/route-restore.sh" <<'EOS_ROUTE_RESTORE'
+  mkdir -p /etc/systemd/system/wg-quick@wg0.service.d || return 1
+  printf '[Unit]\nRequires=rp-net.service\nAfter=rp-net.service\n' >/etc/systemd/system/wg-quick@wg0.service.d/rp.conf || return 1
+  cat >"$LIB/route-restore.sh" <<'EOS_ROUTE_RESTORE' || return 1
 #!/usr/bin/env bash
 # Xray gRPC overrides are in-memory; restore BOTH balancing planes after restart.
 # On failure, do not report a healthy service while configuration is inconsistent.
@@ -800,8 +800,8 @@ done
 echo "rp route restore: Xray API did not accept $target" >&2
 exit 1
 EOS_ROUTE_RESTORE
-  chmod 755 "$LIB/route-restore.sh"
-  cat >/etc/systemd/system/rp-route-sync.service <<EOF_SYNC_SERVICE
+  chmod 755 "$LIB/route-restore.sh" || return 1
+  cat >/etc/systemd/system/rp-route-sync.service <<EOF_SYNC_SERVICE || return 1
 [Unit]
 Description=rp: reconcile VPS-1 routing with VPS-2 active transport
 After=rp-xray.service
@@ -812,7 +812,7 @@ Type=oneshot
 ExecStart=$SELF_BIN _route_sync
 TimeoutStartSec=75
 EOF_SYNC_SERVICE
-  cat >/etc/systemd/system/rp-route-sync.timer <<'EOF_SYNC_TIMER'
+  cat >/etc/systemd/system/rp-route-sync.timer <<'EOF_SYNC_TIMER' || return 1
 [Unit]
 Description=rp: detect VPS-2 automatic failover and mirror active route
 
@@ -826,7 +826,7 @@ Unit=rp-route-sync.service
 [Install]
 WantedBy=timers.target
 EOF_SYNC_TIMER
-  cat >/etc/systemd/system/rp-xray.service <<EOF
+  cat >/etc/systemd/system/rp-xray.service <<EOF || return 1
 [Unit]
 Description=rp: Xray (VPS-1)
 After=network-online.target rp-net.service
@@ -851,9 +851,9 @@ LimitNOFILE=1048576
 [Install]
 WantedBy=multi-user.target
 EOF
-  hy2_unit rp-hy2 "rp: Hysteria2 (сервер, UDP, без обфускации)" "$ETC/hy2.yaml"
-  hy2_unit rp-hy2o "rp: Hysteria2 (сервер, UDP, Salamander)" "$ETC/hy2o.yaml"
-  cat >/etc/systemd/system/rp-echo.service <<EOF
+  hy2_unit rp-hy2 "rp: Hysteria2 (сервер, UDP, без обфускации)" "$ETC/hy2.yaml" || return 1
+  hy2_unit rp-hy2o "rp: Hysteria2 (сервер, UDP, Salamander)" "$ETC/hy2o.yaml" || return 1
+  cat >/etc/systemd/system/rp-echo.service <<EOF || return 1
 [Unit]
 Description=rp: эхо для проб туннеля (T3)
 After=network.target
@@ -871,7 +871,7 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
-  cat >/etc/systemd/system/rp-ru.service <<EOF
+  cat >/etc/systemd/system/rp-ru.service <<EOF || return 1
 [Unit]
 Description=rp: обновление списков РФ через туннель
 
@@ -879,7 +879,7 @@ Description=rp: обновление списков РФ через туннел
 Type=oneshot
 ExecStart=$SELF_BIN ru update
 EOF
-  cat >/etc/systemd/system/rp-ru.timer <<'EOF'
+  cat >/etc/systemd/system/rp-ru.timer <<'EOF' || return 1
 [Unit]
 Description=rp: списки РФ раз в неделю
 
@@ -892,11 +892,13 @@ Persistent=true
 WantedBy=timers.target
 EOF
   {
-    printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n'
-    printf 'net.ipv4.conf.all.rp_filter=2\nnet.ipv4.conf.default.rp_filter=2\n'
-    [[ $(cf DISABLE_IPV6 1) == 1 ]] && printf 'net.ipv6.conf.all.disable_ipv6=1\nnet.ipv6.conf.default.disable_ipv6=1\n'
-  } >/etc/sysctl.d/99-rp.conf
-  sysctl -q -p /etc/sysctl.d/99-rp.conf >/dev/null 2>&1 || true
+    printf 'net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' || return 1
+    printf 'net.ipv4.conf.all.rp_filter=2\nnet.ipv4.conf.default.rp_filter=2\n' || return 1
+    if [[ $(cf DISABLE_IPV6 1) == 1 ]]; then
+      printf 'net.ipv6.conf.all.disable_ipv6=1\nnet.ipv6.conf.default.disable_ipv6=1\n' || return 1
+    fi
+  } >/etc/sysctl.d/99-rp.conf || return 1
+  sysctl -q -p /etc/sysctl.d/99-rp.conf >/dev/null 2>&1 || return 1
   systemctl daemon-reload
 }
 
@@ -3223,8 +3225,9 @@ conf_exit_mtu_migrate() {
 cmd_migrate() {
   need_root; need_vps1
   banner "Применение rp $SELF_VERSION" "обновление действующей конфигурации"
-  mkdir -p "$STATE"; chmod 755 "$STATE"
-  cp -p "$CONF" "$BK_DIR/rp.conf.v1.$(date +%s)" 2>/dev/null || { mkdir -p "$BK_DIR"; cp -p "$CONF" "$BK_DIR/rp.conf.v1.$(date +%s)"; }
+  mkdir -p "$STATE" "$BK_DIR" || die "Не удалось подготовить каталог миграции"
+  chmod 755 "$STATE" && chmod 700 "$BK_DIR" || die "Не удалось защитить резервные копии"
+  cp -p "$CONF" "$BK_DIR/rp.conf.pre-migrate.$(date +%s).$$" || die "Резервная копия конфигурации не создана; миграция остановлена"
   self_install || die "Не удалось сохранить исполняемый rp; миграция остановлена"
   py_install || die "Не удалось установить rp.py"
   conf_migrate
@@ -3238,9 +3241,11 @@ cmd_migrate() {
   fi
   [[ -n $(cf WATCH_MIN) ]] || conf_set WATCH_MIN 10
   [[ -n $(cf WATCH_MAX) ]] || conf_set WATCH_MAX 15
-  units_vps1
-  systemctl is-active --quiet rp-net || systemctl start rp-net >/dev/null 2>&1
-  tr_has hy2-wg && ! [[ -x $HY2_BIN ]] && run "Hysteria2" hy2_install "$(cf HY2_VER "$HY2_PINNED")"
+  units_vps1 || die "Не удалось записать или применить службы и sysctl; миграция остановлена"
+  systemctl is-active --quiet rp-net || systemctl start rp-net >/dev/null 2>&1 || die "Не удалось запустить rp-net"
+  if [[ $(cf TRANSPORT_ORDER) == *hy2* && ! -x $HY2_BIN ]]; then
+    run "Hysteria2" hy2_install "$(cf HY2_VER "$HY2_PINNED")" || die "Не удалось установить бинарный файл транспорта"
+  fi
   run "Хэши релизов для VPS-2" pin_release || warn "Хэши для VPS-2 не получены (rp link/rp block повторят попытку)"
   if [[ $(cf RU_DIRECT 0) == 1 ]]; then
     if ! py verify-geo "$ASSETS/geosite.dat" >"$STATE/ru-current-check.log" 2>&1; then
@@ -3248,9 +3253,10 @@ cmd_migrate() {
       run "Проверка и восстановление списков РФ" ru_update || die "Не удалось восстановить списки РФ. Миграция остановлена; RU_DIRECT не выключен"
     fi
   fi
-  vps1_apply || die "Конфигурация не применилась (изменения откатены)"
+  vps1_apply || die "Конфигурация не применилась; полный откат миграции не выполнен"
+  vps1_check || die "Миграция не подтверждена: службы не прошли проверку готовности"
   if tr_has reality-xhttp || tr_has reality-xhttp2; then
-    systemctl enable --now rp-route-sync.timer >/dev/null 2>&1 || warn "Не удалось запустить фоновую синхронизацию маршрута"
+    systemctl enable --now rp-route-sync.timer >/dev/null 2>&1 || die "Не удалось запустить фоновую синхронизацию маршрута"
     # A previous manual pin on VPS-2 must be discovered after upgrading VPS-1.
     # No fail-open fallback if the control link is transiently unavailable.
     route_sync_locked >/dev/null 2>&1 || warn "Текущий маршрут пока не подтверждён; позже выполните rp tunnel sync"
@@ -3343,7 +3349,7 @@ vps1_install() {
   else note "Выключены"; fi
 
   step "Службы и применение"
-  units_vps1
+  units_vps1 || die "Не удалось записать или применить службы и sysctl; установка остановлена"
   systemctl enable --now rp-echo >/dev/null 2>&1
   fw_open "$WG_PORT/udp"
   fw_trust_if wg0; fw_trust_if wg-exit; selinux_fix

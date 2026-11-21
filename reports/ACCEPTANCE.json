@@ -12,7 +12,7 @@
     {
       "id": "F02",
       "result": "UNKNOWN",
-      "reason": "Self-update lock handover fixed: four real-process tests pass locally and on Rocky; full self-update state rollback and stream-launch acceptance remain pending; configuration I/O errors now stop instead of publishing partial state, with real bounded ENOSPC evidence"
+      "reason": "Lab.13 fixes self-update lock handover; lab.14 rejects config I/O failures with real bounded ENOSPC evidence; lab.15 propagates unit/migration errors and verifies local readiness. 137 local tests pass; 13 new test methods pass in isolated Rocky fixtures. Full migration-state rollback, interrupted-update recovery, live candidate regression and stream-launch acceptance remain pending"
     },
     {
       "id": "F03",
