@@ -43,7 +43,7 @@ systemctl() {
   [[ $TEST_FAILURE != route-timer || $* != 'enable --now rp-route-sync.timer' ]]
 }
 '''
-            action = 'units_vps1' if units else 'cmd_migrate'
+            action = 'units_vps1' if units else 'migrate_apply'
             script += '\nif ' + action + '; then echo MIGRATE_SUCCESS; else exit 42; fi\n'
             result = subprocess.run(['bash', '-c', script], text=True, capture_output=True,
                                     env=dict(os.environ, TEST_DIR=tmp, TEST_FAILURE=failure,

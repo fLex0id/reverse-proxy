@@ -133,9 +133,17 @@ and publish only sanitized evidence summaries.
   original bytes, permissions and cleanup. Installed rp files/services and the
   root filesystem capacity are unchanged. Mounts are always unmounted in finally.
 
+- `migration_fault.py --candidate FILE --helper FILE --output NEW_DIR [--failure exit|kill]`:
+  run on authorized VPS-1 only. Take an independent private backup and arm a
+  fallback timer, then fail or kill a real migration after unit/config mutation.
+  Require exact owned-file hashes/modes, selected runtime state and unit states
+  after automatic recovery. Verify isolated client traffic separately. Never
+  overlap any other mutation suite. On failure the fallback stays armed.
+
 ## Development validation
 
 Run `python3 tools/embed-transaction.py` after modifying `src/transaction.py`.
+Run `python3 tools/embed-migration.py` after modifying `src/migration.py`.
 The deployed artifact remains a single `rp.sh`; src/ is not needed to install it.
 Run `python3 tools/static-check.py` and `python3 -m unittest discover -s tests -v`.
 Static checks require ShellCheck and pyflakes. CI also stores a formatting audit;

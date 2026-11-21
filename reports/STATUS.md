@@ -22,7 +22,19 @@ Read both supplied specifications in full. Implementation must preserve all four
 transports, full SNI coverage, T1-T3, and the F01-F13 acceptance matrix.
 Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
 
-## Resumed work (2026-11-21)
+## Current candidate (2026-11-21)
+
+Lab.16 adds a private VPS-1 migration/self-update transaction, immediate rollback
+and an independent timer for interrupted-supervisor recovery. Ordinary failed
+migration and real SIGKILL scenarios restored owned-file hashes/modes, selected
+network runtime and service states on Rocky LAB-1. Isolated-client HTTPS passed
+after recovery. The fallback restoration timer was not used.
+152 local tests and static checks pass. See MIGRATION-ROLLBACK-2026-11-21.md.
+Installed endpoints still run lab.12 after these rollback tests. Successful
+immutable-URL update, reboot interruption and full candidate network regression
+remain to be run; final clean installation and six-hour soak have not started.
+
+## Earlier resumed work (2026-11-21)
 
 The working branch fast-forwarded to backup commit 0cb36b4 without rewriting
 history. Lab.13 closes the self-update lock handover gap: 128 local tests and

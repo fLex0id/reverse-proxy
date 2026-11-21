@@ -17,11 +17,13 @@ with tempfile.TemporaryDirectory() as tmp:
     for f in bash_files: subprocess.run(['bash','-n',str(f)],check=True)
     if not shutil.which('shellcheck'): raise SystemExit('NOT_TESTED: shellcheck missing')
     subprocess.run(['shellcheck','-S','warning',*(str(p) for p in bash_files)],check=True)
-    for f in (py,ROOT/'src/transaction.py',d/'generated/usr/local/lib/rp/transaction.py'):
+    for f in (py,ROOT/'src/transaction.py',ROOT/'src/migration.py',d/'generated/usr/local/lib/rp/transaction.py'):
         py_compile.compile(str(f),doraise=True)
         if shutil.which('pyflakes3'): subprocess.run(['pyflakes3',str(f)],check=True)
         elif shutil.which('pyflakes'): subprocess.run(['pyflakes',str(f)],check=True)
         else: raise SystemExit('NOT_TESTED: pyflakes missing')
     embedded=s.split("transaction_source() { cat <<'RP_TRANSACTION_PY'\n",1)[1].split('RP_TRANSACTION_PY\n',1)[0]
     assert embedded==(ROOT/'src/transaction.py').read_text(),'transaction helper not regenerated'
+    migration=s.split("migration_source() { cat <<'RP_MIGRATION_PY'\n",1)[1].split('RP_MIGRATION_PY\n',1)[0]
+    assert migration==(ROOT/'src/migration.py').read_text(),'migration helper not regenerated'
 print('PASS: Bash syntax, generated shells, ShellCheck warning+, Python compile/pyflakes, embedded helper consistency')

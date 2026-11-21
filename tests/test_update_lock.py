@@ -1,5 +1,6 @@
 """Use actual processes/flock to check update handover and rollback exclusion."""
 import os
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -54,6 +55,30 @@ printf 'LOCKED\n'
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def pending_migration(self):
+        tx = self.root / 'state/migration'
+        tx.mkdir(parents=True)
+        helper = (ROOT / 'src/migration.py').read_text()
+        helper = helper.replace('/run/rp.lock', str(self.lock)).replace('/var/lib/rp/migration', str(tx))
+        (tx / 'runner.py').write_text(helper)
+        (tx / 'state.json').write_text(json.dumps(dict(phase='MIGRATING', token='fixture')))
+
+    def test_cli_rejects_pending_migration_even_after_owner_lock_is_gone(self):
+        self.pending_migration()
+        result = self.run_shell('STATE=$TEST_DIR/state\nlock\nprintf UNEXPECTED\n')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('UNEXPECTED', result.stdout)
+
+    def test_route_timer_defers_pending_migration(self):
+        self.pending_migration()
+        result = self.run_shell(r'''
+STATE=$TEST_DIR/state; CFG[ROLE]=vps1
+vps2_read() { touch "$TEST_DIR/network-called"; }
+route_sync
+[[ ! -f $TEST_DIR/network-called ]]
+''')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_update_holds_lock_before_child_lock_and_through_failed_migration(self):
         # The candidate pauses BEFORE acquiring its lock, exposing the old
         # unlock/reacquire gap deterministically, without touching host services.
@@ -71,6 +96,8 @@ exit 23
         script = r'''
 source "$TEST_DIR/functions"
 SELF_BIN=$TEST_DIR/rp; STATE=$TEST_DIR/state; BK_DIR=$STATE/backup
+need_vps1() { :; }
+migration_run() { bash "$1"; }
 self_fetch() { cp "$TEST_DIR/candidate" "$1"; }
 self_ok() { bash -n "$1"; }
 yesno() { return 0; }

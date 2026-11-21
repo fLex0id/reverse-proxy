@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.9-lab.16 (unreleased, NOT_READY)
+
+- Wrap VPS-1 migration and self-update in a private, verified snapshot of managed
+  files, units and network state. Restore it on failure instead of restoring only
+  the executable; retain nonterminal status when restoration fails.
+- Add durable recovery supervision for interrupted migration and explicit
+  `rp migrate-recover`; retain the operation lock and gate candidate startup.
+- Flush managed data before committing the transaction. Keep a private diagnostic
+  archive and remove recovery units during uninstall.
+- Add local and real-Linux rollback fixtures; final acceptance remains open.
+
 ## 1.2.9-lab.15 (unreleased, NOT_READY)
 
 - Reject failed VPS-1 unit/helper writes, permissions, sysctl application and
