@@ -64,10 +64,78 @@ Pin: origin "flex0id.github.io"
 Pin-Priority: 700
 
 Package: teleport
-Pin: *
+Pin: version *
 Pin-Priority: -1
 PIN
     chmod 644 /etc/apt/sources.list.d/flex0id-teleport.list /etc/apt/preferences.d/flex0id-teleport
+
+    # APT pinning only chooses package *versions*, not which source serves
+    # an identical version. Disable the official vendor's Teleport repository
+    # if present, preserving a backup of every changed sources file.
+    # Do not alter unrelated repositories or mixed-URI deb822 stanzas.
+    command -v python3 >/dev/null || {
+        echo 'python3 is required to disable competing Teleport APT sources safely' >&2
+        exit 1
+    }
+    python3 - <<'PY'
+from pathlib import Path
+import re
+import shutil
+
+root = Path("/etc/apt")
+paths = [root / "sources.list", *sorted((root / "sources.list.d").glob("*.list")),
+         *sorted((root / "sources.list.d").glob("*.sources"))]
+host = "apt.releases.teleport.dev"
+edits = []
+
+for path in paths:
+    if not path.is_file() or path.name == "flex0id-teleport.list":
+        continue
+    original = path.read_text(encoding="utf-8")
+    if host not in original:
+        continue
+    if path.suffix == ".sources":
+        # Deb822: disable only the Teleport-specific stanza.
+        sections = re.split(r"(\n[ \t]*\n)", original)
+        for i in range(0, len(sections), 2):
+            stanza = sections[i]
+            uris = re.findall(r"(?mi)^URIs:[ \t]*([^\n]+)", stanza)
+            if not any(host in uri for uri in uris):
+                continue
+            urls = re.findall(r"https?://[^\s]+", " ".join(uris))
+            if not urls or any(host not in url for url in urls):
+                raise SystemExit(f"Refusing to disable mixed-URI APT stanza in {path}")
+            if re.search(r"(?mi)^Enabled:[ \t]*no[ \t]*$", stanza):
+                continue
+            if re.search(r"(?mi)^Enabled:[ \t]*", stanza):
+                stanza = re.sub(r"(?mi)^Enabled:[ \t]*[^\n]*", "Enabled: no",
+                                stanza, count=1)
+            else:
+                stanza = stanza.rstrip("\n") + "\nEnabled: no\n"
+            sections[i] = stanza
+        updated = "".join(sections)
+    else:
+        # Traditional *.list and /etc/apt/sources.list: comment only vendor
+        # lines; preserve all unrelated entries within the same file.
+        lines = []
+        for line in original.splitlines(keepends=True):
+            if (host in line and
+                    re.match(r"^[ \t]*deb(?:-src)?[ \t]+", line)):
+                lines.append("# Disabled by flex0id-teleport: " + line)
+            else:
+                lines.append(line)
+        updated = "".join(lines)
+
+    if updated != original:
+        edits.append((path, updated))
+
+for path, updated in edits:
+    backup = path.with_name(path.name + ".before-flex0id-teleport.bak")
+    if not backup.exists():
+        shutil.copy2(path, backup)
+    path.write_text(updated, encoding="utf-8")
+    print(f"Disabled competing official Teleport APT source: {path}")
+PY
     echo 'APT repository installed. Verification:'
     apt-get update
     apt-cache policy teleport
