@@ -187,9 +187,16 @@ def capture_runtime():
 
 
 def owned_rule(line):
-    return (('fwmark 0x1 ' in line and 'lookup 100' in line) or
-            ('fwmark 0xff ' in line and 'lookup 200' in line) or
-            ('from 10.77.0.1' in line and 'lookup 200' in line))
+    pref, separator, body = line.partition(':')
+    if not separator:
+        return False
+    words = body.split()
+    expected = {
+        '90': [['from', 'all', 'fwmark', '0x1', 'lookup', '100']],
+        '100': [['from', 'all', 'fwmark', '0xff', 'lookup', '200']],
+        '101': [['from', address, 'lookup', '200'] for address in ['10.77.0.1', '10.77.0.1/32']],
+    }
+    return words in expected.get(pref.strip(), [])
 
 
 def read_conf():
@@ -476,7 +483,9 @@ def recover():
     same_boot = meta['boot_id'] == boot_id()
     alive = same_boot and pid_start(meta['owner']) == meta['owner_start']
     if meta['phase'] not in TERMINAL:
-        if alive and time.time() < meta['deadline']:
+        # The deadline ends candidate execution, not an already-running
+        # rollback. Do not kill restoration halfway through its checked writes.
+        if alive and (meta['phase'] == 'ROLLING_BACK' or time.time() < meta['deadline']):
             return
         stop_child(meta)
         if alive:

@@ -17,12 +17,29 @@ import time
 import uuid
 
 
+def owned_hashes(helper):
+    result = {}
+    for rel in helper.PATHS:
+        path = Path('/') / rel
+        files = [path] if path.is_file() else (list(path.rglob('*')) if path.is_dir() else [])
+        for file in files:
+            if file.is_file():
+                result[str(file)] = dict(sha256=helper.digest(file), mode=oct(file.stat().st_mode & 0o777))
+    return result
+
+def runtime_snapshot(helper):
+    value = helper.capture_runtime()
+    value['nft'] = {k: re.sub(r'counter packets \d+ bytes \d+', 'counter', v)
+                    for k, v in value['nft'].items()}
+    return value
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--candidate', required=True)
     p.add_argument('--helper', required=True)
     p.add_argument('--output', required=True)
-    p.add_argument('--failure', choices=['exit', 'kill'], default='exit')
+    p.add_argument('--failure', choices=['exit', 'kill', 'reboot'], default='exit')
     a = p.parse_args()
     out = Path(a.output).resolve()
     out.mkdir(parents=True, mode=0o700, exist_ok=False)
@@ -35,24 +52,9 @@ def main():
         if units[unit]['ActiveState'] != 'active':
             raise RuntimeError('baseline service is not active: ' + unit)
 
-    def hashes():
-        result = {}
-        for rel in helper.PATHS:
-            path = Path('/') / rel
-            files = [path] if path.is_file() else (list(path.rglob('*')) if path.is_dir() else [])
-            for file in files:
-                if file.is_file():
-                    result[str(file)] = dict(sha256=helper.digest(file), mode=oct(file.stat().st_mode & 0o777))
-        return result
-
-    def runtime():
-        value = helper.capture_runtime()
-        value['nft'] = {k: re.sub(r'counter packets \d+ bytes \d+', 'counter', v)
-                        for k, v in value['nft'].items()}
-        return value
-
-    before = hashes()
-    runtime_before = runtime()
+    (out / 'before-units.json').write_text(json.dumps(units, indent=2) + '\n')
+    before = owned_hashes(helper)
+    runtime_before = runtime_snapshot(helper)
     (out / 'before-hashes.json').write_text(json.dumps(before, indent=2) + '\n')
     (out / 'before-runtime.json').write_text(json.dumps(runtime_before, indent=2) + '\n')
     backup = out / 'independent-backup.tgz'
@@ -93,7 +95,7 @@ def main():
     with (out / 'migration.log').open('w') as log:
         process = subprocess.Popen(['bash', str(candidate), 'migrate'], stdout=log, stderr=subprocess.STDOUT)
         try:
-            if a.failure == 'kill':
+            if a.failure in ('kill', 'reboot'):
                 deadline = time.monotonic() + 180
                 while not (out / 'mutation-reached').exists():
                     if process.poll() is not None or time.monotonic() >= deadline:
@@ -102,7 +104,10 @@ def main():
                 meta = helper.load()
                 if helper.pid_start(meta['owner']) != meta['owner_start']:
                     raise RuntimeError('supervisor PID identity changed')
-                os.kill(meta['owner'], 9)
+                if a.failure == 'kill':
+                    os.kill(meta['owner'], 9)
+                else:
+                    (out / 'ready-for-reboot').touch()
             rc = process.wait(timeout=240)
             deadline = time.monotonic() + 180
             while helper.load()['phase'] not in helper.TERMINAL:
@@ -110,8 +115,8 @@ def main():
                     raise RuntimeError('automatic rollback did not complete')
                 time.sleep(1)
             meta = helper.load()
-            after = hashes()
-            runtime_after = runtime()
+            after = owned_hashes(helper)
+            runtime_after = runtime_snapshot(helper)
             states = {u: helper.unit_state(u) for u in helper.UNITS}
             summary.update(rc=rc, phase=meta['phase'], seconds=round(time.monotonic() - started, 3),
                            mutation_reached=(out / 'mutation-reached').exists(),

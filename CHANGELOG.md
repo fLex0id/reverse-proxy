@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.9-lab.17 (unreleased, NOT_READY)
+
+- Match owned policy-routing rules by exact selectors and priorities, preserving
+  adjacent source addresses, table numbers and unrelated priorities on rollback.
+- Do not interrupt an active rollback merely because the candidate deadline
+  expired; the timer still recovers a dead owner.
+- Exercise actual VPS-1 reboot during migration and immutable-URL self-update,
+  including configuration/client preservation and idempotent update.
+
 ## 1.2.9-lab.16 (unreleased, NOT_READY)
 
 - Wrap VPS-1 migration and self-update in a private, verified snapshot of managed

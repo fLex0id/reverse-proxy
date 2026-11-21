@@ -12,7 +12,7 @@
     {
       "id": "F02",
       "result": "UNKNOWN",
-      "reason": "Lab.16 adds a private VPS-1 file/unit/network-state transaction and interrupted-supervisor recovery. Actual failed migration and SIGKILL on Rocky restore owned hashes/modes, selected runtime and active/enabled unit states; client HTTPS recovers. 152 local tests/static checks pass. Immutable-URL success, actual reboot interruption, full disk/concurrency/stream/native-IPv6 acceptance and candidate network regression remain pending"
+      "reason": "Lab.16 immutable-URL self-update commits, preserves parsed configuration/clients and repeats without a new transaction. Failed migration, actual supervisor SIGKILL and actual reboot after unit mutation restore measured hashes/modes, selected runtime and unit states. Post-reboot client HTTPS times out once then passes. Lab.17 narrows rule ownership and protects active rollback. Full real migration deadline, other crash/disk/concurrency/stream/native-IPv6 acceptance and candidate network regression remain pending"
     },
     {
       "id": "F03",

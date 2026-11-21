@@ -58,9 +58,35 @@ Published scalar results: [MIGRATION_ROLLBACK.json](results/MIGRATION_ROLLBACK.j
 Private evidence is under `lab/artifacts/migration-20261121/` and the matching
 root-only LAB-1 directory. Only scalar outcome summaries are published.
 
-Remaining acceptance includes actual reboot during migration, the real 30-minute migration deadline, full disk-failure
+Remaining acceptance includes other reboot/crash windows, the real 30-minute migration deadline, full disk-failure
 coverage of restoration itself, concurrent live operations, all stream-launch
-paths, native IPv6 restoration, successful immutable-URL self-update and complete
+paths, native IPv6 restoration and complete
 four-transport network regression of the resulting candidate. The final clean
 installation/three regressions/six-hour soak still require the operator cleanup
 gate. No claim about those unfinished cases is made by these scoped passes.
+
+## Follow-up: successful update and actual reboot
+
+The lab.16 updater downloaded source commit `1a7fe0d5321281fdd255e6a1bef366f2ef07289a`
+from its immutable GitHub raw URL and reached COMMITTED. Installed SHA256 matched
+exactly; parsed configuration and client data matched the previous installation.
+Repeating `rp update` returned 0 without creating a new transaction. Client HTTPS
+passed. See [MIGRATION_UPDATE.json](results/MIGRATION_UPDATE.json).
+
+The subsequent lab.17 fault candidate changed owned files/config, its exact
+supervisor was killed, and VPS-1 was actually rebooted. The installed timer
+restored the lab.16 baseline: all measured hashes/modes, selected runtime state
+and unit states matched. Management SSH returned after 24.387 seconds; terminal
+ROLLED_BACK was observed after 60.901 seconds from the reboot request. Client
+HTTPS had one timeout (curl rc=28), then passed (rc=0); both attempts are retained.
+The independent fallback was not used. These timings are not a continuous
+client-outage measurement or a general SLA claim. See
+[MIGRATION_REBOOT.json](results/MIGRATION_REBOOT.json).
+
+Lab.17 also narrows rule ownership to exact selectors/priorities and prevents
+the deadline checker from killing an already-active rollback. Counterexamples
+and the expired-deadline rollback case have dedicated local regression tests.
+
+The actual reboot covered mutation after unit generation. Other crash windows,
+the full real 30-minute deadline, restoration-disk failures, native IPv6 and
+complete candidate transport acceptance remain open.

@@ -1,0 +1,15 @@
+{
+  "result": "PASS",
+  "boot_changed": true,
+  "ssh_return_seconds": 24.387,
+  "boot_recovery_seconds": 60.901,
+  "hashes_restored": true,
+  "runtime_restored": true,
+  "services_restored": true,
+  "fallback_used": false,
+  "phase": "ROLLED_BACK",
+  "client_attempt_rcs": [
+    28,
+    0
+  ]
+}

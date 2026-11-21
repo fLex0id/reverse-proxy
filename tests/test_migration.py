@@ -165,6 +165,18 @@ class Migration(unittest.TestCase):
         self.assertIn(('firewall-cmd', '--zone=public', '--add-port=8443/tcp'), calls)
         self.assertIn(('ip', '-4', 'rule', 'del', 'pref', '90', 'from', 'all', 'fwmark', '0x1', 'lookup', '100'), calls)
 
+    def test_rule_ownership_uses_exact_selectors_and_priorities(self):
+        self.assertTrue(m.owned_rule('90: from all fwmark 0x1 lookup 100'))
+        self.assertTrue(m.owned_rule('100: from all fwmark 0xff lookup 200'))
+        self.assertTrue(m.owned_rule('101: from 10.77.0.1/32 lookup 200'))
+        for line in ['90: from all fwmark 0x1 lookup 1000',
+                     '101: from 10.77.0.10 lookup 200',
+                     '101: from 10.77.0.1/24 lookup 200',
+                     '999: from all fwmark 0x1 lookup 100',
+                     '90: from 192.0.2.1 fwmark 0x1 lookup 100']:
+            with self.subTest(line=line):
+                self.assertFalse(m.owned_rule(line))
+
     def test_recovery_leaves_live_owner_before_deadline(self):
         m.save(dict(phase='MIGRATING', boot_id='boot', owner=123, owner_start='start', deadline=200))
         with patch.object(m, 'boot_id', return_value='boot'), patch.object(m, 'pid_start', return_value='start'), \
@@ -176,6 +188,13 @@ class Migration(unittest.TestCase):
         with patch.object(m, 'boot_id', return_value='new'), patch.object(m.os, 'killpg') as kill:
             m.stop_child(dict(boot_id='old', child_pid=123, child_start='start'))
             kill.assert_not_called()
+
+    def test_deadline_does_not_kill_an_active_rollback(self):
+        m.save(dict(phase='ROLLING_BACK', boot_id='boot', owner=123, owner_start='start', deadline=100))
+        with patch.object(m, 'boot_id', return_value='boot'), patch.object(m, 'pid_start', return_value='start'), \
+                patch.object(m.time, 'time', return_value=200), patch.object(m, 'stop_child') as stop:
+            m.recover()
+            stop.assert_not_called()
 
     def test_private_metadata_publication(self):
         m.save(dict(phase='PREPARING', token='fixture'))

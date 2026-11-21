@@ -140,6 +140,14 @@ and publish only sanitized evidence summaries.
   after automatic recovery. Verify isolated client traffic separately. Never
   overlap any other mutation suite. On failure the fallback stays armed.
 
+- `migration_reboot.py --lab1 ALIAS --client ALIAS --candidate REMOTE_FILE
+  --helper REMOTE_FILE --fixture REMOTE_MIGRATION_FAULT --output NEW_DIR`:
+  upload the candidate, `src/migration.py` and `migration_fault.py` first. The
+  controller pauses the fixture after real mutation, kills its exact supervisor
+  and reboots VPS-1. Require a changed boot ID, installed boot recovery, baseline
+  hashes/runtime/unit states and client HTTPS. Independent management SSH and
+  the fixture backup are required; never overlap another mutation suite.
+
 ## Development validation
 
 Run `python3 tools/embed-transaction.py` after modifying `src/transaction.py`.
