@@ -133,11 +133,14 @@ and publish only sanitized evidence summaries.
   original bytes, permissions and cleanup. Installed rp files/services and the
   root filesystem capacity are unchanged. Mounts are always unmounted in finally.
 
-- `migration_fault.py --candidate FILE --helper FILE --output NEW_DIR [--failure exit|kill]`:
+- `migration_fault.py --candidate FILE --helper FILE --output NEW_DIR [--failure exit|kill] [--operation migrate|update]`:
   run on authorized VPS-1 only. Take an independent private backup and arm a
   fallback timer, then fail or kill a real migration after unit/config mutation.
   Require exact owned-file hashes/modes, selected runtime state and unit states
-  after automatic recovery. Verify isolated client traffic separately. Never
+  after automatic recovery. Update mode uses a private local file URL for the
+  deliberately failing candidate and verifies that its own embedded supervisor
+  was selected; ordinary GitHub updates are checked separately. Verify isolated
+  client traffic separately. Never
   overlap any other mutation suite. On failure the fallback stays armed.
 
 - `migration_reboot.py --lab1 ALIAS --client ALIAS --candidate REMOTE_FILE

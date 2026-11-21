@@ -12,7 +12,7 @@
     {
       "id": "F02",
       "result": "UNKNOWN",
-      "reason": "Lab.16 immutable-URL self-update commits, preserves parsed configuration/clients and repeats without a new transaction. Failed migration, actual supervisor SIGKILL and actual reboot after unit mutation restore measured hashes/modes, selected runtime and unit states. Post-reboot client HTTPS times out once then passes. Lab.17 narrows rule ownership and protects active rollback. Full real migration deadline, other crash/disk/concurrency/stream/native-IPv6 acceptance and candidate network regression remain pending"
+      "reason": "Lab.16/lab.18 immutable-URL updates commit, preserve configuration/clients and repeat idempotently. Lab.18 failed rp update selects its candidate helper and restores measured state with nonzero status; subsequent client HTTPS and VPS-2/Xray exit/rev readback pass. Actual supervisor SIGKILL and reboot after unit mutation also restore baseline; first post-reboot HTTPS times out then passes. 155 local tests/static checks pass. Real deadline, other crash/disk/concurrency/stream/native-IPv6 and full candidate transport acceptance remain pending"
     },
     {
       "id": "F03",

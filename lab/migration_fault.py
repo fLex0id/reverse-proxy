@@ -5,6 +5,7 @@ The candidate changes owned files and fails immediately after unit generation.
 The test never changes SSH or unrelated units. Keep this output private.
 """
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -40,6 +41,7 @@ def main():
     p.add_argument('--helper', required=True)
     p.add_argument('--output', required=True)
     p.add_argument('--failure', choices=['exit', 'kill', 'reboot'], default='exit')
+    p.add_argument('--operation', choices=['migrate', 'update'], default='migrate')
     a = p.parse_args()
     out = Path(a.output).resolve()
     out.mkdir(parents=True, mode=0o700, exist_ok=False)
@@ -89,11 +91,20 @@ def main():
     else:
         injected += '  sleep 600\n  exit 91'
     candidate = out / 'candidate.sh'
-    candidate.write_text(source.replace(marker, injected))
+    source = source.replace(marker, injected)
+    if a.operation == 'update':
+        # Distinguish the downloaded helper from the installed updater's helper
+        # without changing its behavior or publishing a deliberately failing build.
+        source = source.replace('RP_MIGRATION_PY\n}', '# lab candidate helper revision\nRP_MIGRATION_PY\n}', 1)
+    candidate.write_text(source)
+    helper_text = source.split("migration_source() { cat <<'RP_MIGRATION_PY'\n", 1)[1].split('RP_MIGRATION_PY\n', 1)[0]
+    expected_helper = hashlib.sha256(helper_text.encode()).hexdigest()
     started = time.monotonic()
-    summary = dict(failure=a.failure, result='UNKNOWN')
+    summary = dict(operation=a.operation, failure=a.failure, result='UNKNOWN')
     with (out / 'migration.log').open('w') as log:
-        process = subprocess.Popen(['bash', str(candidate), 'migrate'], stdout=log, stderr=subprocess.STDOUT)
+        args = ['bash', str(candidate), 'migrate'] if a.operation == 'migrate' else ['/usr/local/bin/rp', 'update']
+        env = dict(os.environ, ASSUME_YES='1', RP_URL=candidate.as_uri())
+        process = subprocess.Popen(args, env=env, stdout=log, stderr=subprocess.STDOUT)
         try:
             if a.failure in ('kill', 'reboot'):
                 deadline = time.monotonic() + 180
@@ -120,13 +131,14 @@ def main():
             states = {u: helper.unit_state(u) for u in helper.UNITS}
             summary.update(rc=rc, phase=meta['phase'], seconds=round(time.monotonic() - started, 3),
                            mutation_reached=(out / 'mutation-reached').exists(),
+                           candidate_helper_used=helper.digest(helper.TX / 'runner.py') == expected_helper,
                            hashes_restored=after == before, runtime_restored=runtime_before == runtime_after,
                            services_restored=states == units, fallback_used=(out / 'fallback-used').exists())
             (out / 'after-hashes.json').write_text(json.dumps(after, indent=2) + '\n')
             (out / 'after-runtime.json').write_text(json.dumps(runtime_after, indent=2) + '\n')
             if (rc == 0 or meta['phase'] != 'ROLLED_BACK' or after != before or
                     runtime_after != runtime_before or states != units or summary['fallback_used'] or
-                    not summary['mutation_reached']):
+                    not summary['mutation_reached'] or not summary['candidate_helper_used']):
                 raise RuntimeError('rollback verification failed; independent fallback remains armed')
             summary['result'] = 'PASS'
             subprocess.run(['systemctl', 'stop', unit + '.timer'], check=True)

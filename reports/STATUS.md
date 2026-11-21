@@ -29,10 +29,13 @@ exact routing-rule ownership and protection of active rollback from the deadline
 155 local tests and static checks pass. Ordinary error, actual supervisor SIGKILL
 and actual VPS-1 reboot after mutation restored measured owned files, runtime
 and service state. Client HTTPS after reboot timed out once, then passed.
-An immutable-URL self-update to lab.16 committed successfully; configuration and
-clients were preserved, and a repeated update was idempotent. LAB-1 currently
-runs lab.16 after the reboot rollback; LAB-2 remains on its previous generated
-installation. See MIGRATION-ROLLBACK-2026-11-21.md and published scalar results.
+Immutable-URL self-updates to lab.16 and lab.18 committed successfully;
+configuration and clients were preserved, repeated updates were idempotent, and
+the lab.18 installed script/helper hashes match source d2d4e67. LAB-1 currently
+runs lab.18; LAB-2 remains on its previous generated installation. Installed lab.18 also passed a deliberately failing `rp update`: its candidate
+helper was selected, the previous state was restored, client HTTPS passed and
+read-only VPS-2/Xray exit/rev checks agreed in auto mode. See
+MIGRATION-ROLLBACK-2026-11-21.md and published scalar results.
 The full candidate transport regression, other crash/disk/concurrency/IPv6 cases
 and the real migration deadline remain open. Final cleanup/soak has not started.
 

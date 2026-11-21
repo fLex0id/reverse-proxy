@@ -99,3 +99,19 @@ embedded helper would otherwise retain its old snapshot schema when a later
 release adds managed files. Candidates without transactional migration are
 rejected before publication. Real-process tests verify the candidate handover,
 continued exclusion and refusal without touching the installed executable.
+
+Lab.18 was then downloaded from immutable GitHub commit
+`d2d4e67a19b731e4fdd2f2d68cce0a390ef7fcac` and committed successfully. The installed
+script and durable helper hashes both matched their sources; configuration and
+client data were preserved. A repeated update created no new transaction.
+Client HTTPS passed. See [MIGRATION_UPDATE_LAB18.json](results/MIGRATION_UPDATE_LAB18.json).
+
+Finally, installed lab.18 executed `rp update` against a deliberately failing
+private candidate (local file URL). Its embedded helper carried a harmless
+revision comment: the recorded runner hash confirmed selection of that candidate's
+helper. After actual unit/config mutation, the update returned rc=1 and rolled
+back in 48.844 seconds including preparation. All measured hashes, modes, runtime
+and unit states matched the lab.18 baseline; fallback was not used. Client HTTPS
+passed. Read-only API checks confirmed the current VPS-2 active transport, saved
+VPS-1 target and both Xray override planes were consistent in auto mode. See
+[SELF_UPDATE_ROLLBACK_LAB18.json](results/SELF_UPDATE_ROLLBACK_LAB18.json).
