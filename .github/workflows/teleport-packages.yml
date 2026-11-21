@@ -1,0 +1,49 @@
+name: Publish approved Teleport package repositories
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: teleport-repository-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'teleport-v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install repository index tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends createrepo-c rpm apt-utils dpkg-dev gnupg
+      - name: Download, inspect and sign latest published Teleport server packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TELEPORT_REPO_GPG_PRIVATE_KEY: ${{ secrets.TELEPORT_REPO_GPG_PRIVATE_KEY }}
+          TELEPORT_REPO_GPG_PASSPHRASE: ${{ secrets.TELEPORT_REPO_GPG_PASSPHRASE }}
+        run: bash packaging/teleport/build-repo.sh "$RUNNER_TEMP/teleport-site"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ runner.temp }}/teleport-site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
