@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.9-lab.14 (unreleased, NOT_READY)
+
+- Preserve the previous configuration and return an error on copy/read/write,
+  staging, permissions or rename failure. Distinguish empty grep output from
+  actual I/O errors; keep every intermediate file in a private directory.
+- Reproduce actual ENOSPC in a bounded Rocky tmpfs: the baseline corrupted its
+  config with rc=0; the candidate preserves it with rc=1.
+
 ## 1.2.9-lab.13 (unreleased, NOT_READY)
 
 - Hold the operation lock across self-update, child migration and executable

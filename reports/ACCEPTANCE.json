@@ -12,7 +12,7 @@
     {
       "id": "F02",
       "result": "UNKNOWN",
-      "reason": "Self-update lock handover fixed: four real-process tests pass locally and on Rocky; full self-update state rollback and stream-launch acceptance remain pending"
+      "reason": "Self-update lock handover fixed: four real-process tests pass locally and on Rocky; full self-update state rollback and stream-launch acceptance remain pending; configuration I/O errors now stop instead of publishing partial state, with real bounded ENOSPC evidence"
     },
     {
       "id": "F03",

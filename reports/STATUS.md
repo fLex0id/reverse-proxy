@@ -28,7 +28,10 @@ The working branch fast-forwarded to backup commit 0cb36b4 without rewriting
 history. Lab.13 closes the self-update lock handover gap: 128 local tests and
 static checks pass; four real-process lock tests also pass on Rocky 10.2. The
 installed endpoints still run lab.12. Full migration rollback remains open.
-See UPDATE-LOCK-2026-11-21.md. Final cleanup/soak has not started.
+See UPDATE-LOCK-2026-11-21.md. Lab.14 also fixes false success and configuration
+loss on write failure. Actual ENOSPC reproduced in a private Rocky tmpfs; the
+candidate preserved the original config and returned rc=1. See
+CONFIG-WRITE-2026-11-21.md. Final cleanup/soak has not started.
 
 ## Previous installed checkpoint (2026-11-21)
 

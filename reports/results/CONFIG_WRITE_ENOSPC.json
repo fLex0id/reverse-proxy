@@ -1,0 +1,23 @@
+{
+  "result": "PASS",
+  "cases": [
+    {
+      "id": "baseline",
+      "rc": 0,
+      "enospc_observed": true,
+      "original_preserved": false,
+      "config_mode": "0o600",
+      "staging_removed": true,
+      "success_reported": true
+    },
+    {
+      "id": "candidate",
+      "rc": 1,
+      "enospc_observed": true,
+      "original_preserved": true,
+      "config_mode": "0o600",
+      "staging_removed": true,
+      "success_reported": false
+    }
+  ]
+}

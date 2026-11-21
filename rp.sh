@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.13"
+SELF_VERSION="1.2.9-lab.14"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -297,17 +297,33 @@ conf_load() {
 }
 cf() { printf '%s' "${CFG[$1]:-${2:-}}"; }
 # conf_set КЛЮЧ ЗНАЧ … — атомарно; значения без " $ ` \ и перевода строки
+conf_set_abort() { rm -rf -- "$1"; die "$2"; }
 conf_set() {
-  local k v tmp; mkdir -p "$ETC"; touch "$CONF"; tmp=$(mktemp "$ETC/.rp.XXXXXX")
-  cp -p "$CONF" "$tmp"
+  local k v tmp rc
+  (($# > 0 && $# % 2 == 0)) || die "conf_set: нужны пары ключ/значение"
+  mkdir -p "$ETC" || die "Не удалось создать каталог конфигурации"
+  # Every intermediate copy is private, including grep's replacement file.
+  tmp=$(mktemp -d "$ETC/.rp.XXXXXX") || die "Не удалось подготовить запись конфигурации"
+  if [[ -e $CONF ]]; then
+    cp -p "$CONF" "$tmp/config" || conf_set_abort "$tmp" "Не удалось прочитать прежнюю конфигурацию"
+  else
+    : >"$tmp/config" || conf_set_abort "$tmp" "Не удалось создать новую конфигурацию"
+  fi
   while (($# >= 2)); do
     k=$1; v=$2; shift 2
-    [[ $k =~ ^[A-Z0-9_]+$ ]] || { rm -f "$tmp"; die "Неверное имя параметра: $k"; }
-    [[ $v == *[\"\$\`\\]* || $v == *$'\n'* ]] && { rm -f "$tmp"; die "Недопустимые символы в значении $k"; }
-    grep -v "^${k}=" "$tmp" >"$tmp.n" || true; mv "$tmp.n" "$tmp"
-    printf '%s="%s"\n' "$k" "$v" >>"$tmp"
+    [[ $k =~ ^[A-Z0-9_]+$ ]] || conf_set_abort "$tmp" "Неверное имя параметра: $k"
+    [[ $v == *[\"\$\`\\]* || $v == *$'\n'* ]] && conf_set_abort "$tmp" "Недопустимые символы в значении $k"
+    if grep -v "^${k}=" "$tmp/config" >"$tmp/next"; then :; else
+      rc=$?
+      ((rc == 1)) || conf_set_abort "$tmp" "Ошибка чтения или записи конфигурации"
+    fi
+    mv "$tmp/next" "$tmp/config" || conf_set_abort "$tmp" "Не удалось подготовить конфигурацию"
+    printf '%s="%s"\n' "$k" "$v" >>"$tmp/config" || conf_set_abort "$tmp" "Не удалось записать конфигурацию"
   done
-  chmod 600 "$tmp"; mv "$tmp" "$CONF"; conf_load
+  chmod 600 "$tmp/config" || conf_set_abort "$tmp" "Не удалось защитить конфигурацию"
+  mv "$tmp/config" "$CONF" || conf_set_abort "$tmp" "Не удалось заменить конфигурацию"
+  rmdir "$tmp" || warn "Не удалось удалить пустой каталог записи конфигурации"
+  conf_load
 }
 
 rand_hex() { openssl rand -hex "$1"; }

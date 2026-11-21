@@ -127,6 +127,12 @@ Notify the user and wait for their machine cleanup before the final clean instal
 and six-hour soak. Test artifacts may contain network metadata: keep private
 and publish only sanitized evidence summaries.
 
+- `conf_write_fault.py --baseline FILE --candidate FILE --output NEW_DIR`:
+  run on an authorized Linux lab host as root. Compare configuration writes in
+  separate 96-KiB tmpfs mounts using synthetic input. Verify actual ENOSPC, status,
+  original bytes, permissions and cleanup. Installed rp files/services and the
+  root filesystem capacity are unchanged. Mounts are always unmounted in finally.
+
 ## Development validation
 
 Run `python3 tools/embed-transaction.py` after modifying `src/transaction.py`.
