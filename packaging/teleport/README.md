@@ -1,133 +1,114 @@
-# Managed Teleport RPM/APT repositories (GitHub Releases → Actions → Pages)
+# Teleport repository — RPM and APT updates from your GitHub Releases
 
-This is independent of the running rp.sh gateway and its Teleport service.
-It publishes only the latest published teleport-vMAJOR.MINOR.PATCH **server**
-packages: one x86_64 RPM and one amd64 DEB. Teleport Connect is excluded.
+**Your only recurring task:** publish a GitHub Release named `teleport-vX.Y.Z`
+with exactly the server RPM and DEB assets. GitHub Actions automatically builds,
+signs and publishes DNF/APT metadata to GitHub Pages. Hosts consume the packages
+using their normal `dnf update` and `apt update && apt dist-upgrade`.
 
-## One-time GitHub configuration
+This is separate from rp.sh gateway development. No running Teleport or rp.sh
+installation is modified by repository publication.
 
-1. Merge the reviewed changes into main only when ready.
-2. Go to **Settings → Pages → Build and deployment → Source: GitHub Actions**.
-3. Create a dedicated GPG signing key on a trusted Linux administrative computer.
-   Do NOT reuse your SSH or personal signing key. For example:
+## ONE-TIME INITIALIZATION (publisher)
 
-   ~~~bash
-   export GNUPGHOME="$HOME/.gnupg-teleport-repo"
-   mkdir -p "$GNUPGHOME"
-   chmod 700 "$GNUPGHOME"
-   gpg --quick-generate-key 'fLex0id Teleport Package Repo' ed25519 sign 2y
-   gpg --list-secret-keys --fingerprint
-   ~~~
+1. On a trusted Linux workstation, install `gh` (GitHub CLI) and `gpg`, then
+   authenticate with `gh auth login` as the repository owner. Do not run the
+   following setup as root.
 
-   Save the **40-character full fingerprint** independently, and back up this
-   signing key privately/offline. Supply a strong passphrase when prompted.
-
-4. After running gh auth login on the same administrative machine, configure
-   the two **GitHub Actions repository secrets**. Never commit the private key:
+2. Download the setup script from the **review branch** and inspect it:
 
    ~~~bash
-   gpg --armor --export-secret-keys > "$HOME/teleport-repo-private.asc"
-   chmod 600 "$HOME/teleport-repo-private.asc"
-   gh secret set TELEPORT_REPO_GPG_PRIVATE_KEY \
-     --repo fLex0id/reverse-proxy < "$HOME/teleport-repo-private.asc"
-   read -r -s -p 'Signing passphrase: ' TP_PASSPHRASE; echo
-   printf '%s' "$TP_PASSPHRASE" | gh secret set TELEPORT_REPO_GPG_PASSPHRASE \
-     --repo fLex0id/reverse-proxy
-   unset TP_PASSPHRASE
+   curl -fsSL https://raw.githubusercontent.com/fLex0id/reverse-proxy/infra/teleport-package-repository/packaging/teleport/setup-publisher.sh -o setup-publisher.sh
+   less setup-publisher.sh
+   bash setup-publisher.sh
    ~~~
 
-   Store an encrypted backup of the key **outside GitHub**, and securely remove
-   temporary unencrypted exports. Never post the key/passphrase in a chat.
+   The script creates a **dedicated password-protected GPG signing key** in
+   `~/.gnupg-teleport-repo/`, uploads its protected export and passphrase
+   as GitHub Actions secrets, and attempts to enable GitHub Pages with
+   **Actions** as its source. If Pages API setup fails, use GitHub UI:
+   Settings → Pages → Build and deployment → Source → GitHub Actions.
 
-5. From the **Actions** tab run the workflow
-   **Publish approved Teleport package repositories** once. It selects the
-   highest *published* version with tag teleport-vX.Y.Z. As of 2026-11-21 that
-   is teleport-v18.11.13. It verifies GitHub asset SHA256, RPM/DEB package
-   names and versions, and signs APT and RPM repository metadata. If anything
-   fails, the previous Pages deployment remains untouched.
+   **Write down the 40-character GPG fingerprint printed by the script.**
+   It is required once on every server. Keep a private offline backup of
+   `~/.gnupg-teleport-repo/`. Do not share the private signing key.
 
-6. Only after successful Actions deployment, verify these endpoints:
+3. Review and merge PR #3 into `main`:
+   https://github.com/fLex0id/reverse-proxy/pull/3
 
+4. Open GitHub Actions → **Publish approved Teleport package repositories** →
+   Run workflow (main). Wait until the workflow and Pages deployment succeed.
+
+5. Verify that these URLs work:
    - https://flex0id.github.io/reverse-proxy/
-   - https://flex0id.github.io/reverse-proxy/teleport-repo.asc
-   - https://flex0id.github.io/reverse-proxy/signing-fingerprint.txt
    - https://flex0id.github.io/reverse-proxy/apt/dists/stable/InRelease
    - https://flex0id.github.io/reverse-proxy/rpm/x86_64/repodata/repomd.xml
 
-   Verify the fingerprint against your original offline record; do not trust
-   the website's fingerprint alone.
+Only after successful publication configure Linux servers.
 
-## One-time configuration on Rocky Linux or Ubuntu
+## ONE-TIME INITIALIZATION (each Rocky Linux / Ubuntu host)
 
-From an **ordinary SSH session** (not your only Teleport session), retrieve and
-inspect packaging/teleport/install-repo.sh from the main branch, then execute
-as root with the offline-verified signing fingerprint:
+Run as root through ordinary SSH, not your only Teleport connection:
 
 ~~~bash
-TELEPORT_REPO_EXPECTED_FPR='YOUR_ACTUAL_40_HEX_FINGERPRINT' \
-  bash install-repo.sh
+curl -4fsSL https://raw.githubusercontent.com/fLex0id/reverse-proxy/main/packaging/teleport/install-repo.sh -o /tmp/install-teleport-repo.sh
+TELEPORT_REPO_EXPECTED_FPR='YOUR_OFFLINE_VERIFIED_40_HEX_FINGERPRINT' bash /tmp/install-teleport-repo.sh
 ~~~
 
-The script first downloads the public key, checks the expected fingerprint, and
-verifies the RPM metadata signature or APT InRelease signature. Only then
-does it add the repository. It does not install, migrate, or restart Teleport.
+The installer identifies the OS, verifies the trusted signing key and signed
+metadata, and creates native repo configuration. It does not restart Teleport.
 
-For Rocky Linux:
+Rocky Linux:
 
 ~~~bash
-dnf makecache --refresh
 dnf update
 ~~~
 
-For Ubuntu/Debian:
+Ubuntu / Debian:
 
 ~~~bash
 apt update && apt dist-upgrade
 ~~~
 
-The APT preference file confines the package named teleport to the GitHub Pages
-repo. The DNF repo uses priority 1 and includes only teleport; disable any other
-Teleport RPM repository explicitly to guarantee single-source policy.
+Keep only this Teleport repository enabled. If additional repositories also
+offer the package named `teleport`, disable them or inspect priorities. The
+APT installer pins the package name to this GitHub Pages origin.
 
-**Upgrade the main Auth/Proxy node before SSH agents.** A package update may
-not restart an already-running Teleport service; schedule a controlled restart
-and check teleport version, systemctl status teleport and tctl nodes ls.
+## EVERY FUTURE TELEPORT RELEASE (your manual task)
 
-If Teleport was manually extracted into /usr/local/bin and is not owned by a
-package manager, adding this repository alone cannot upgrade it. Migrate that
-node to an RPM/DEB installation safely before relying on normal updates.
+1. Obtain the official server packages and independently verify their source.
+2. In https://github.com/fLex0id/reverse-proxy/releases create a draft
+   release tag `teleport-v18.11.14` (example).
+3. Add these exact **server** package filenames:
+   - `teleport-18.11.14-1.x86_64.rpm`
+   - `teleport_18.11.14_amd64.deb`
+4. Click **Publish release**. The workflow detects the highest published
+   Teleport version, checks asset SHA256 and package metadata, and updates
+   the signed RPM/APT repository. Teleport Connect client packages are ignored.
+5. When the workflow is green, ordinary DNF/APT updates offer that version.
 
-## Publishing the next version
+If a release was published before both server files were uploaded, rerun the
+workflow manually. An unsuccessful job does not deploy a new repository site.
 
-1. Verify the upstream binary sources yourself.
-2. Create a **draft** GitHub Release tagged teleport-vX.Y.Z.
-3. Upload the two server artifacts:
-   - teleport-X.Y.Z-1.x86_64.rpm
-   - teleport_X.Y.Z_amd64.deb
-   GUI Teleport Connect artifacts may also be present but are excluded.
-4. Only then press **Publish release**. This triggers the GitHub Actions
-   workflow automatically. It always selects the numerically latest published
-   Teleport release, so an older release event cannot downgrade the channel.
-5. Review the Actions result, Pages endpoints and client package-manager output.
-   If you published the release before uploading all packages, run the workflow
-   manually after the assets are complete.
+## Important operational constraints
 
-## Security and operational limits
+- Keep old GitHub Releases for rollback. Pages only serves the latest approved
+  server RPM and DEB (around 458 MB total for 18.11.13).
+- Update the Teleport Auth/Proxy cluster **before** SSH agents. A package update
+  is not a guarantee that an already running Teleport process restarted: verify
+  version and service state through an independent SSH connection.
+- Hosts where Teleport is not registered as an RPM/DEB package require a
+  one-time safe conversion to package-managed installation.
+- RPM repo metadata is GPG-signed (`repo_gpgcheck=1`), but individual RPM
+  packages are not re-signed (`gpgcheck=0`); package SHA256 is authenticated
+  through signed repository metadata. APT uses GPG-signed InRelease.
+- GitHub Release asset digests prove integrity against the uploaded file, not
+  independent provenance from Teleport's upstream manufacturer.
+- Protect the publisher account, Actions signing secrets and private GPG key.
+  Key expiry/rotation requires updating each host's trust configuration.
+- GitHub Pages publication and downloads of ~230 MB packages remain subject
+  to GitHub service limits and need real-world smoke testing.
 
-- APT validates signed InRelease. DNF validates signed repomd.xml and package
-  checksums from its signed metadata (repo_gpgcheck=1).
-- DNF gpgcheck=0 is deliberate: this workflow does not add individual RPM
-  signatures. Signed repository metadata authenticates the RPM hash; if you
-  require signature verification *inside* RPM packages, sign RPM payloads and
-  enable gpgcheck=1 in a future hardening change.
-- GitHub's asset SHA256 confirms that the file matches the uploaded Release
-  asset; **it does not independently establish upstream provenance**.
-- Protect the GPG signing key and GitHub Actions secrets, and rotate the key
-  before expiry. The signing secret must be configured before publishing.
-- The 18.11.13 server RPM and DEB total about 458 MB. GitHub Pages has a 1 GiB
-  deployment limit; this repository intentionally publishes only one version.
-  If Pages delivery becomes unreliable or too costly, move the identical APT/RPM
-  repository layout to object storage/CDN.
-- Replacing a latest-only site can briefly give 404 to clients using old cached
-  metadata; retry the update. No unattended auto-reboots or restarts are set up.
-- Build scripts and Pages configuration are isolated from the running rp.sh.
+Workflow: `.github/workflows/teleport-packages.yml`
+Publisher setup: `packaging/teleport/setup-publisher.sh`
+Repository builder: `packaging/teleport/build-repo.sh`
+Host bootstrap: `packaging/teleport/install-repo.sh`
