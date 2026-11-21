@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.17"
+SELF_VERSION="1.2.9-lab.18"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -3683,7 +3683,12 @@ self_upgrade() {
     [[ $(printf '%s\n' "${nv%%-*}" "${old_version%%-*}" | sort -V | tail -1) != "${nv%%-*}" ]] &&
     warn "В репозитории может находиться более старая версия"
   yesno "Сохранить $nv и выполнить миграцию (VPS-2 затем обновляется отдельно)?" y || { rm -f "$tmp"; return 0; }
-  if ! migration_run "$tmp"; then
+  # The candidate owns the snapshot schema/helper for this migration. Keep
+  # the parent's descriptor locked while its validated migrate command runs.
+  if ! grep -q '^migrate_apply() {$' "$tmp"; then
+    rm -f "$tmp"; err "Версия не поддерживает транзакционную миграцию"; return 1
+  fi
+  if ! bash "$tmp" migrate; then
     rm -f "$tmp"
     err "Обновление не завершено; проверьте состояние отката"
     return 1

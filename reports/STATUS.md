@@ -24,9 +24,9 @@ Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
 
 ## Current candidate (2026-11-21)
 
-Lab.17 follows the lab.16 VPS-1 migration transaction with exact routing-rule
-ownership and protection of an active rollback from the migration deadline.
-154 local tests and static checks pass. Ordinary error, actual supervisor SIGKILL
+Lab.18 adds candidate-owned migration supervision to self-update. Lab.17 added
+exact routing-rule ownership and protection of active rollback from the deadline.
+155 local tests and static checks pass. Ordinary error, actual supervisor SIGKILL
 and actual VPS-1 reboot after mutation restored measured owned files, runtime
 and service state. Client HTTPS after reboot timed out once, then passed.
 An immutable-URL self-update to lab.16 committed successfully; configuration and

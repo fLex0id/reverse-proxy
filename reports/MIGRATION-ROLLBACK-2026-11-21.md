@@ -90,3 +90,12 @@ and the expired-deadline rollback case have dedicated local regression tests.
 The actual reboot covered mutation after unit generation. Other crash windows,
 the full real 30-minute deadline, restoration-disk failures, native IPv6 and
 complete candidate transport acceptance remain open.
+
+## Candidate-owned supervisor (lab.18)
+
+The self-updater now invokes the validated download's transactional `migrate`
+command with the parent operation lock still held. Using the old updater's
+embedded helper would otherwise retain its old snapshot schema when a later
+release adds managed files. Candidates without transactional migration are
+rejected before publication. Real-process tests verify the candidate handover,
+continued exclusion and refusal without touching the installed executable.

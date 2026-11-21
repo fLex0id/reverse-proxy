@@ -79,6 +79,21 @@ route_sync
 ''')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_update_rejects_candidate_without_transaction_before_installation(self):
+        (self.root / 'rp').write_text('old executable\n')
+        (self.root / 'candidate').write_text('#!/bin/bash\nSELF_VERSION="1.2.9"\ntouch "$TEST_DIR/invoked"\n')
+        result = self.run_shell(r'''
+SELF_BIN=$TEST_DIR/rp; STATE=$TEST_DIR/state; BK_DIR=$STATE/backup
+need_vps1() { :; }; yesno() { return 0; }; self_ok() { return 0; }
+self_fetch() { cp "$TEST_DIR/candidate" "$1"; }
+migration_run() { touch "$TEST_DIR/invoked"; }
+lock
+self_upgrade
+''')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / 'invoked').exists())
+        self.assertEqual((self.root / 'rp').read_text(), 'old executable\n')
+
     def test_update_holds_lock_before_child_lock_and_through_failed_migration(self):
         # The candidate pauses BEFORE acquiring its lock, exposing the old
         # unlock/reacquire gap deterministically, without touching host services.
@@ -87,6 +102,9 @@ route_sync
         (self.root / 'candidate').write_text('''#!/usr/bin/env bash
 SELF_VERSION="1.2.9-lab.99"
 source "$TEST_DIR/functions"
+migrate_apply() {
+  :
+}
 touch "$TEST_DIR/child-ready"
 while [[ ! -f $TEST_DIR/continue ]]; do sleep 0.02; done
 lock
@@ -97,7 +115,7 @@ exit 23
 source "$TEST_DIR/functions"
 SELF_BIN=$TEST_DIR/rp; STATE=$TEST_DIR/state; BK_DIR=$STATE/backup
 need_vps1() { :; }
-migration_run() { bash "$1"; }
+migration_run() { echo OLD_HELPER_CALLED; return 99; }
 self_fetch() { cp "$TEST_DIR/candidate" "$1"; }
 self_ok() { bash -n "$1"; }
 yesno() { return 0; }
@@ -121,6 +139,7 @@ exit "$rc"
             out, err = process.communicate(timeout=10)
             self.assertEqual(process.returncode, 1, out + err)
             self.assertIn('CHILD_LOCKED', out)
+            self.assertNotIn('OLD_HELPER_CALLED', out)
             self.assertEqual(original.read_text(), 'old executable\n')
             self.assertEqual(subprocess.run(['flock', '-n', str(self.lock), 'true']).returncode, 0)
         finally:

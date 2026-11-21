@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.9-lab.18 (unreleased, NOT_READY)
+
+- Self-update invokes the validated candidate's transactional migrate command
+  while retaining the parent lock. Snapshot schema and recovery code now come
+  from the candidate, allowing later versions to add managed paths safely.
+- Reject candidates without transactional migration before installing them;
+  cover that refusal and candidate selection with real-process lock tests.
+
 ## 1.2.9-lab.17 (unreleased, NOT_READY)
 
 - Match owned policy-routing rules by exact selectors and priorities, preserving
