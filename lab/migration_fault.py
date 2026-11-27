@@ -40,7 +40,7 @@ def main():
     p.add_argument('--candidate', required=True)
     p.add_argument('--helper', required=True)
     p.add_argument('--output', required=True)
-    p.add_argument('--failure', choices=['exit', 'kill', 'reboot'], default='exit')
+    p.add_argument('--failure', choices=['exit', 'kill', 'reboot', 'deadline'], default='exit')
     p.add_argument('--operation', choices=['migrate', 'update'], default='migrate')
     a = p.parse_args()
     out = Path(a.output).resolve()
@@ -78,7 +78,8 @@ def main():
                        'systemctl start ' + shlex.join(active) + '\n')
     restore.chmod(0o700)
     unit = 'rp-lab-migration-restore-' + uuid.uuid4().hex[:10]
-    subprocess.run(['systemd-run', '--quiet', '--unit=' + unit, '--on-active=600',
+    fallback_seconds = 2400 if a.failure == 'deadline' else 600
+    subprocess.run(['systemd-run', '--quiet', '--unit=' + unit, '--on-active=' + str(fallback_seconds),
                     '/bin/bash', str(restore)], check=True)
     source = Path(a.candidate).read_text()
     marker = '  units_vps1 || die "Не удалось записать или применить службы и sysctl; миграция остановлена"'
@@ -88,6 +89,8 @@ def main():
     injected += '  touch ' + shlex.quote(str(out / 'mutation-reached')) + '\n'
     if a.failure == 'exit':
         injected += '  die "controlled laboratory migration failure"'
+    elif a.failure == 'deadline':
+        injected += '  sleep 2400\n  exit 91'
     else:
         injected += '  sleep 600\n  exit 91'
     candidate = out / 'candidate.sh'
@@ -106,7 +109,8 @@ def main():
         env = dict(os.environ, ASSUME_YES='1', RP_URL=candidate.as_uri())
         process = subprocess.Popen(args, env=env, stdout=log, stderr=subprocess.STDOUT)
         try:
-            if a.failure in ('kill', 'reboot'):
+            original_deadline = None
+            if a.failure in ('kill', 'reboot', 'deadline'):
                 deadline = time.monotonic() + 180
                 while not (out / 'mutation-reached').exists():
                     if process.poll() is not None or time.monotonic() >= deadline:
@@ -117,8 +121,37 @@ def main():
                     raise RuntimeError('supervisor PID identity changed')
                 if a.failure == 'kill':
                     os.kill(meta['owner'], 9)
-                else:
+                elif a.failure == 'reboot':
                     (out / 'ready-for-reboot').touch()
+                else:
+                    original_deadline = meta['deadline']
+                    concurrent = []
+                    for command in [['apply'], ['restart'], ['save'], ['migrate'], ['update'],
+                                    ['client', 'add', 'lab-deadline-concurrent']]:
+                        start = time.monotonic()
+                        r = subprocess.run(['/usr/local/bin/rp'] + command, capture_output=True,
+                                           text=True, timeout=15, env=dict(env, RP_ASCII='0'))
+                        name = '-'.join(command)
+                        (out / ('concurrent-' + name + '.log')).write_text(r.stdout + r.stderr)
+                        blocked = (r.returncode != 0 and 'Другая операция rp уже выполняется' in r.stdout + r.stderr)
+                        concurrent.append(dict(id=name, rc=r.returncode, blocked=blocked,
+                                               seconds=round(time.monotonic() - start, 3)))
+                    summary['concurrent_operations'] = concurrent
+                    # Do not alter the production deadline, even on a failed
+                    # concurrency observation; keep failures in the final verdict.
+                    while process.poll() is None:
+                        current = helper.load()
+                        sample = dict(phase=current['phase'], remaining_seconds=round(original_deadline - time.time(), 1),
+                                      elapsed_seconds=round(time.monotonic() - started, 1))
+                        print(json.dumps(sample), flush=True)
+                        with (out / 'samples.jsonl').open('a') as samples:
+                            samples.write(json.dumps(sample) + '\n')
+                        if time.time() > original_deadline + 240:
+                            raise RuntimeError('migration did not finish within deadline plus recovery allowance')
+                        try:
+                            process.wait(timeout=30)
+                        except subprocess.TimeoutExpired:
+                            pass
             rc = process.wait(timeout=240)
             deadline = time.monotonic() + 180
             while helper.load()['phase'] not in helper.TERMINAL:
@@ -134,6 +167,12 @@ def main():
                            candidate_helper_used=helper.digest(helper.TX / 'runner.py') == expected_helper,
                            hashes_restored=after == before, runtime_restored=runtime_before == runtime_after,
                            services_restored=states == units, fallback_used=(out / 'fallback-used').exists())
+            if original_deadline is not None:
+                summary['deadline_unchanged'] = meta['deadline'] == original_deadline
+                summary['full_deadline_observed'] = time.time() >= original_deadline and summary['seconds'] >= 1799
+                if (not summary['deadline_unchanged'] or not summary['full_deadline_observed'] or
+                        not all(item['blocked'] for item in summary['concurrent_operations'])):
+                    raise RuntimeError('deadline or concurrency acceptance failed')
             (out / 'after-hashes.json').write_text(json.dumps(after, indent=2) + '\n')
             (out / 'after-runtime.json').write_text(json.dumps(runtime_after, indent=2) + '\n')
             if (rc == 0 or meta['phase'] != 'ROLLED_BACK' or after != before or

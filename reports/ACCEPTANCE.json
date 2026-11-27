@@ -41,8 +41,8 @@
     },
     {
       "id": "F08",
-      "result": "NOT_TESTED",
-      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+      "result": "UNKNOWN",
+      "reason": "Lab.19 fixes client list/export write failures and truthful rollback diagnostics. Eleven isolated tests pass locally and on Rocky 10.2; full suite 166 tests/static checks pass. Live multiple-client, storage failure and final candidate network acceptance remain pending."
     },
     {
       "id": "F09",
@@ -73,5 +73,8 @@
       "result": "UNKNOWN",
       "reason": "28 menu branch lock fixtures pass; complete interactive behavior and concurrent live operations pending"
     }
-  ]
+  ],
+  "soak_status": "DEFERRED_BY_OPERATOR",
+  "soak_blocks_current_release_stage": false,
+  "soak_note": "Operator deferred the six-hour soak until after the release and subsequent requested changes. Functional and failure acceptance remain required; 24/7 endurance is not claimed."
 }

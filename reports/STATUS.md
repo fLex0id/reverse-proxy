@@ -5,10 +5,14 @@ Branch: codex/rp-24x7-lab.
 
 User amendments: use two Rocky 10.2 machines; Rocky 9 remains NOT_TESTED.
 Final soak: six hours on an unchanged final commit (replaces 72 hours).
-Operator gate (2026-11-13): notify the user BEFORE final soak preparation and
+Latest operator amendment: defer this soak until after the release and the
+operator's subsequent requested changes. Do not run it in this stage; absence
+of endurance evidence must remain explicit in the release verdict.
+Cleanup gate: notify the user BEFORE final clean-install preparation and
 wait for their machine cleanup to be completed. Then install the corrected script
-from scratch, run the required complete regressions/leak checks, and only then
-start the six-hour soak. Current short fault tests use the existing installations.
+from scratch and run the required complete regressions/leak checks. The deferred
+six-hour soak requires the operator's later instruction. Current short fault tests
+use the existing installations.
 Recovery objective: <=60 seconds with a healthy available alternative; start
 counting after connectivity is restored for total outages. Manual pin remains fail-closed.
 
@@ -23,6 +27,14 @@ transports, full SNI coverage, T1-T3, and the F01-F13 acceptance matrix.
 Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
 
 ## Current candidate (2026-11-21)
+
+2026-11-27: lab.19 adds checked, atomic client-list/configuration publication
+and truthful rollback errors. 166 local tests and static checks pass; all 11 new
+client fixtures also pass on Rocky 10.2. Live client acceptance is pending.
+See CLIENT-WRITES-2026-11-27.md. The interrupted November 21 migration deadline
+test is UNKNOWN (independent fallback used); the full deadline is being repeated
+under systemd. The auxiliary client namespace was restored after the lab reboot;
+client HTTPS passed. Installed VPS-1 remains lab.18 during this test.
 
 Lab.18 adds candidate-owned migration supervision to self-update. Lab.17 added
 exact routing-rule ownership and protection of active rollback from the deadline.
