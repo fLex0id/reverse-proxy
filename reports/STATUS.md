@@ -28,70 +28,45 @@ Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
 
 ## Current candidate (2026-11-27)
 
-Lab.23 process-substitution migration commits, and three installed corrupt/
-unavailable updater cases preserve measured state. Full four-transport push
-checks passed; initial confirmation was blocked by a stale laboratory exit-IP
-fingerprint after an external address change. Independent verification allowed
-refreshing that lab expectation, then normal confirmation passed. A repeat
-ordinary push also reached FULL_OK/COMMITTED. See UPDATE-PUSH-2026-11-27.md.
+VPS-1 runs lab.23, source c8ba2c74caee60bb19e6b778c5416c1457c7c5d9,
+rp.sh SHA256 2d6e6d7962c4d02a9c8f0b39a463265efd8419d29dec9a2accf00b6e722a5095.
+VPS-2 was rebuilt by the lab.23 installer. Both update transactions are COMMITTED.
+193 local tests and static checks pass. Main and the backup branch are unchanged.
 
+Completed evidence since lab.18:
+- Full unchanged 1800-second VPS-1 migration deadline: restored measured files,
+  runtime and services, rejected six concurrent commands, no fallback used.
+  The earlier interrupted run remains UNKNOWN. See DEADLINE-2026-11-27.md.
+- Client file/publication and apply/RU-list error handling; real bounded ENOSPC.
+  Ten live client checks include two simultaneous WG clients and no unrelated
+  service restarts. See CLIENT-WRITES, APPLY-RU-STORAGE and LIVE-CLI reports.
+- Generated block errors, real TLS pin/one-use/expiry, firewalld ownership,
+  installed link download/expiry/interruption. Lab.22 bind-mount cleanup failure
+  was reproduced and fixed in lab.23. All original failures remain recorded.
+- File and streamed migrations, three installed invalid/unavailable updater
+  cases, full four-transport T1-T3 and repeat ordinary FULL_OK push. A changed
+  external lab IP required independently verifying and refreshing the saved
+  expectation; the production IP guard was not changed. See UPDATE-PUSH report.
+- All 38 SNI candidates rechecked; four TLS1.3/X25519 failures retained. Six live
+  Unicode/ASCII menu lock cases supplement the 28 existing menu branch fixtures.
 
-Installed VPS-1 now runs lab.23 (source SHA256 2d6e6d7962c4d02a9c8f0b39a463265efd8419d29dec9a2accf00b6e722a5095).
-Lab.22 immutable update and lab.23 migration reached COMMITTED. Ten real client
-lifecycle/traffic checks pass. Real link download exposed a bind-mount cleanup
-error in lab.22; lab.23 fixes it. Download, expiry and interruption now all pass
-with confirmed service/file/firewall cleanup. 193 local tests/static checks pass.
-See LIVE-CLI-2026-11-27.md. Full VPS-2 push has been started.
+Current live regression controller: auxiliary hy2-deb,
+`rp-lab-regression-lab23-resume-20261127.service`. Private tree:
+`/root/rp-lab/controller-20261127/results-resumed`; earlier attempt: `results`.
+The earlier attempt stopped because the temporary client namespace was absent
+following a Debian reboot. Its packet-up T1-T8/T1-T3/30 T3 repetitions passed;
+client readiness failed and DNS capture was UNKNOWN. The namespace was restored
+and real client HTTPS passed. Continuation reuses only matching-candidate PASS
+evidence, writes a separate tree and rechecks the current pin/client readiness.
+The controller has a dedicated lab-only SSH key; remove its authorized-key entries
+and private credential after the remaining controller-driven acceptance work.
+Do not overlap mutations, start another regression, or clean hosts during this run.
 
-
-The unchanged 1800-second VPS-1 migration deadline passed: automatic rollback
-finished in 1833.713 seconds including preparation, restored measured state,
-blocked all six concurrent commands and did not use the fallback. Post-recovery
-client HTTPS and route readback passed. All 38 SNI candidates were checked;
-four TLS1.3/X25519 failures remain explicit. See DEADLINE-2026-11-27.md.
-Update from installed lab.18 to published lab.22 has now been started.
-
-
-Lab.22 checks temporary link firewall ownership and cleanup errors. 191 local
-tests/static checks pass; real spare-port firewalld ownership/failure/retry and
-six SSH-terminal menu lock cases pass. See LINK-CLEANUP-2026-11-27.md.
-The new candidate has not yet been installed: lab.18 deadline test is running.
-
-
-Lab.21 checks application backup/publication/rollback and transactional RU-list
-edits. 187 local tests/static checks and 14 new Rocky fixtures pass. Actual
-bounded ENOSPC for client staging and apply backup preserves original files
-and stops before service application. See APPLY-RU-STORAGE-2026-11-27.md.
-
-
-Lab.20 fixes multipart installer status, failed block generation and link TTL
-shutdown behavior. 173 local tests/static checks pass; seven new block/HTTPS
-tests also pass on Rocky. See BLOCK-DELIVERY-2026-11-27.md. Installed VPS-1
-remains lab.18 until the independent full-deadline run finishes.
-
-
-2026-11-27: lab.19 adds checked, atomic client-list/configuration publication
-and truthful rollback errors. 166 local tests and static checks pass; all 11 new
-client fixtures also pass on Rocky 10.2. Live client acceptance is pending.
-See CLIENT-WRITES-2026-11-27.md. The interrupted November 21 migration deadline
-test is UNKNOWN (independent fallback used); the full deadline is being repeated
-under systemd. The auxiliary client namespace was restored after the lab reboot;
-client HTTPS passed. Installed VPS-1 remains lab.18 during this test.
-
-Lab.18 adds candidate-owned migration supervision to self-update. Lab.17 added
-exact routing-rule ownership and protection of active rollback from the deadline.
-155 local tests and static checks pass. Ordinary error, actual supervisor SIGKILL
-and actual VPS-1 reboot after mutation restored measured owned files, runtime
-and service state. Client HTTPS after reboot timed out once, then passed.
-Immutable-URL self-updates to lab.16 and lab.18 committed successfully;
-configuration and clients were preserved, repeated updates were idempotent, and
-the lab.18 installed script/helper hashes match source d2d4e67. LAB-1 currently
-runs lab.18; LAB-2 remains on its previous generated installation. Installed lab.18 also passed a deliberately failing `rp update`: its candidate
-helper was selected, the previous state was restored, client HTTPS passed and
-read-only VPS-2/Xray exit/rev checks agreed in auto mode. See
-MIGRATION-ROLLBACK-2026-11-21.md and published scalar results.
-The full candidate transport regression, other crash/disk/concurrency/IPv6 cases
-and the real migration deadline remain open. Final cleanup/soak has not started.
+Release verdict remains NOT_READY pending the remaining functional/fault/leak
+acceptance and final clean installation. The six-hour soak is explicitly deferred
+by the operator and is not a blocker for this release stage. No 24/7 endurance
+claim is made. README now provides deployment/update/recovery instructions for
+the exact candidate, with immutable source URL and SHA256.
 
 ## Earlier resumed work (2026-11-21)
 

@@ -42,6 +42,10 @@ below `lab/private` (both ignored, mode 0700).
   Install `dns_source_reuse.py` under `/root/rp-lab/` on the auxiliary host first.
   Restores auto after completion.
   Stop and inspect remote state on a harness/SSH timeout; do not blindly rerun.
+  `--continue-from OLD_OUTPUT` reuses passed restart/T1–T8/T1–T3/repeated-T3
+  evidence only when the candidate SHA256 matches. It writes a new output tree,
+  links each reused observation, and rechecks the current transport and client
+  readiness. The client namespace is required before any transport mutation.
 - `mtu_probe.py` takes the same arguments and compares actual application traffic
   at inner WG MTU 1080 and 1280 on both Hysteria transports. Runtime changes have
   independent systemd restoration timers; saved configuration is unchanged.

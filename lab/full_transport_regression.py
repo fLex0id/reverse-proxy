@@ -16,8 +16,17 @@ import time
 
 p=argparse.ArgumentParser()
 for name in ['lab1','lab2','client','output']:p.add_argument('--'+name,required=True)
+p.add_argument('--continue-from', type=Path, help='Reuse passed checks from the same candidate; retain the original evidence')
 a=p.parse_args();out=Path(a.output).resolve();out.mkdir(parents=True,exist_ok=True);out.chmod(0o700)
 root=Path(__file__).resolve().parents[1];records=[]
+prior = {}
+if a.continue_from:
+    if a.continue_from.resolve() == out:
+        raise SystemExit('Continuation must use a new output directory')
+    candidate = json.loads((a.continue_from / 'candidate.json').read_text())
+    if candidate['rp_sha256'] != hashlib.sha256((root / 'rp.sh').read_bytes()).hexdigest():
+        raise SystemExit('Prior evidence belongs to a different candidate')
+    prior = {row['id']: row for row in json.loads((a.continue_from / 'results.json').read_text())}
 def record(name,result,detail,started):
     row=dict(id=name,result=result,detail=detail,started=started,seconds=time.time()-started)
     records.append(row);(out/'results.json').write_text(json.dumps(records,indent=2)+'\n')
@@ -36,16 +45,26 @@ def remote(host,command,name,timeout=600,allow_skips=False):
     record(name,result,{'rc':r.returncode,'log':name+'.log'},started)
     return r
 
+def checked_remote(host, command, name, **kwargs):
+    if prior.get(name, {}).get('result') == 'PASS':
+        record(name, 'PASS', {'reused_evidence': str(a.continue_from),
+                             'original': prior[name]}, time.time())
+        return None
+    return remote(host, command, name, **kwargs)
+
 local_hash=hashlib.sha256((root/'rp.sh').read_bytes()).hexdigest()
 r=remote(a.lab1,'sha256sum /usr/local/bin/rp','candidate-sha')
 if r.returncode or r.stdout.split()[0]!=local_hash:raise SystemExit('Local/deployed candidate differ')
+if remote(a.client, 'ip netns exec rp-lab-client ip link show wg0', 'client-namespace-preflight').returncode:
+    raise SystemExit('Client fixture is absent; no transport mutation performed')
 (out/'candidate.json').write_text(json.dumps({'rp_sha256':local_hash,
+    'runner_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
     'commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()},indent=2))
 for transport in ['reality-xhttp2','reality-xhttp','hy2-wg','hy2o-wg']:
     if remote(a.lab1,'rp tunnel '+transport,transport+'-pin').returncode:
         raise SystemExit('Pin failed; leave state for inspection')
-    remote(a.lab1, 'rp restart', transport+'-restart-vps1')
-    remote(a.lab2, 'rp restart', transport+'-restart-vps2')
+    checked_remote(a.lab1, 'rp restart', transport+'-restart-vps1')
+    checked_remote(a.lab2, 'rp restart', transport+'-restart-vps2')
     readiness = '''
 for ((i=1; i<=6; i++)); do
   if ip netns exec rp-lab-client curl -4 -fsS --max-time 8 https://1.1.1.1/cdn-cgi/trace -o /dev/null; then
@@ -56,8 +75,8 @@ done
 exit 1
 '''
     remote(a.client, shlex.join(['bash', '-c', readiness]), transport+'-restart-client-readiness', timeout=90)
-    remote(a.lab1,'rp test --restart',transport+'-T1-T8-restart',allow_skips=True)
-    remote(a.lab2,'rp test',transport+'-T1-T3')
+    checked_remote(a.lab1,'rp test --restart',transport+'-T1-T8-restart',allow_skips=True)
+    checked_remote(a.lab2,'rp test',transport+'-T1-T3')
     script='''
 failed=0
 for ((i=1; i<=30; i++)); do
@@ -67,7 +86,7 @@ for ((i=1; i<=30; i++)); do
 done
 ((failed==0))
 '''
-    remote(a.lab2,shlex.join(['bash','-c',script,'bash',transport]),transport+'-T3-repeat30',timeout=7200)
+    checked_remote(a.lab2,shlex.join(['bash','-c',script,'bash',transport]),transport+'-T3-repeat30',timeout=7200)
     for suite in ['dns_matrix.py','application_matrix.py']:
         started=time.time();name=transport+'-'+suite.removesuffix('.py')
         args=[sys.executable,str(root/'lab'/suite),'--lab1',a.lab1,'--lab2',a.lab2,
