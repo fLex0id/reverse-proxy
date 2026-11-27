@@ -42,12 +42,12 @@
     {
       "id": "F08",
       "result": "UNKNOWN",
-      "reason": "Lab.19 fixes client list/export write failures and truthful rollback diagnostics. Eleven isolated tests pass locally and on Rocky 10.2; full suite 166 tests/static checks pass. Live multiple-client, storage failure and final candidate network acceptance remain pending."
+      "reason": "Lab.19 fixes client list/export write failures and truthful rollback diagnostics. Eleven isolated tests pass locally and on Rocky 10.2; full suite 166 tests/static checks pass. Live multiple-client, storage failure and final candidate network acceptance remain pending. Lab.21 real 96-KiB tmpfs ENOSPC in client staging preserves the original and stops before apply."
     },
     {
       "id": "F09",
-      "result": "NOT_TESTED",
-      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+      "result": "UNKNOWN",
+      "reason": "Lab.21 preserves RU source lists on read/publication/apply failures, validates literal deletion and propagates off/timer errors. Eight isolated tests pass locally and on Rocky; live policy/download matrix remains pending."
     },
     {
       "id": "F10",

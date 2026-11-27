@@ -28,6 +28,12 @@ Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
 
 ## Current candidate (2026-11-27)
 
+Lab.21 checks application backup/publication/rollback and transactional RU-list
+edits. 187 local tests/static checks and 14 new Rocky fixtures pass. Actual
+bounded ENOSPC for client staging and apply backup preserves original files
+and stops before service application. See APPLY-RU-STORAGE-2026-11-27.md.
+
+
 Lab.20 fixes multipart installer status, failed block generation and link TTL
 shutdown behavior. 173 local tests/static checks pass; seven new block/HTTPS
 tests also pass on Rocky. See BLOCK-DELIVERY-2026-11-27.md. Installed VPS-1

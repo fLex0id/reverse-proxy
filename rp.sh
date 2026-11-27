@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.20"
+SELF_VERSION="1.2.9-lab.21"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -976,22 +976,30 @@ vps1_apply() {
   local scope=${1:-all}
   [[ $scope == all || $scope == clients-only ]] || { err "Неверная область применения: $scope"; return 1; }
   conf_load
-  local stage bk f path mode own act n=0 rc=0
-  stage=$(mktemp -d "$STATE/stage.XXXXXX") || return 1; chmod 700 "$stage"
+  local stage bk f path mode own act n=0 rc=0 restore_rc=0
+  stage=$(mktemp -d "$STATE/stage.XXXXXX") || return 1
+  chmod 700 "$stage" || { rm -rf -- "$stage"; return 1; }
   py render "$stage" >"$stage/manifest" || { rm -rf "${stage:?}"; return 1; }
   if [[ $scope == all ]]; then
     XRAY_LOCATION_ASSET=$ASSETS "$XRAY_BIN" run -test -c "$stage/xray.json" >"$stage/xtest.log" 2>&1 \
       || { err "Xray отклонил конфиг (run -test):"; sed 's/^/    /' "$stage/xtest.log" >&2; rm -rf "${stage:?}"; return 1; }
   fi
-  bk="$BK_DIR/$(date +%Y%m%d-%H%M%S)-$$"; mkdir -p "$bk"
+  install -d -m 700 "$BK_DIR" || { rm -rf -- "$stage"; return 1; }
+  bk=$(mktemp -d "$BK_DIR/apply-$(date +%Y%m%d-%H%M%S).XXXXXX") || { rm -rf -- "$stage"; return 1; }
   ACT=(); local -a done_paths=()
   while IFS='|' read -r f path mode own act; do
     [[ -n $f ]] || continue
     # WG-клиент не должен менять Xray, Hysteria2, nftables и firewalld.
     [[ $scope == clients-only && $f != wg0.conf ]] && continue
     if [[ -f $path ]] && cmp -s "$stage/$f" "$path"; then continue; fi
-    if [[ -f $path ]]; then cp -p "$path" "$bk/$(printf '%s' "$path" | tr / _)"; else : >"$bk/$(printf '%s' "$path" | tr / _).absent"; fi
-    install -m "$mode" -o "${own%%:*}" -g "${own##*:}" "$stage/$f" "$path.rp-new" && mv "$path.rp-new" "$path" || { rc=1; break; }
+    if [[ -f $path ]]; then
+      cp -p "$path" "$bk/$(printf '%s' "$path" | tr / _)" || { rc=1; break; }
+    else
+      : >"$bk/$(printf '%s' "$path" | tr / _).absent" || { rc=1; break; }
+    fi
+    install -m "$mode" -o "${own%%:*}" -g "${own##*:}" "$stage/$f" "$path.rp-new" && mv "$path.rp-new" "$path" || {
+      rm -f -- "$path.rp-new"; rc=1; break;
+    }
     done_paths+=("$path"); ACT[$act]=1; n=$((n + 1))
   done <"$stage/manifest"
   if ((rc == 0)) && [[ $scope == all ]]; then
@@ -1008,12 +1016,27 @@ vps1_apply() {
     err "Применение не удалось — возвращаю прежние файлы"
     for path in "${done_paths[@]}"; do
       local k; k="$bk/$(printf '%s' "$path" | tr / _)"
-      if [[ -f $k ]]; then cp -p "$k" "$path"; elif [[ -f $k.absent ]]; then rm -f "$path"; fi
+      if [[ -f $k ]]; then
+        cp -p "$k" "$path.rp-new" && mv -f -- "$path.rp-new" "$path" || restore_rc=1
+        rm -f -- "$path.rp-new" || restore_rc=1
+      elif [[ -f $k.absent ]]; then
+        rm -f -- "$path" || restore_rc=1
+      else
+        restore_rc=1
+      fi
     done
-    vps1_actions || true
+    if ((restore_rc)); then
+      err "Откат файлов не завершён; резервная копия сохранена: $bk"
+    elif ! vps1_actions; then
+      err "Файлы восстановлены, но службы не восстановлены; резервная копия: $bk"
+    fi
   fi
   rm -rf "${stage:?}"
-  ls -1dt "$BK_DIR"/* 2>/dev/null | tail -n +11 | while read -r d; do rm -rf "${d:?}"; done
+  # Keep failed operations and script-update backups available for diagnosis.
+  if ((rc == 0)); then
+    ls -1dt "$BK_DIR"/apply-* 2>/dev/null | tail -n +11 | while read -r d; do [[ -d $d && -f $d/.committed ]] && rm -rf -- "$d"; done
+    : >"$bk/.committed" || warn "Не удалось отметить завершённую резервную копию: $bk"
+  fi
   return $rc
 }
 # vps1_set КЛЮЧ ЗНАЧ … — записать, применить; при сбое вернуть прежние значения
@@ -5230,25 +5253,74 @@ upg_revert() { # upg_revert xray|hy2 бинарник копия-конфига
 }
 
 # ── Списки РФ ────────────────────────────────────────────────────────────
-ru_lists_edit() { # ru_lists_edit proxy|direct домен
-  local kind=$1 d=${2,,} other; other=$([[ $kind == proxy ]] && echo direct || echo proxy)
+ru_lists_restore() { # private backup directory, whether application was attempted
+  local stage=$1 reapply=$2 kind rc=0
+  for kind in proxy direct; do
+    if [[ -f $stage/$kind.absent ]]; then
+      rm -f -- "$ETC/ru-$kind.list" || rc=1
+    else
+      mv -f -- "$stage/$kind.old" "$ETC/ru-$kind.list" || rc=1
+    fi
+  done
+  if ((rc)); then
+    err "Списки РФ восстановлены не полностью; резервная копия: $stage"
+    return 1
+  fi
+  if ((reapply)) && ! vps1_apply; then
+    err "Файлы списков РФ восстановлены, но применить их не удалось; проверьте rp diag"
+    return 1
+  fi
+  rm -rf -- "$stage"
+}
+ru_lists_edit() { # ru_lists_edit proxy|direct|del домен
+  local kind=$1 d=${2,,} list stage path
+  [[ $kind == proxy || $kind == direct || $kind == del ]] || return 1
   [[ $d =~ ^[a-z0-9.-]+\.[a-z0-9-]+$ ]] || die "Нужен домен вида example.com"
   if [[ $kind == direct && $d =~ (^|\.)(google\.com|youtube\.com|instagram\.com|telegram\.org|cloudflare\.com|github\.com|openai\.com|whatsapp\.com)$ ]]; then
     err "$d закреплён за туннелем (защита от DNS/маршрутной утечки), прямое исключение отклонено"
     return 1
   fi
-  touch "$ETC/ru-$kind.list" "$ETC/ru-$other.list"
-  grep -qxF "$d" "$ETC/ru-$kind.list" || echo "$d" >>"$ETC/ru-$kind.list"
-  grep -vxF "$d" "$ETC/ru-$other.list" >"$ETC/ru-$other.list.tmp"; mv "$ETC/ru-$other.list.tmp" "$ETC/ru-$other.list"
-  vps1_apply && ok "$d: ${kind/proxy/через туннель}${kind/direct/напрямую}"
+  stage=$(mktemp -d "$ETC/.ru-list.XXXXXX") || return 1
+  for list in proxy direct; do
+    path="$ETC/ru-$list.list"
+    if [[ -f $path ]]; then
+      cp -p -- "$path" "$stage/$list.old" || { rm -rf -- "$stage"; return 1; }
+    else
+      : >"$stage/$list.absent" && : >"$stage/$list.old" || { rm -rf -- "$stage"; return 1; }
+    fi
+    # Exact string comparison also makes deletion independent of regex syntax.
+    if ! awk -v d="$d" '$0!=d' "$stage/$list.old" >"$stage/$list.new" ||
+       ! chmod --reference="$stage/$list.old" "$stage/$list.new"; then
+      rm -rf -- "$stage"; return 1
+    fi
+    if [[ $list == "$kind" ]]; then
+      printf '%s\n' "$d" >>"$stage/$list.new" || { rm -rf -- "$stage"; return 1; }
+    fi
+  done
+  for list in proxy direct; do
+    if ! mv -f -- "$stage/$list.new" "$ETC/ru-$list.list"; then
+      ru_lists_restore "$stage" 0 || return 1
+      return 1
+    fi
+  done
+  if ! vps1_apply; then
+    ru_lists_restore "$stage" 1 || return 1
+    return 1
+  fi
+  rm -rf -- "$stage" || return 1
+  case $kind in
+    proxy) ok "$d: через туннель" ;;
+    direct) ok "$d: напрямую" ;;
+    del) ok "$d: исключение удалено" ;;
+  esac
 }
 cmd_ru() {
   need_vps1; case ${1:-status} in
     update) ru_update "${2:-}" ;;
     on) ru_update && vps1_set RU_DIRECT 1 && systemctl enable --now rp-ru.timer >/dev/null 2>&1 ;;
-    off) vps1_set RU_DIRECT 0 && systemctl disable --now rp-ru.timer >/dev/null 2>&1; ok "Всё идёт через туннель" ;;
+    off) vps1_set RU_DIRECT 0 && systemctl disable --now rp-ru.timer >/dev/null 2>&1 && ok "Всё идёт через туннель" ;;
     proxy|direct) ru_lists_edit "$1" "${2:-}" ;;
-    del) [[ -n ${2:-} ]] || die "rp ru del домен"; sed -i "/^${2//./\\.}\$/d" "$ETC/ru-proxy.list" "$ETC/ru-direct.list" 2>/dev/null; vps1_apply ;;
+    del) [[ -n ${2:-} ]] || die "rp ru del домен"; ru_lists_edit del "$2" ;;
     status) card "Списки РФ"; kv "Режим" "$([[ $(cf RU_DIRECT) == 1 ]] && echo 'напрямую с VPS-1' || echo выключены)"; kv "Релиз" "$(cf RU_TAG —)"
       kv "Исключения: туннель" "$(wc -l <"$ETC/ru-proxy.list" 2>/dev/null || echo 0)"; kv "Исключения: напрямую" "$(wc -l <"$ETC/ru-direct.list" 2>/dev/null || echo 0)"; card_end ;;
     *) die "rp ru update|on|off|proxy ДОМЕН|direct ДОМЕН|del ДОМЕН|status" ;;
