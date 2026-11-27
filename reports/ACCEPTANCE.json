@@ -12,7 +12,7 @@
     {
       "id": "F02",
       "result": "UNKNOWN",
-      "reason": "Lab.16/lab.18 immutable-URL updates commit, preserve configuration/clients and repeat idempotently. Lab.18 failed rp update selects its candidate helper and restores measured state with nonzero status; subsequent client HTTPS and VPS-2/Xray exit/rev readback pass. Actual supervisor SIGKILL and reboot after unit mutation also restore baseline; first post-reboot HTTPS times out then passes. 155 local tests/static checks pass. Real deadline, other crash/disk/concurrency/stream/native-IPv6 and full candidate transport acceptance remain pending The independent November 27 full 1800-second deadline passes with original measured state restored, all six concurrent commands blocked and fallback unused; post-recovery client HTTPS passes. Earlier interrupted deadline run remains UNKNOWN."
+      "reason": "Lab.16/lab.18 immutable-URL updates commit, preserve configuration/clients and repeat idempotently. Lab.18 failed rp update selects its candidate helper and restores measured state with nonzero status; subsequent client HTTPS and VPS-2/Xray exit/rev readback pass. Actual supervisor SIGKILL and reboot after unit mutation also restore baseline; first post-reboot HTTPS times out then passes. 155 local tests/static checks pass. Real deadline, other crash/disk/concurrency/stream/native-IPv6 and full candidate transport acceptance remain pending The independent November 27 full 1800-second deadline passes with original measured state restored, all six concurrent commands blocked and fallback unused; post-recovery client HTTPS passes. Earlier interrupted deadline run remains UNKNOWN. Lab.23 file and process-substitution migrations commit; installed unavailable/garbage/syntax-error update attempts return 1 and preserve measured state."
     },
     {
       "id": "F03",
@@ -22,7 +22,7 @@
     {
       "id": "F04",
       "result": "UNKNOWN",
-      "reason": "Scoped pushes, unchanged 30-minute rollback, SIGKILL/ENOSPC preparation and races pass. Eighteen installer write/download/checksum/extraction/network command failures automatically restore files/watch/client; three actual installer SIGKILL/reboot points pass boot recovery. Both pair 4-to-2-to-4 cycles pass stale-config, client and identity checks. Full interruption/SSH/concurrency acceptance remains pending"
+      "reason": "Scoped pushes, unchanged 30-minute rollback, SIGKILL/ENOSPC preparation and races pass. Eighteen installer write/download/checksum/extraction/network command failures automatically restore files/watch/client; three actual installer SIGKILL/reboot points pass boot recovery. Both pair 4-to-2-to-4 cycles pass stale-config, client and identity checks. Full interruption/SSH/concurrency acceptance remains pending Lab.23 full four-transport push passes. Initial confirmation correctly rejects a stale lab exit-IP expectation; after independent VPS-2 verification and lab expectation refresh, unchanged confirmation and a separate ordinary repeat push both commit. This external address change is not hidden."
     },
     {
       "id": "F05",

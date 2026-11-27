@@ -1,0 +1,33 @@
+{
+  "source_commit": "c8ba2c74caee60bb19e6b778c5416c1457c7c5d9",
+  "rp_sha256": "2d6e6d7962c4d02a9c8f0b39a463265efd8419d29dec9a2accf00b6e722a5095",
+  "stream_migration": {
+    "result": "PASS",
+    "phase": "COMMITTED",
+    "source": "immutable GitHub commit fetched from a process-substitution launch"
+  },
+  "initial_push": {
+    "result": "FAIL",
+    "installer_rc": 0,
+    "all_four_full_T1_T3": "PASS",
+    "reason": "Stored exit-IP fingerprint differs after external network change; confirmation correctly withheld"
+  },
+  "independent_control": {
+    "socks_and_vps2_exit_match": true,
+    "old_fingerprint_matches": false,
+    "independent_management_ssh_checked": true,
+    "lab_expected_fingerprint_refreshed": true,
+    "production_validation_changed": false
+  },
+  "resume_same_transaction": {
+    "result": "PASS",
+    "phase": "COMMITTED",
+    "full_ok": true
+  },
+  "repeat_ordinary_push": {
+    "result": "PASS",
+    "phase": "COMMITTED",
+    "all_four_full_T1_T3": "PASS",
+    "full_ok": true
+  }
+}

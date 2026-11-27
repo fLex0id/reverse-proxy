@@ -28,6 +28,14 @@ Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
 
 ## Current candidate (2026-11-27)
 
+Lab.23 process-substitution migration commits, and three installed corrupt/
+unavailable updater cases preserve measured state. Full four-transport push
+checks passed; initial confirmation was blocked by a stale laboratory exit-IP
+fingerprint after an external address change. Independent verification allowed
+refreshing that lab expectation, then normal confirmation passed. A repeat
+ordinary push also reached FULL_OK/COMMITTED. See UPDATE-PUSH-2026-11-27.md.
+
+
 Installed VPS-1 now runs lab.23 (source SHA256 2d6e6d7962c4d02a9c8f0b39a463265efd8419d29dec9a2accf00b6e722a5095).
 Lab.22 immutable update and lab.23 migration reached COMMITTED. Ten real client
 lifecycle/traffic checks pass. Real link download exposed a bind-mount cleanup

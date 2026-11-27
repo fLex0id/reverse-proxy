@@ -1,0 +1,23 @@
+{
+  "result": "PASS",
+  "cases": [
+    {
+      "id": "unavailable",
+      "rc": 1,
+      "state_unchanged": true,
+      "result": "PASS"
+    },
+    {
+      "id": "garbage",
+      "rc": 1,
+      "state_unchanged": true,
+      "result": "PASS"
+    },
+    {
+      "id": "syntax",
+      "rc": 1,
+      "state_unchanged": true,
+      "result": "PASS"
+    }
+  ]
+}
