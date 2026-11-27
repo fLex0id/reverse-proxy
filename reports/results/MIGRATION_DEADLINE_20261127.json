@@ -1,0 +1,54 @@
+{
+  "operation": "migrate",
+  "failure": "deadline",
+  "result": "PASS",
+  "concurrent_operations": [
+    {
+      "id": "apply",
+      "rc": 1,
+      "blocked": true,
+      "seconds": 5.036
+    },
+    {
+      "id": "restart",
+      "rc": 1,
+      "blocked": true,
+      "seconds": 5.028
+    },
+    {
+      "id": "save",
+      "rc": 1,
+      "blocked": true,
+      "seconds": 5.028
+    },
+    {
+      "id": "migrate",
+      "rc": 1,
+      "blocked": true,
+      "seconds": 5.029
+    },
+    {
+      "id": "update",
+      "rc": 1,
+      "blocked": true,
+      "seconds": 5.029
+    },
+    {
+      "id": "client-add-lab-deadline-concurrent",
+      "rc": 1,
+      "blocked": true,
+      "seconds": 5.036
+    }
+  ],
+  "rc": 1,
+  "phase": "ROLLED_BACK",
+  "seconds": 1833.713,
+  "mutation_reached": true,
+  "candidate_helper_used": true,
+  "hashes_restored": true,
+  "runtime_restored": true,
+  "services_restored": true,
+  "fallback_used": false,
+  "deadline_unchanged": true,
+  "full_deadline_observed": true
+}

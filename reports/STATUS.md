@@ -28,6 +28,14 @@ Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
 
 ## Current candidate (2026-11-27)
 
+The unchanged 1800-second VPS-1 migration deadline passed: automatic rollback
+finished in 1833.713 seconds including preparation, restored measured state,
+blocked all six concurrent commands and did not use the fallback. Post-recovery
+client HTTPS and route readback passed. All 38 SNI candidates were checked;
+four TLS1.3/X25519 failures remain explicit. See DEADLINE-2026-11-27.md.
+Update from installed lab.18 to published lab.22 has now been started.
+
+
 Lab.22 checks temporary link firewall ownership and cleanup errors. 191 local
 tests/static checks pass; real spare-port firewalld ownership/failure/retry and
 six SSH-terminal menu lock cases pass. See LINK-CLEANUP-2026-11-27.md.

@@ -1,0 +1,272 @@
+{
+  "completion": "COMPLETE",
+  "scope": "All 38 candidates; endpoint failures are retained and do not mean a script defect. No real-world TSPU resilience claim.",
+  "cases": [
+    {
+      "host": "www.rzd.ru",
+      "tls13": "FAIL",
+      "h2": "FAIL",
+      "x25519": "FAIL",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.mos.ru",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.aeroflot.ru",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.vtb.ru",
+      "tls13": "PASS",
+      "h2": "FAIL",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.pochta.ru",
+      "tls13": "FAIL",
+      "h2": "FAIL",
+      "x25519": "FAIL",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.hh.ru",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.drom.ru",
+      "tls13": "FAIL",
+      "h2": "FAIL",
+      "x25519": "FAIL",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.lenta.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.dns-shop.ru",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.citilink.ru",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.mvideo.ru",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.sportmaster.ru",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.ozon.ru",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "PASS"
+    },
+    {
+      "host": "www.sberbank.ru",
+      "tls13": "PASS",
+      "h2": "FAIL",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "ya.ru",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.lovelive-anime.jp",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.msi.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.asus.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.gigabyte.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.logitech.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "PASS"
+    },
+    {
+      "host": "www.razer.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.corsair.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "PASS"
+    },
+    {
+      "host": "www.synology.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.mikrotik.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.jetbrains.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "PASS"
+    },
+    {
+      "host": "www.sap.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.cisco.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.lenovo.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.canon.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.nikon.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.philips.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.bosch.com",
+      "tls13": "FAIL",
+      "h2": "FAIL",
+      "x25519": "FAIL",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "www.siemens.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "PASS"
+    },
+    {
+      "host": "www.decathlon.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "PASS"
+    },
+    {
+      "host": "www.ikea.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "PASS"
+    },
+    {
+      "host": "www.zalando.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    },
+    {
+      "host": "dl.google.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "PASS"
+    },
+    {
+      "host": "www.microsoft.com",
+      "tls13": "PASS",
+      "h2": "PASS",
+      "x25519": "PASS",
+      "h3": "UNKNOWN"
+    }
+  ]
+}

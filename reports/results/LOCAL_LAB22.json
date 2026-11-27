@@ -1,0 +1,773 @@
+{
+  "source_commit": "1d3f7f97f130dbe522206acfe992d8239b2b515f",
+  "result": "PASS",
+  "total": 191,
+  "scope": "Local automated tests. Live network acceptance is tracked separately.",
+  "static_checks": "PASS: Bash/generated shells, ShellCheck warning+, Python/pyflakes and embedded helpers",
+  "tests": [
+    {
+      "id": "test_apply_storage.ApplyStorage.test_backup_failure_never_publishes_candidate",
+      "result": "PASS"
+    },
+    {
+      "id": "test_apply_storage.ApplyStorage.test_failed_readiness_restores_original",
+      "result": "PASS"
+    },
+    {
+      "id": "test_apply_storage.ApplyStorage.test_private_directory_failure_stops_apply",
+      "result": "PASS"
+    },
+    {
+      "id": "test_apply_storage.ApplyStorage.test_publication_failure_cleans_staging",
+      "result": "PASS"
+    },
+    {
+      "id": "test_apply_storage.ApplyStorage.test_restore_failure_is_explicit_and_retains_backup",
+      "result": "PASS"
+    },
+    {
+      "id": "test_apply_storage.ApplyStorage.test_success_keeps_private_backup",
+      "result": "PASS"
+    },
+    {
+      "id": "test_block_delivery.BlockDelivery.test_generation_failure_is_not_success",
+      "result": "PASS"
+    },
+    {
+      "id": "test_block_delivery.BlockDelivery.test_missing_part_is_rejected_before_execution",
+      "result": "PASS"
+    },
+    {
+      "id": "test_block_delivery.BlockDelivery.test_multipart_preserves_installer_failure",
+      "result": "PASS"
+    },
+    {
+      "id": "test_block_delivery.BlockDelivery.test_multipart_success_and_private_staging",
+      "result": "PASS"
+    },
+    {
+      "id": "test_bundle_transports.BundleTransports.test_each_transport_subset_has_only_needed_configs_and_secrets",
+      "result": "PASS"
+    },
+    {
+      "id": "test_bundle_transports.BundleTransports.test_xhttp_only_does_not_require_unused_wireguard_keys",
+      "result": "PASS"
+    },
+    {
+      "id": "test_certificate.CertificateIdentity.test_corrupt_key_is_rejected_without_overwriting",
+      "result": "PASS"
+    },
+    {
+      "id": "test_certificate.CertificateIdentity.test_partial_identity_is_rejected_without_rotation",
+      "result": "PASS"
+    },
+    {
+      "id": "test_certificate.CertificateIdentity.test_reinstall_preserves_certificate_key_and_pin",
+      "result": "PASS"
+    },
+    {
+      "id": "test_certificate.CertificateIdentity.test_wrong_pin_is_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_clients_write.ClientWrites.test_add_and_export",
+      "result": "PASS"
+    },
+    {
+      "id": "test_clients_write.ClientWrites.test_add_apply_failure_restores_list",
+      "result": "PASS"
+    },
+    {
+      "id": "test_clients_write.ClientWrites.test_delete_apply_failure_restores_list",
+      "result": "PASS"
+    },
+    {
+      "id": "test_clients_write.ClientWrites.test_delete_last_client",
+      "result": "PASS"
+    },
+    {
+      "id": "test_clients_write.ClientWrites.test_delete_read_failure_does_not_erase_clients_or_succeed",
+      "result": "PASS"
+    },
+    {
+      "id": "test_clients_write.ClientWrites.test_failed_publication_preserves_original",
+      "result": "PASS"
+    },
+    {
+      "id": "test_clients_write.ClientWrites.test_failed_restore_keeps_private_backup_and_reports_failure",
+      "result": "PASS"
+    },
+    {
+      "id": "test_clients_write.ClientWrites.test_partial_append_never_replaces_original",
+      "result": "PASS"
+    },
+    {
+      "id": "test_clients_write.ClientWrites.test_show_write_failure_is_not_success",
+      "result": "PASS"
+    },
+    {
+      "id": "test_clients_write.ClientWrites.test_unconfirmed_live_addition_restores_list",
+      "result": "PASS"
+    },
+    {
+      "id": "test_clients_write.ClientWrites.test_unconfirmed_live_removal_restores_list",
+      "result": "PASS"
+    },
+    {
+      "id": "test_conf_write.ConfigWrite.test_create_missing_config",
+      "result": "PASS"
+    },
+    {
+      "id": "test_conf_write.ConfigWrite.test_invalid_arguments_do_not_change_config",
+      "result": "PASS"
+    },
+    {
+      "id": "test_conf_write.ConfigWrite.test_no_remaining_lines_is_not_a_read_failure",
+      "result": "PASS"
+    },
+    {
+      "id": "test_conf_write.ConfigWrite.test_storage_failure_preserves_original",
+      "result": "PASS"
+    },
+    {
+      "id": "test_conf_write.ConfigWrite.test_success_preserves_other_keys_and_updates_memory",
+      "result": "PASS"
+    },
+    {
+      "id": "test_diag_status.DiagnosticStatus.test_failed_rp_filter_repair_is_not_success",
+      "result": "PASS"
+    },
+    {
+      "id": "test_diag_status.DiagnosticStatus.test_failures_are_not_success",
+      "result": "PASS"
+    },
+    {
+      "id": "test_diag_status.DiagnosticStatus.test_healthy",
+      "result": "PASS"
+    },
+    {
+      "id": "test_diag_status.DiagnosticStatus.test_invalid_arguments_are_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_diag_status.DiagnosticStatus.test_repaired_nat_is_rechecked",
+      "result": "PASS"
+    },
+    {
+      "id": "test_diag_status.DiagnosticStatus.test_repaired_rp_filter_is_rechecked",
+      "result": "PASS"
+    },
+    {
+      "id": "test_diag_status.DiagnosticStatus.test_successful_fix_command_without_repair_is_not_success",
+      "result": "PASS"
+    },
+    {
+      "id": "test_dns_redirect.DNSRedirect.test_redirect_is_wg_only_and_does_not_bypass_kill_switch",
+      "result": "PASS"
+    },
+    {
+      "id": "test_dns_redirect.DNSRedirect.test_redirect_uses_normal_socket_with_terminal_dns_policy",
+      "result": "PASS"
+    },
+    {
+      "id": "test_dns_redirect.DNSRedirect.test_ru_dns_never_becomes_foreign_fallback",
+      "result": "PASS"
+    },
+    {
+      "id": "test_doh_probe.DNSCommandStatus.test_all_failed_resolvers",
+      "result": "PASS"
+    },
+    {
+      "id": "test_doh_probe.DNSCommandStatus.test_all_success",
+      "result": "PASS"
+    },
+    {
+      "id": "test_doh_probe.DNSCommandStatus.test_empty_resolvers",
+      "result": "PASS"
+    },
+    {
+      "id": "test_doh_probe.DNSCommandStatus.test_generator_failure",
+      "result": "PASS"
+    },
+    {
+      "id": "test_doh_probe.DNSCommandStatus.test_one_failed_resolver",
+      "result": "PASS"
+    },
+    {
+      "id": "test_doh_probe.DoHProbe.test_error_response",
+      "result": "PASS"
+    },
+    {
+      "id": "test_doh_probe.DoHProbe.test_html_body_is_not_dns",
+      "result": "PASS"
+    },
+    {
+      "id": "test_doh_probe.DoHProbe.test_http_error_is_not_success",
+      "result": "PASS"
+    },
+    {
+      "id": "test_doh_probe.DoHProbe.test_missing_answers",
+      "result": "PASS"
+    },
+    {
+      "id": "test_doh_probe.DoHProbe.test_partial_download_is_not_success",
+      "result": "PASS"
+    },
+    {
+      "id": "test_doh_probe.DoHProbe.test_truncated_answer",
+      "result": "PASS"
+    },
+    {
+      "id": "test_doh_probe.DoHProbe.test_valid_answer",
+      "result": "PASS"
+    },
+    {
+      "id": "test_doh_probe.DoHProbe.test_wrong_content_type",
+      "result": "PASS"
+    },
+    {
+      "id": "test_doh_probe.DoHProbe.test_wrong_id",
+      "result": "PASS"
+    },
+    {
+      "id": "test_egress_firewall.EgressFirewall.test_active_policy_is_valid_without_intra_zone_forward",
+      "result": "PASS"
+    },
+    {
+      "id": "test_egress_firewall.EgressFirewall.test_failed_runtime_queries_are_unknown",
+      "result": "PASS"
+    },
+    {
+      "id": "test_egress_firewall.EgressFirewall.test_inactive_rejecting_or_wrong_direction_policy_is_not_valid",
+      "result": "PASS"
+    },
+    {
+      "id": "test_egress_firewall.EgressFirewall.test_missing_zone_is_unknown",
+      "result": "PASS"
+    },
+    {
+      "id": "test_egress_firewall.EgressFirewall.test_same_zone_is_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_egress_firewall.EgressFirewall.test_wrong_ingress_zone_is_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_exit_mtu.ExitMTU.test_custom_valid_values_preserved_on_both_ends",
+      "result": "PASS"
+    },
+    {
+      "id": "test_exit_mtu.ExitMTU.test_defaults_allow_quic_on_both_ends",
+      "result": "PASS"
+    },
+    {
+      "id": "test_exit_mtu.ExitMTU.test_factory_migration_preserves_custom_values",
+      "result": "PASS"
+    },
+    {
+      "id": "test_exit_mtu.ExitMTU.test_invalid_and_quic_incompatible_values_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_hy2_bind.HysteriaBind.test_explicit_address_is_supported",
+      "result": "PASS"
+    },
+    {
+      "id": "test_hy2_bind.HysteriaBind.test_internal_wireguard_address_is_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_hy2_bind.HysteriaBind.test_nat_uses_assigned_local_source",
+      "result": "PASS"
+    },
+    {
+      "id": "test_hy2_bind.HysteriaBind.test_no_route_does_not_fall_back_to_wildcard",
+      "result": "PASS"
+    },
+    {
+      "id": "test_hy2_bind.HysteriaBind.test_public_address_listener_is_specific",
+      "result": "PASS"
+    },
+    {
+      "id": "test_hy2_bind.HysteriaBind.test_unassigned_address_is_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_hy2_bind.HysteriaBind.test_wildcard_is_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_installer_packages.Packages.test_fresh_install_requires_all_packages",
+      "result": "PASS"
+    },
+    {
+      "id": "test_installer_packages.Packages.test_installed_dependencies_work_with_unavailable_repository",
+      "result": "PASS"
+    },
+    {
+      "id": "test_installer_packages.Packages.test_only_missing_packages_are_requested",
+      "result": "PASS"
+    },
+    {
+      "id": "test_installer_packages.Packages.test_repository_failure_is_not_ignored_for_missing_package",
+      "result": "PASS"
+    },
+    {
+      "id": "test_installer_packages.Packages.test_success_exit_without_installed_dependency_is_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_installer_writes.InstallerWrites.test_failed_writes_do_not_continue",
+      "result": "PASS"
+    },
+    {
+      "id": "test_installer_writes.InstallerWrites.test_successful_writes_continue",
+      "result": "PASS"
+    },
+    {
+      "id": "test_link_cleanup.LinkCleanup.test_close_error_is_not_success_and_keeps_retry_marker",
+      "result": "PASS"
+    },
+    {
+      "id": "test_link_cleanup.LinkCleanup.test_open_error_is_not_success",
+      "result": "PASS"
+    },
+    {
+      "id": "test_link_cleanup.LinkCleanup.test_owned_rule_and_secrets_removed",
+      "result": "PASS"
+    },
+    {
+      "id": "test_link_cleanup.LinkCleanup.test_preexisting_firewall_rule_is_preserved",
+      "result": "PASS"
+    },
+    {
+      "id": "test_link_https.LinkHTTPS.test_expired_link_does_not_serve_during_shutdown_grace",
+      "result": "PASS"
+    },
+    {
+      "id": "test_link_https.LinkHTTPS.test_simultaneous_download_has_one_winner",
+      "result": "PASS"
+    },
+    {
+      "id": "test_link_https.LinkHTTPS.test_wrong_pin_and_token_do_not_consume_valid_link",
+      "result": "PASS"
+    },
+    {
+      "id": "test_live_mtu.LiveMTU.test_apply_and_rollback_use_installed_mtu_not_new_config",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_clients_01",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_clients_03",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_dns_01",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_dns_02",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_dns_03",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_dns_04",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_dns_05",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_main_05",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_main_06",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_main_11",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_main_12",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_main_13",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_main_14",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_ru_01",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_ru_02",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_ru_03",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_ru_04",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_ru_05",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_tunnel_01",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_tunnel_02",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_tunnel_03",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_tunnel_06",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_tunnel_09",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_tunnel_10",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_upd_01",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_upd_02",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_upd_03",
+      "result": "PASS"
+    },
+    {
+      "id": "test_menu_locks.MenuLocks.test_menu_upd_04",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migrate_failures.MigrationFailures.test_migration_stops_after_failed_stage",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migrate_failures.MigrationFailures.test_unit_generation_errors_are_not_masked",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migrate_failures.MigrationFailures.test_valid_migration",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migrate_failures.MigrationFailures.test_valid_unit_generation",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migration.Migration.test_archive_members_are_scoped_and_not_links",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migration.Migration.test_archive_restores_all_owned_files_and_absence_preserving_neighbors",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migration.Migration.test_backup_rejects_symlinks_before_mutation",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migration.Migration.test_corrupt_archive_never_stops_services_or_deletes_files",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migration.Migration.test_deadline_does_not_kill_an_active_rollback",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migration.Migration.test_failed_restore_does_not_publish_terminal_success",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migration.Migration.test_failed_terminal_write_is_not_treated_as_committed",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migration.Migration.test_guard_rejects_pending_operation_and_missing_internal_token",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migration.Migration.test_managed_data_must_be_flushed_before_terminal_marker",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migration.Migration.test_preparing_never_extracts_incomplete_archive",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migration.Migration.test_private_metadata_publication",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migration.Migration.test_recovery_leaves_live_owner_before_deadline",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migration.Migration.test_recovery_never_signals_pid_reused_on_another_boot",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migration.Migration.test_rule_ownership_uses_exact_selectors_and_priorities",
+      "result": "PASS"
+    },
+    {
+      "id": "test_migration.Migration.test_runtime_restore_scopes_firewall_and_routes",
+      "result": "PASS"
+    },
+    {
+      "id": "test_push_acceptance.PushAcceptance.test_bad_result_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_push_acceptance.PushAcceptance.test_degraded_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_push_acceptance.PushAcceptance.test_duplicate_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_push_acceptance.PushAcceptance.test_empty_results_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_push_acceptance.PushAcceptance.test_full_results_commit",
+      "result": "PASS"
+    },
+    {
+      "id": "test_push_acceptance.PushAcceptance.test_install_failure_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_push_acceptance.PushAcceptance.test_invalid_install_rc_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_push_acceptance.PushAcceptance.test_partial_results_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_push_acceptance.PushAcceptance.test_unknown_transport_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_push_acceptance.PushAcceptance.test_unsynchronized_route_rejected",
+      "result": "PASS"
+    },
+    {
+      "id": "test_reinstall.Reinstall.test_existing_client_and_server_keys_preserved",
+      "result": "PASS"
+    },
+    {
+      "id": "test_restart_status.RestartStatus.test_inner_wg_must_be_active",
+      "result": "PASS"
+    },
+    {
+      "id": "test_restart_status.RestartStatus.test_successful_restarts",
+      "result": "PASS"
+    },
+    {
+      "id": "test_restart_status.RestartStatus.test_successful_start_without_readiness_is_failure",
+      "result": "PASS"
+    },
+    {
+      "id": "test_restart_status.RestartStatus.test_vps1_failed_restart_does_not_report_success",
+      "result": "PASS"
+    },
+    {
+      "id": "test_restart_status.RestartStatus.test_vps1_restarts_client_wg_and_probe_service",
+      "result": "PASS"
+    },
+    {
+      "id": "test_restart_status.RestartStatus.test_vps2_failed_transport_does_not_report_success",
+      "result": "PASS"
+    },
+    {
+      "id": "test_route_readback.RouteReadback.test_clear_verified",
+      "result": "PASS"
+    },
+    {
+      "id": "test_route_readback.RouteReadback.test_clear_wrong",
+      "result": "PASS"
+    },
+    {
+      "id": "test_route_readback.RouteReadback.test_empty_response",
+      "result": "PASS"
+    },
+    {
+      "id": "test_route_readback.RouteReadback.test_matching_override",
+      "result": "PASS"
+    },
+    {
+      "id": "test_route_readback.RouteReadback.test_missing_balancer",
+      "result": "PASS"
+    },
+    {
+      "id": "test_route_readback.RouteReadback.test_wrong_override",
+      "result": "PASS"
+    },
+    {
+      "id": "test_ru_edits.RUEdits.test_apply_failure_restores_both_lists",
+      "result": "PASS"
+    },
+    {
+      "id": "test_ru_edits.RUEdits.test_delete_is_validated_and_failure_restores_lists",
+      "result": "PASS"
+    },
+    {
+      "id": "test_ru_edits.RUEdits.test_failed_change_restores_original_absence",
+      "result": "PASS"
+    },
+    {
+      "id": "test_ru_edits.RUEdits.test_foreign_direct_guard_is_preserved",
+      "result": "PASS"
+    },
+    {
+      "id": "test_ru_edits.RUEdits.test_off_does_not_mask_config_or_timer_failure",
+      "result": "PASS"
+    },
+    {
+      "id": "test_ru_edits.RUEdits.test_read_failure_preserves_both_lists",
+      "result": "PASS"
+    },
+    {
+      "id": "test_ru_edits.RUEdits.test_second_publication_failure_restores_both_lists",
+      "result": "PASS"
+    },
+    {
+      "id": "test_ru_edits.RUEdits.test_success_moves_domain_without_duplicates",
+      "result": "PASS"
+    },
+    {
+      "id": "test_transaction.TransactionValidation.test_absolute",
+      "result": "PASS"
+    },
+    {
+      "id": "test_transaction.TransactionValidation.test_backup_interruption_has_durable_recovery_before_watch_stops",
+      "result": "PASS"
+    },
+    {
+      "id": "test_transaction.TransactionValidation.test_complete_results",
+      "result": "PASS"
+    },
+    {
+      "id": "test_transaction.TransactionValidation.test_confirmation_cannot_cross_deadline_during_live_probe",
+      "result": "PASS"
+    },
+    {
+      "id": "test_transaction.TransactionValidation.test_device",
+      "result": "PASS"
+    },
+    {
+      "id": "test_transaction.TransactionValidation.test_duplicate_results",
+      "result": "PASS"
+    },
+    {
+      "id": "test_transaction.TransactionValidation.test_failed_install",
+      "result": "PASS"
+    },
+    {
+      "id": "test_transaction.TransactionValidation.test_failed_results",
+      "result": "PASS"
+    },
+    {
+      "id": "test_transaction.TransactionValidation.test_failed_watch_restore_does_not_publish_terminal_rollback",
+      "result": "PASS"
+    },
+    {
+      "id": "test_transaction.TransactionValidation.test_link",
+      "result": "PASS"
+    },
+    {
+      "id": "test_transaction.TransactionValidation.test_missing_results",
+      "result": "PASS"
+    },
+    {
+      "id": "test_transaction.TransactionValidation.test_other_host_file",
+      "result": "PASS"
+    },
+    {
+      "id": "test_transaction.TransactionValidation.test_path_traversal",
+      "result": "PASS"
+    },
+    {
+      "id": "test_transaction.TransactionValidation.test_regular_owned_file",
+      "result": "PASS"
+    },
+    {
+      "id": "test_uninstall.UninstallOwnership.test_vps1_preserves_unrelated_units_and_wireguard_overrides",
+      "result": "PASS"
+    },
+    {
+      "id": "test_uninstall.UninstallOwnership.test_vps2_preserves_unrelated_units_and_removes_transaction_helpers",
+      "result": "PASS"
+    },
+    {
+      "id": "test_update_lock.UpdateLock.test_child_reuses_lock_and_parent_retains_it",
+      "result": "PASS"
+    },
+    {
+      "id": "test_update_lock.UpdateLock.test_cli_rejects_pending_migration_even_after_owner_lock_is_gone",
+      "result": "PASS"
+    },
+    {
+      "id": "test_update_lock.UpdateLock.test_matching_but_unlocked_descriptor_is_acquired",
+      "result": "PASS"
+    },
+    {
+      "id": "test_update_lock.UpdateLock.test_route_timer_defers_pending_migration",
+      "result": "PASS"
+    },
+    {
+      "id": "test_update_lock.UpdateLock.test_unrelated_descriptor_is_not_accepted",
+      "result": "PASS"
+    },
+    {
+      "id": "test_update_lock.UpdateLock.test_update_holds_lock_before_child_lock_and_through_failed_migration",
+      "result": "PASS"
+    },
+    {
+      "id": "test_update_lock.UpdateLock.test_update_rejects_candidate_without_transaction_before_installation",
+      "result": "PASS"
+    },
+    {
+      "id": "test_watchdog.WatchdogPolicy.test_auto_tries_reserve_before_failed_primary",
+      "result": "PASS"
+    },
+    {
+      "id": "test_watchdog.WatchdogPolicy.test_manual_retries_only_pinned_transport",
+      "result": "PASS"
+    }
+  ]
+}

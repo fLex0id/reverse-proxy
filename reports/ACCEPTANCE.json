@@ -12,7 +12,7 @@
     {
       "id": "F02",
       "result": "UNKNOWN",
-      "reason": "Lab.16/lab.18 immutable-URL updates commit, preserve configuration/clients and repeat idempotently. Lab.18 failed rp update selects its candidate helper and restores measured state with nonzero status; subsequent client HTTPS and VPS-2/Xray exit/rev readback pass. Actual supervisor SIGKILL and reboot after unit mutation also restore baseline; first post-reboot HTTPS times out then passes. 155 local tests/static checks pass. Real deadline, other crash/disk/concurrency/stream/native-IPv6 and full candidate transport acceptance remain pending"
+      "reason": "Lab.16/lab.18 immutable-URL updates commit, preserve configuration/clients and repeat idempotently. Lab.18 failed rp update selects its candidate helper and restores measured state with nonzero status; subsequent client HTTPS and VPS-2/Xray exit/rev readback pass. Actual supervisor SIGKILL and reboot after unit mutation also restore baseline; first post-reboot HTTPS times out then passes. 155 local tests/static checks pass. Real deadline, other crash/disk/concurrency/stream/native-IPv6 and full candidate transport acceptance remain pending The independent November 27 full 1800-second deadline passes with original measured state restored, all six concurrent commands blocked and fallback unused; post-recovery client HTTPS passes. Earlier interrupted deadline run remains UNKNOWN."
     },
     {
       "id": "F03",
@@ -60,8 +60,8 @@
     },
     {
       "id": "F11",
-      "result": "NOT_TESTED",
-      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+      "result": "UNKNOWN",
+      "reason": "All 38 SNI candidates checked again on November 27; four TLS1.3/X25519 failures retained. Complete doors/rotation/prune live acceptance remains pending."
     },
     {
       "id": "F12",
