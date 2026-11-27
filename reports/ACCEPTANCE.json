@@ -17,7 +17,7 @@
     {
       "id": "F03",
       "result": "UNKNOWN",
-      "reason": "Lab.20 fixes ignored block generation failures, masked multipart installer status and TTL grace acceptance. Seven tests pass locally and on Rocky: real local TLS pin/token/reuse/concurrency/expiry and harmless generated multipart execution. Final live block/link installation and firewall cleanup remain pending. Lab.22 real spare-port firewalld ownership, failure and retry checks pass. Whole installed link service lifecycle remains pending."
+      "reason": "Lab.20 fixes ignored block generation failures, masked multipart installer status and TTL grace acceptance. Seven tests pass locally and on Rocky: real local TLS pin/token/reuse/concurrency/expiry and harmless generated multipart execution. Final live block/link installation and firewall cleanup remain pending. Lab.22 real spare-port firewalld ownership, failure and retry checks pass. Whole installed link service lifecycle remains pending. Real installed lab.22 link cleanup failed on a systemd bind mount; lab.23 fixes it. Installed download/pin/reuse, expiry and interruption cases now pass with file/listener/firewall cleanup. Actual standalone block installation remains pending."
     },
     {
       "id": "F04",
@@ -42,7 +42,7 @@
     {
       "id": "F08",
       "result": "UNKNOWN",
-      "reason": "Lab.19 fixes client list/export write failures and truthful rollback diagnostics. Eleven isolated tests pass locally and on Rocky 10.2; full suite 166 tests/static checks pass. Live multiple-client, storage failure and final candidate network acceptance remain pending. Lab.21 real 96-KiB tmpfs ENOSPC in client staging preserves the original and stops before apply."
+      "reason": "Lab.19 fixes client list/export write failures and truthful rollback diagnostics. Eleven isolated tests pass locally and on Rocky 10.2; full suite 166 tests/static checks pass. Live multiple-client, storage failure and final candidate network acceptance remain pending. Lab.21 real 96-KiB tmpfs ENOSPC in client staging preserves the original and stops before apply. Ten installed client lifecycle checks pass, including simultaneous HTTPS from two isolated WG clients, unique identities, no unrelated service restarts and original-state restoration."
     },
     {
       "id": "F09",

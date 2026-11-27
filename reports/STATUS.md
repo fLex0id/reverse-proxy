@@ -28,6 +28,14 @@ Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
 
 ## Current candidate (2026-11-27)
 
+Installed VPS-1 now runs lab.23 (source SHA256 2d6e6d7962c4d02a9c8f0b39a463265efd8419d29dec9a2accf00b6e722a5095).
+Lab.22 immutable update and lab.23 migration reached COMMITTED. Ten real client
+lifecycle/traffic checks pass. Real link download exposed a bind-mount cleanup
+error in lab.22; lab.23 fixes it. Download, expiry and interruption now all pass
+with confirmed service/file/firewall cleanup. 193 local tests/static checks pass.
+See LIVE-CLI-2026-11-27.md. Full VPS-2 push has been started.
+
+
 The unchanged 1800-second VPS-1 migration deadline passed: automatic rollback
 finished in 1833.713 seconds including preparation, restored measured state,
 blocked all six concurrent commands and did not use the fallback. Post-recovery

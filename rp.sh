@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.22"
+SELF_VERSION="1.2.9-lab.23"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -4168,9 +4168,12 @@ cmd_link() { # rp link [порт]
   [[ ${#token} == 12 && ${#pin} == 44 ]] || { rm -rf "${dir:?}"; die "Не удалось создать токен или отпечаток"; }
   chown -R rp:rp "$dir" && chmod 700 "$dir" && chmod 600 "$dir"/*.pem "$dir/block.sh" || { rm -rf "${dir:?}"; die "Не удалось защитить файлы ссылки"; }
   fw_open_rt "$port/tcp" || { link_close "$port"; die "Не удалось открыть временный порт ссылки"; }
+  # ReadWritePaths makes dir a bind mount inside rp-serve's namespace. Cleanup
+  # must run in a separate root unit, where removing that directory is legal.
   systemd-run --quiet --collect --unit=rp-serve --description="rp: одноразовая отдача блока VPS-2" \
     -p User=rp -p Group=rp -p RuntimeMaxSec=$((ttl + 60)) -p NoNewPrivileges=true -p ProtectSystem=strict -p ProtectHome=true \
-    -p PrivateTmp=true -p "ReadWritePaths=$dir" -p "ExecStopPost=+$SELF_BIN _link_close $port" \
+    -p PrivateTmp=true -p "ReadWritePaths=$dir" \
+    -p "ExecStopPost=+/usr/bin/systemd-run --quiet --no-block --collect --unit=rp-link-cleanup $SELF_BIN _link_close $port" \
     /usr/bin/python3 -I "$RP_PY" serve "$port" "$token" "$dir/block.sh" "$dir/crt.pem" "$dir/key.pem" "$ttl" \
     || { link_close "$port"; die "Не удалось запустить сервер (systemd-run)"; }
   sleep 1; systemctl is-active --quiet rp-serve || { err "Сервер не запустился:"; journalctl -u rp-serve -n 8 --no-pager 2>/dev/null | sed 's/^/    /' >&2; link_close "$port"; return 1; }
@@ -4185,7 +4188,7 @@ cmd_link() { # rp link [порт]
     ((i % 5 == 0)) && printf '.'; sleep 1
   done
   printf '\n'; trap - INT TERM
-  for ((i = 0; i < 15; i++)); do [[ -d $dir ]] || break; sleep 1; done   # link_close (ExecStopPost) ещё пишет результат
+  for ((i = 0; i < 15; i++)); do [[ ! -d $dir && -s $STATE/link.result ]] && break; sleep 1; done
   res=$(cat "$STATE/link.result" 2>/dev/null)
   case $res in
     ok) ok "VPS-2 скачал блок; сервер остановлен, файлы ссылки и временное правило удалены" ;;
@@ -5410,10 +5413,16 @@ cmd_uninstall() {
   # по одной: общий «disable --now» со списком обрывается на первой несуществующей службе (rp-hy2o нет в установках 1.0),
   # и остальные, включая rp-xray, продолжают работать
   systemctl stop rp-serve >/dev/null 2>&1   # временный unit без файла: disable для него не сработает
+  systemctl stop rp-link-cleanup >/dev/null 2>&1 || true
+  if [[ -f $STATE/link.firewall ]]; then
+    local link_port; read -r link_port <"$STATE/link.firewall" || return 1
+    link_close "${link_port%/tcp}" || return 1
+  elif [[ -d $STATE/serve ]]; then
+    link_close '' || return 1
+  fi
   local u; for u in rp-migration-recover.timer rp-migration-recover.service rp-ru.timer rp-route-sync.timer rp-serve rp-xray rp-hy2 rp-hy2o rp-echo rp-ru.service rp-route-sync.service rp-net wg-quick@wg0 wg-quick@wg-exit; do
     systemctl disable --now "$u" >/dev/null 2>&1 || true
   done
-  fw_close "$(cf LINK_PORT 8444)/tcp"
   nft delete table inet rp_guard 2>/dev/null; nft delete table ip rp_tp 2>/dev/null; nft delete table ip6 rp_block6 2>/dev/null
   while ip rule del fwmark 1 lookup 100 2>/dev/null; do :; done; while ip rule del fwmark 255 lookup 200 2>/dev/null; do :; done
   while ip -4 rule del from 10.77.0.1/32 lookup 200 priority 101 2>/dev/null; do :; done
