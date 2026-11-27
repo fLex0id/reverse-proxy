@@ -17,7 +17,7 @@
     {
       "id": "F03",
       "result": "UNKNOWN",
-      "reason": "Lab.20 fixes ignored block generation failures, masked multipart installer status and TTL grace acceptance. Seven tests pass locally and on Rocky: real local TLS pin/token/reuse/concurrency/expiry and harmless generated multipart execution. Final live block/link installation and firewall cleanup remain pending."
+      "reason": "Lab.20 fixes ignored block generation failures, masked multipart installer status and TTL grace acceptance. Seven tests pass locally and on Rocky: real local TLS pin/token/reuse/concurrency/expiry and harmless generated multipart execution. Final live block/link installation and firewall cleanup remain pending. Lab.22 real spare-port firewalld ownership, failure and retry checks pass. Whole installed link service lifecycle remains pending."
     },
     {
       "id": "F04",
@@ -71,7 +71,7 @@
     {
       "id": "F13",
       "result": "UNKNOWN",
-      "reason": "28 menu branch lock fixtures pass; complete interactive behavior and concurrent live operations pending"
+      "reason": "28 menu branch lock fixtures plus six real SSH-terminal cases (restart/save/update in Unicode/ASCII) pass under an active migration lock. Complete interactive behavior remains pending."
     }
   ],
   "soak_status": "DEFERRED_BY_OPERATOR",

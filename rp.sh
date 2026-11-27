@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.21"
+SELF_VERSION="1.2.9-lab.22"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -4114,32 +4114,60 @@ cmd_block() {
 # Самоподписанный сертификат создаётся на сессию; --pinnedpubkey проверяет ключ сервера (без него VPS-1 нельзя
 # отличить от подмены, а блок содержит секреты). Токен — одноразовый (12 знаков, ~60 бит), TTL 30 минут.
 # Обрыв загрузки безопасен: блок состоит из функций, rp_main вызывается последней строкой.
-fw_open_rt() { [[ $(fw_kind) == firewalld ]] || return 0; firewall-cmd --add-port="$1" >/dev/null 2>&1; return 0; }   # только runtime
+fw_open_rt() { # only the runtime rule created by this link may be removed
+  [[ $(fw_kind) == firewalld ]] || return 0
+  local rc=0
+  firewall-cmd --query-port="$1" >/dev/null 2>&1 && return 0 || rc=$?
+  ((rc == 1)) || return 1
+  # Root-owned metadata stays outside the directory writable by the rp user.
+  (umask 077; printf '%s\n' "$1" >"$STATE/link.firewall") || return 1
+  firewall-cmd --add-port="$1" >/dev/null 2>&1
+}
 link_close() { # rp _link_close ПОРТ — после остановки сервера: результат, закрыть порт, удалить файлы с секретами
-  local port=${1:-} d=$STATE/serve
-  [[ -s $d/result ]] && cp -f "$d/result" "$STATE/link.result" 2>/dev/null
-  [[ $port =~ ^[0-9]+$ ]] && { firewall-cmd --remove-port="$port/tcp" >/dev/null 2>&1 || true; }
-  rm -rf "${d:?}"; return 0
+  local port=${1:-} d=$STATE/serve res=unknown owned='' rc=0 tmp
+  if [[ -s $d/result ]]; then read -r res <"$d/result" || rc=1; fi
+  if [[ -f $STATE/link.firewall ]]; then
+    read -r owned <"$STATE/link.firewall" || rc=1
+    if [[ $port =~ ^[0-9]+$ && $owned == "$port/tcp" ]] &&
+       firewall-cmd --remove-port="$owned" >/dev/null 2>&1; then
+      rm -f -- "$STATE/link.firewall" || rc=1
+    else
+      err "Не удалось удалить временное правило порта; повторите rp _link_close $port"
+      rc=1
+    fi
+  fi
+  rm -rf "${d:?}" || rc=1
+  ((rc == 0)) || res=cleanup-failed
+  tmp=$(mktemp "$STATE/.link-result.XXXXXX") || return 1
+  if ! printf '%s\n' "$res" >"$tmp" || ! mv -f -- "$tmp" "$STATE/link.result"; then
+    rm -f -- "$tmp"; return 1
+  fi
+  return "$rc"
 }
 cmd_link() { # rp link [порт]
   need_vps1; conf_load
   local port=${1:-$(cf LINK_PORT 8444)} ttl=${LINK_TTL:-1800} dir=$STATE/serve ip p token pin str res i
   valid_port "$port" || die "Недопустимый порт «$port»"
+  [[ $ttl =~ ^[1-9][0-9]{0,5}$ ]] || die "LINK_TTL должен быть положительным числом секунд (до 999999)"
   ip=$(cf PUBLIC_IP); [[ -n $ip ]] || die "Не задан PUBLIC_IP"
   for p in WG_PORT HY2_PORT HY2O_PORT RXH_PORT RXH2_PORT; do [[ $(cf $p) == "$port" ]] && die "Порт $port занят туннелем ($p): rp link ДРУГОЙ_ПОРТ"; done
   systemctl stop rp-serve >/dev/null 2>&1; systemctl reset-failed rp-serve >/dev/null 2>&1
+  if [[ -f $STATE/link.firewall ]]; then
+    local previous_port; read -r previous_port <"$STATE/link.firewall" || return 1
+    link_close "${previous_port%/tcp}" || die "Не завершена очистка предыдущей ссылки"
+  fi
   ss -ltnH "sport = :$port" 2>/dev/null | grep -q . && die "TCP-порт $port уже занят: rp link ДРУГОЙ_ПОРТ"
-  rm -rf "${dir:?}" "$STATE/link.result"; mkdir -p "$dir"; chmod 700 "$dir"   # до появления секретов
+  rm -rf "${dir:?}" "$STATE/link.result" && mkdir -p "$dir" && chmod 700 "$dir" || die "Не удалось подготовить закрытый каталог ссылки"
   run "Блок для VPS-2" block_make "$dir/blk" single || { rm -rf "${dir:?}"; die "Блок не собран"; }
   [[ -s $dir/blk/block.sh ]] || { rm -rf "${dir:?}"; die "Блок не создан"; }
-  mv "$dir/blk/block.sh" "$dir/block.sh"; rm -rf "$dir/blk"
+  mv "$dir/blk/block.sh" "$dir/block.sh" && rm -rf "$dir/blk" || { rm -rf "${dir:?}"; die "Не удалось сохранить блок ссылки"; }
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 2 -subj "/CN=$ip" \
     -keyout "$dir/key.pem" -out "$dir/crt.pem" >/dev/null 2>&1 || { rm -rf "${dir:?}"; die "openssl: сертификат не создан"; }
   pin=$(openssl x509 -in "$dir/crt.pem" -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64 -w0)
   token=$(LC_ALL=C tr -dc 'a-km-np-z2-9' </dev/urandom | head -c 12)   # без похожих знаков (l, o, 0, 1)
   [[ ${#token} == 12 && ${#pin} == 44 ]] || { rm -rf "${dir:?}"; die "Не удалось создать токен или отпечаток"; }
-  chown -R rp:rp "$dir"; chmod 700 "$dir"; chmod 600 "$dir"/*.pem "$dir/block.sh"
-  fw_open_rt "$port/tcp"
+  chown -R rp:rp "$dir" && chmod 700 "$dir" && chmod 600 "$dir"/*.pem "$dir/block.sh" || { rm -rf "${dir:?}"; die "Не удалось защитить файлы ссылки"; }
+  fw_open_rt "$port/tcp" || { link_close "$port"; die "Не удалось открыть временный порт ссылки"; }
   systemd-run --quiet --collect --unit=rp-serve --description="rp: одноразовая отдача блока VPS-2" \
     -p User=rp -p Group=rp -p RuntimeMaxSec=$((ttl + 60)) -p NoNewPrivileges=true -p ProtectSystem=strict -p ProtectHome=true \
     -p PrivateTmp=true -p "ReadWritePaths=$dir" -p "ExecStopPost=+$SELF_BIN _link_close $port" \
@@ -4148,9 +4176,9 @@ cmd_link() { # rp link [порт]
   sleep 1; systemctl is-active --quiet rp-serve || { err "Сервер не запустился:"; journalctl -u rp-serve -n 8 --no-pager 2>/dev/null | sed 's/^/    /' >&2; link_close "$port"; return 1; }
   str="curl -fsSk --pinnedpubkey sha256//$pin https://$ip:$port/$token|bash"
   printf '\n'; card "Введите на VPS-2 (консоль хостера, root)"; card_line ""; card_line "$str"; card_line ""; card_end
-  note "Длина строки: ${#str} символов. Действует $((ttl / 60)) мин и только для одной загрузки; порт $port/tcp открыт лишь на это время."
+  note "Длина строки: ${#str} символов. Действует $((ttl / 60)) мин и только для одной загрузки; временное правило $port/tcp будет удалено. Прежние правила firewall сохраняются."
   note "Если VPS-2 не достаёт порт: rp link ДРУГОЙ_ПОРТ, либо запасной путь — rp block (вставка вручную)."
-  trap 'printf "\n"; systemctl stop rp-serve >/dev/null 2>&1; warn "Прервано: сервер остановлен, порт закрыт"; exit 130' INT TERM
+  trap 'printf "\n"; systemctl stop rp-serve >/dev/null 2>&1; link_close "$port" || warn "Очистка ссылки не завершена"; warn "Создание ссылки прервано"; exit 130' INT TERM
   printf '  Жду загрузку блока (Ctrl-C — отмена) '
   for ((i = 0; i < ttl + 90; i++)); do
     systemctl is-active --quiet rp-serve || break
@@ -4160,8 +4188,9 @@ cmd_link() { # rp link [порт]
   for ((i = 0; i < 15; i++)); do [[ -d $dir ]] || break; sleep 1; done   # link_close (ExecStopPost) ещё пишет результат
   res=$(cat "$STATE/link.result" 2>/dev/null)
   case $res in
-    ok) ok "VPS-2 скачал блок; сервер остановлен, секреты удалены, порт закрыт" ;;
-    timeout) warn "Время вышло: блок не скачан (сервер остановлен, порт закрыт). Повторите: rp link"; return 1 ;;
+    ok) ok "VPS-2 скачал блок; сервер остановлен, файлы ссылки и временное правило удалены" ;;
+    timeout) warn "Время вышло: блок не скачан, файлы ссылки и временное правило удалены. Повторите: rp link"; return 1 ;;
+    cleanup-failed) err "Не завершена очистка ссылки; проверьте rp _link_close $port"; return 1 ;;
     *) warn "Сервер остановлен без результата. Повторите: rp link"; return 1 ;;
   esac
   note "VPS-2 устанавливает пакеты и полностью проверяет T1–T3 для каждого транспорта; жду подключения до 30 минут…"

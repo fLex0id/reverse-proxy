@@ -28,6 +28,12 @@ Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
 
 ## Current candidate (2026-11-27)
 
+Lab.22 checks temporary link firewall ownership and cleanup errors. 191 local
+tests/static checks pass; real spare-port firewalld ownership/failure/retry and
+six SSH-terminal menu lock cases pass. See LINK-CLEANUP-2026-11-27.md.
+The new candidate has not yet been installed: lab.18 deadline test is running.
+
+
 Lab.21 checks application backup/publication/rollback and transactional RU-list
 edits. 187 local tests/static checks and 14 new Rocky fixtures pass. Actual
 bounded ENOSPC for client staging and apply backup preserves original files
