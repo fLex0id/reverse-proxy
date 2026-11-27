@@ -12,7 +12,7 @@
 set -uo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 022
-SELF_VERSION="1.2.9-lab.19"
+SELF_VERSION="1.2.9-lab.20"
 
 # ── Пути и константы ─────────────────────────────────────────────────────
 ETC=/etc/rp
@@ -4030,37 +4030,53 @@ cl_list() {
 
 # ── Блок для VPS-2 ───────────────────────────────────────────────────────
 block_make() { # block_make [каталог] [single] → печатает пути файлов; single — одним файлом, без деления на части
-  need_vps1; local out=${1:-/root/rp-block} extra bund max raw gz n i sha
+ (
+  need_vps1; local out=${1:-/root/rp-block} extra='' bund='' max raw gz='' n i sha made=0
+  # Keep cleanup traps in a subshell: callers also use traps for transactions.
+  trap 'rc=$?; [[ -z $extra ]] || rm -rf -- "$extra"; [[ -z $bund ]] || rm -rf -- "$bund"; [[ -z $gz ]] || rm -f -- "$gz"; if [[ $rc != 0 && $made == 1 ]]; then rm -rf -- "$out"; fi; exit "$rc"' EXIT
+  umask 077
   [[ -n $(cf XRAY_SHA_64) && -n $(cf HY2_SHA_AMD64) ]] || pin_release || die "Нет хэшей релизов (GitHub недоступен?)"
-  rm -rf "${out:?}"; mkdir -p "$out"; chmod 700 "$out"
-  extra=$(mktemp -d "$STATE/ex.XXXXXX"); bund=$(mktemp -d "$STATE/bd.XXXXXX")
-  vps2_files "$extra"; py bundle "$bund" "$extra" >/dev/null || { rm -rf "${extra:?}" "${bund:?}"; return 1; }
-  vps2_installer "$bund/bundle.tgz" >"$out/block.sh"
-  max=$(cf BLOCK_MAX 60000); [[ ${2:-} == single ]] && max=999999999; raw=$(stat -c %s "$out/block.sh")
+  rm -rf "${out:?}" && mkdir -p "$out" || return 1
+  made=1
+  chmod 700 "$out" || return 1
+  extra=$(mktemp -d "$STATE/ex.XXXXXX") || return 1
+  bund=$(mktemp -d "$STATE/bd.XXXXXX") || return 1
+  vps2_files "$extra" && py bundle "$bund" "$extra" >/dev/null || return 1
+  vps2_installer "$bund/bundle.tgz" >"$out/block.sh" || return 1
+  max=$(cf BLOCK_MAX 60000); [[ ${2:-} == single ]] && max=999999999
+  [[ $max =~ ^[1-9][0-9]{3,8}$ ]] && ((max > 1200)) || { err "BLOCK_MAX должен быть 1201..999999999"; return 1; }
+  raw=$(stat -c %s "$out/block.sh") || return 1
+  ((raw > 0)) || { err "Создан пустой установочный блок"; return 1; }
   if ((raw <= max)); then
     ok "Блок: $out/block.sh ($raw байт, SHA256 внутри)"
   else
-    gz=$(mktemp "$STATE/gz.XXXXXX"); gzip -9 -c "$out/block.sh" | base64 -w0 >"$gz"
-    sha=$(sha256sum "$gz" | awk '{print $1}'); rm -f "$out/block.sh"
-    n=$(py chunk "$gz" $((max - 800)) "$out")
+    gz=$(mktemp "$STATE/gz.XXXXXX") || return 1
+    gzip -9 -c "$out/block.sh" | base64 -w0 >"$gz" || return 1
+    sha=$(sha256sum "$gz" | awk '{print $1}') || return 1
+    [[ $sha =~ ^[0-9a-f]{64}$ ]] || return 1
+    rm -f "$out/block.sh" || return 1
+    n=$(py chunk "$gz" $((max - 1200)) "$out") || return 1
+    [[ $n =~ ^[1-9][0-9]*$ ]] || return 1
     for ((i = 1; i <= n; i++)); do
       local f; f=$(printf '%s/part%02d' "$out" "$i")
       {
-        printf 'set +o history 2>/dev/null; mkdir -p /root/.rp\n'
-        ((i == 1)) && printf 'rm -f /root/.rp/blk.b64\n'
-        printf "cat >>/root/.rp/blk.b64 <<'RP_PART_END'\n"; cat "$f"; printf 'RP_PART_END\n'
-        printf 'echo "rp: часть %d из %d принята"\n' "$i" "$n"
+        printf 'set +o history 2>/dev/null\n(\nset -o pipefail; umask 077\nmkdir -p /root/.rp && chmod 700 /root/.rp || exit 1\n' || return 1
+        if ((i == 1)); then printf 'rm -f /root/.rp/blk.b64 || exit 1\n' || return 1; fi
+        printf "cat >>/root/.rp/blk.b64 <<'RP_PART_END' || exit 1\n" && cat "$f" && printf 'RP_PART_END\n' || return 1
+        printf 'echo "rp: часть %d из %d принята"\n' "$i" "$n" || return 1
         if ((i == n)); then
-          printf '[ "$(tr -d "\\n" </root/.rp/blk.b64 | sha256sum | cut -d" " -f1)" = "%s" ] || { echo "rp: SHA256 частей не совпала — вставьте все части заново по порядку"; rm -f /root/.rp/blk.b64; exit 1; }\n' "$sha"
-          printf 'base64 -d /root/.rp/blk.b64 | gunzip | bash; rm -rf /root/.rp\n'
+          printf '[ "$(tr -d "\\n" </root/.rp/blk.b64 | sha256sum | cut -d" " -f1)" = "%s" ] || { echo "rp: SHA256 частей не совпала — вставьте все части заново по порядку"; rm -f /root/.rp/blk.b64; exit 1; }\n' "$sha" || return 1
+          printf 'base64 -d /root/.rp/blk.b64 | gunzip | bash\nrp_rc=$?\nrm -rf /root/.rp || { ((rp_rc != 0)) || rp_rc=1; }\nexit "$rp_rc"\n' || return 1
         fi
-      } >"$f.sh"; rm -f "$f"
+        printf ')\n' || return 1
+      } >"$f.sh" || return 1
+      rm -f "$f" || return 1
     done
     ok "Блок велик для одной вставки: $n частей в $out (part01.sh … part$(printf '%02d' "$n").sh), вставлять по порядку"
   fi
-  rm -rf "${extra:?}" "${bund:?}"; rm -f "${gz:-}"
   note "Содержит секреты: не пересылайте по открытым каналам, удалите после установки (rm -rf $out)"
   printf '%s\n' "$out"
+ )
 }
 cmd_block() {
   local out; out=$(block_make "${1:-}" | tail -n1) || return 1
@@ -6875,11 +6891,14 @@ def cmd_serve(args):
     if len(args) != 6:
         die("serve ПОРТ ТОКЕН ФАЙЛ СЕРТ КЛЮЧ ТТЛ")
     port, token, path, crt, key, ttl = args[0], args[1], args[2], args[3], args[4], int(args[5])
+    if ttl <= 0:
+        die("TTL должен быть положительным")
     resf = os.path.join(os.path.dirname(os.path.abspath(path)), "result")
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(crt, key)
     done, lock, state = threading.Event(), threading.Lock(), {"taken": False}
+    expires = time.monotonic() + ttl
 
     class H(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.0"
@@ -6895,7 +6914,7 @@ def cmd_serve(args):
                 self.send_error(404)
                 return
             with lock:
-                if state["taken"]:
+                if state["taken"] or time.monotonic() >= expires:
                     self.send_error(404)
                     return
                 state["taken"] = True
@@ -6909,7 +6928,8 @@ def cmd_serve(args):
                 self.wfile.write(body)
                 self.wfile.flush()
             except Exception:
-                state["taken"] = False
+                with lock:
+                    state["taken"] = False
                 raise
             done.set()
 
@@ -6930,7 +6950,7 @@ def cmd_serve(args):
 
     srv = S(("0.0.0.0", int(port)), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    ok = done.wait(ttl)
+    ok = done.wait(max(0, expires - time.monotonic()))
     time.sleep(1)                                 # дать закончить отправку
     srv.shutdown()
     for p in (path, key):

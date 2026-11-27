@@ -26,7 +26,13 @@ Read both supplied specifications in full. Implementation must preserve all four
 transports, full SNI coverage, T1-T3, and the F01-F13 acceptance matrix.
 Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
 
-## Current candidate (2026-11-21)
+## Current candidate (2026-11-27)
+
+Lab.20 fixes multipart installer status, failed block generation and link TTL
+shutdown behavior. 173 local tests/static checks pass; seven new block/HTTPS
+tests also pass on Rocky. See BLOCK-DELIVERY-2026-11-27.md. Installed VPS-1
+remains lab.18 until the independent full-deadline run finishes.
+
 
 2026-11-27: lab.19 adds checked, atomic client-list/configuration publication
 and truthful rollback errors. 166 local tests and static checks pass; all 11 new

@@ -16,8 +16,8 @@
     },
     {
       "id": "F03",
-      "result": "NOT_TESTED",
-      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+      "result": "UNKNOWN",
+      "reason": "Lab.20 fixes ignored block generation failures, masked multipart installer status and TTL grace acceptance. Seven tests pass locally and on Rocky: real local TLS pin/token/reuse/concurrency/expiry and harmless generated multipart execution. Final live block/link installation and firewall cleanup remain pending."
     },
     {
       "id": "F04",
