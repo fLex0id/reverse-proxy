@@ -3,6 +3,24 @@
 Baseline: 3d3077d8940ac136b25cae4a6667a26531843a11, version 1.2.8-audit-fixes.
 Branch: codex/rp-24x7-lab.
 
+## Saved context for additional tasks (2026-11-28)
+
+The user requested preserving this work for subsequent assignments. Start from
+the published Pre-release `v1.2.9-lab.23`, source commit
+`8aebd7d6a41b5ff30f305d4e835d728489b9cdda`; do not rebuild from main or discard
+the laboratory branch history. Publication and download/checksum verification
+are recorded in `results/RELEASE_PUBLICATION_LAB23.json`. Project continuity
+instructions are in the repository-root `AGENTS.md`.
+
+Latest clarification to the user: a failed end-user HTTP/3 request does not mean
+the Hysteria2 tunnel was nonfunctional. On both Hysteria variants, the last run
+passed HTTP, HTTPS, DoH, DoT, configured DNS behavior and Cloudflare STUN. HTTP/3
+timed out on ordinary Hysteria2 and both XHTTP variants, but passed with Salamander.
+The same numeric-address HTTP/3 control also timed out outside the tunnel. Thus
+tunnel traffic was demonstrated, while consistent end-to-end HTTP/3 success
+across all modes remains unconfirmed. External contribution is possible, not
+proven for every failure. No protocol changes follow from this clarification.
+
 User amendments: use two Rocky 10.2 machines; Rocky 9 remains NOT_TESTED.
 Final soak: six hours on an unchanged final commit (replaces 72 hours).
 Latest operator amendment: defer this soak until after the release and the
