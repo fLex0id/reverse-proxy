@@ -499,7 +499,9 @@ vps1_install() {
     ord_has "$order" reality-xhttp2 && ask RXH2_PORT "TCP-порт Reality/XHTTP (packet-up)" "$RXH2_PORT" '^[0-9]+$' "Нужен номер порта" valid_port
   fi
   [[ $order == *hy2* ]] && sni_choose HY2_MASQ_HOST "Сайт для маскировки Hysteria2 (SNI и masquerade, HTTP/3)" masq
-  ord_has "$order" reality-xhttp && sni_choose RXH_SNI "SNI для Reality (XHTTP, вариант 1)" reality
+  if ord_has "$order" reality-xhttp; then
+    sni_choose RXH_SNI "SNI для Reality (XHTTP stream-up)" stream-up || die "Выберите другой SNI для stream-up."
+  fi
   ord_has "$order" reality-xhttp2 && sni_choose RXH2_SNI "SNI для Reality (XHTTP packet-up, вариант 2; лучше другой сайт)" reality "${RXH_SNI:-}"
   [[ $(cf RU_DIRECT 1) == 0 ]] && ru_default=n
   local ru=y; yesno "Российские сайты напрямую с VPS-1 (списки .dat)?" "$ru_default" || ru=n

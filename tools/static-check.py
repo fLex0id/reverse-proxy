@@ -59,7 +59,8 @@ with tempfile.TemporaryDirectory(prefix='rp-static-') as work:
     for index, path in enumerate(python_paths):
         py_compile.compile(str(path), cfile=str(work / f'check-{index}.pyc'), doraise=True)
     run(flake, *map(str, python_paths))
-    run(str(ROOT / 'tools/compare-functions.sh'), '--dist', str(dist), '--allow-vps2-ssh22')
+    run(str(ROOT / 'tools/compare-functions.sh'), '--dist', str(dist), '--allow-vps2-ssh22',
+        '--allow-stream-up-sni-h2')
 
     module_names = (ROOT / 'src/modules.list').read_text().splitlines()
     module_names += ['main/distribution.sh', 'lib/python-sources.sh']

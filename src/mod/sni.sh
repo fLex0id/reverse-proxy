@@ -55,9 +55,23 @@ sni_scan() {
   rm -rf "$tmp"
   return "$rc"
 }
-sni_choose() { # sni_choose ПЕРЕМЕННАЯ «Заголовок» reality|masq [исключить-хост]
+sni_stream_validate() {
+  local host=$1 check protocol
+  check=$(sni_check "$host" tls)
+  if [[ $check == *"TLS1.3 +"*"X25519 +"* ]]; then
+    protocol=$(curl -q --noproxy '*' -sS -o /dev/null -m 6 --http2 \
+      --tlsv1.3 --tls-max 1.3 -w '%{http_version}' -- "https://$host/" 2>/dev/null) || protocol=
+    [[ $protocol == 2 ]] && return 0
+  fi
+  err "SNI «$host» не прошёл проверку stream-up: нужны TLS 1.3, X25519 и HTTP/2 по curl --http2."
+  return 1
+}
+sni_choose() { # sni_choose ПЕРЕМЕННАЯ «Заголовок» reality|stream-up|masq [исключить-хост]
   local var=$1 title=$2 kind=$3 skip=${4:-} h chk ru line
-  [[ -n "${!var:-}" ]] && return 0
+  if [[ -n "${!var:-}" ]]; then
+    if [[ $kind == stream-up ]]; then sni_stream_validate "${!var}"; return; fi
+    return 0
+  fi
   if [[ -z $SNI_CACHE || ! -s $SNI_CACHE ]]; then
     SNI_CACHE=$(mktemp "$STATE/snicache.XXXXXX")
     note "Проверяю все ${#SNI_RU[@]}+${#SNI_WORLD[@]} SNI-кандидатов (TLS1.3, h2, X25519, h3)…"
@@ -67,8 +81,9 @@ sni_choose() { # sni_choose ПЕРЕМЕННАЯ «Заголовок» reality|
   while IFS= read -r line; do
     h=${line%%|*}; chk=${line#*|}; ru=${chk##*|}; chk=${chk%|*}
     [[ $h == "$skip" ]] && continue
-    if [[ $kind == reality ]]; then
-      if [[ $chk == *"TLS1.3 +"*"X25519 +"* ]]; then
+    if [[ $kind == reality || $kind == stream-up ]]; then
+      if [[ $chk == *"TLS1.3 +"*"X25519 +"* ]] &&
+        { [[ $kind != stream-up ]] || [[ $chk == *"h2 +"* ]]; }; then
         good+=("$h|$h|$chk · $ru")
       else
         unchecked+=("$h|$h|не подтверждён: $chk")
@@ -85,7 +100,7 @@ sni_choose() { # sni_choose ПЕРЕМЕННАЯ «Заголовок» reality|
   local g
   for g in "${good[@]}"; do [[ $g == *"· RU" ]] && items+=("$g"); done
   for g in "${good[@]}"; do [[ $g == *"· RU" ]] || items+=("$g"); done
-  if ((${#items[@]} == 0)); then
+  if ((${#items[@]} == 0)) && [[ $kind != stream-up ]]; then
     warn "Автопроверка не подтвердила подходящий SNI. Это не доказывает, что все домены непригодны."
     warn "Ниже — НЕПРОВЕРЕННЫЕ кандидаты. Их использование требует проверки соединения VPS-2."
     items=("${unchecked[@]}")
@@ -100,6 +115,7 @@ sni_choose() { # sni_choose ПЕРЕМЕННАЯ «Заголовок» reality|
     printf -v "$var" '%s' ""
     ask "$var" "Домен (без https://)" "" '^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$' "Нужен домен вида example.com"
   fi
+  if [[ $kind == stream-up ]]; then sni_stream_validate "${!var}"; return; fi
   chk=$(sni_check "${!var}")
   if [[ $kind == reality ]]; then
     [[ $chk == *"TLS1.3 +"*"X25519 +"* ]] || warn "SNI «${!var}» не подтверждён для Reality (TLS1.3 + X25519): $chk"

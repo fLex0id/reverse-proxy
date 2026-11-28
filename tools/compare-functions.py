@@ -15,6 +15,7 @@ DISTRIBUTION_CHANGES = {
 }
 PYTHON_FUNCTIONS = {'migration_source', 'transaction_source', 'py_source'}
 SSH22_FUNCTIONS = {'vps2_files', 'vps2_installer'}
+STREAM_SNI_FUNCTIONS = {'sni_choose', 'vps1_install'}
 SSH22_PATH = 'usr/local/lib/rp/ssh22.sh'
 OLD_SSH22_NOTICE = ('  rp_msg "SSH снаружи можно закрыть: доступ с VPS-1 по туннелю '
                     'сохранится (правило для 10.77.0.1)."\n').encode()
@@ -103,6 +104,8 @@ def main():
     parser.add_argument('--dist', required=True, type=Path)
     parser.add_argument('--allow-vps2-ssh22', action='store_true',
                         help='Expect the separately reviewed VPS-2 TCP/22 policy change')
+    parser.add_argument('--allow-stream-up-sni-h2', action='store_true',
+                        help='Expect the stream-up-only SNI eligibility check')
     args = parser.parse_args()
     baseline = subprocess.check_output(['git', 'show', args.baseline + ':rp.sh'],
                                        cwd=ROOT, text=True)
@@ -125,6 +128,8 @@ def main():
         run_shell('source "$1" && self_ok "$2" && grep -qxF "migrate_apply() {" "$2"', old, legacy)
         print('lab.23 self_ok and migration marker (compatibility entry): PASS')
         differences = DISTRIBUTION_CHANGES | (SSH22_FUNCTIONS if args.allow_vps2_ssh22 else set())
+        if args.allow_stream_up_sni_h2:
+            differences |= STREAM_SNI_FUNCTIONS
         results = [
             compare('rp-single.sh Bash', old_defs, single_defs, differences),
             compare('Bundle Bash', old_defs, mod_defs, differences | PYTHON_FUNCTIONS),
