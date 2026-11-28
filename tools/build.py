@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Build a reproducible rp payload and its Bash entry points."""
 import argparse
-import gzip
 import hashlib
 import io
 from pathlib import Path
 import re
+import subprocess
 import tarfile
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / 'src'
@@ -103,9 +104,9 @@ def assemble(output):
                                           RELEASE_ID=release_id, SOURCES=sources)
     archive = 'rp-' + version + '.tar.gz'
     output.mkdir(parents=True, exist_ok=True)
-    with (output / archive).open('wb') as raw, gzip.GzipFile(
-            fileobj=raw, mode='wb', filename='', mtime=0, compresslevel=9) as compressed:
-        with tarfile.open(fileobj=compressed, mode='w', format=tarfile.USTAR_FORMAT) as bundle:
+    # GNU gzip -n makes compression independent of Python's platform zlib.
+    with tempfile.TemporaryFile() as tar_bytes, (output / archive).open('wb') as compressed:
+        with tarfile.open(fileobj=tar_bytes, mode='w', format=tarfile.USTAR_FORMAT) as bundle:
             directories = sorted({str(parent) for name in files for parent in Path(name).parents
                                   if parent != Path('.')})
             for directory in directories:
@@ -118,6 +119,8 @@ def assemble(output):
                 item.mode = 0o755 if name in {'dispatch.sh', 'rp-single.sh'} else 0o644
                 item.size = len(data)
                 bundle.addfile(item, io.BytesIO(data))
+        tar_bytes.seek(0)
+        subprocess.run(['gzip', '-n', '-9', '-c'], stdin=tar_bytes, stdout=compressed, check=True)
     credentials = dict(VERSION=version, RELEASE_ID=release_id,
                        BUNDLE_SHA256=digest((output / archive).read_bytes()))
     # lab.23 demands these historical function markers and a minimum 32 KiB

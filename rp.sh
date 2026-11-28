@@ -4,7 +4,7 @@
 set -uo pipefail
 SELF_VERSION="1.2.9-lab.24"
 RP_RELEASE_ID="6f02c9c8e235cab17662ffcb45c525087d96306edf97048c5bf21eb73cb91470"
-RP_BUNDLE_SHA256="b10ba8fa6b583cc6ca627d62c8034a776534de3210e9010bc9fc98e2c43cf13c"
+RP_BUNDLE_SHA256="8723a22afd7273b9d06acf825f131b1442cbafa3b39380023b96c0e7b121878f"
 
 bootstrap_fetch() {
   local url=$1 out=$2 attempt delay=2 rc=0
