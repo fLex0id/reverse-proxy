@@ -37,8 +37,11 @@ rp_publish_modules() {
   fi
   mkdir -p -- "$releases" || return 1
   stage=$(mktemp -d "$releases/.rp-stage.XXXXXXXX") || return 1
-  if ! cp -a --no-preserve=context -- "$RP_ROOT/." "$stage/" ||
+  # cp -a preserves security.selinux through xattrs even when context copying
+  # alone is disabled. The published tree must inherit its library labels.
+  if ! cp -a --no-preserve=context,xattr -- "$RP_ROOT/." "$stage/" ||
     ! chmod 755 "$stage" ||
+    { command -v restorecon >/dev/null && ! restorecon -R "$stage"; } ||
     ! sync -f "$stage" ||
     ! mv -T -- "$stage" "$target" ||
     ! sync -f "$releases"; then

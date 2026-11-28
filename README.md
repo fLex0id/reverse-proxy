@@ -24,11 +24,11 @@ IP серверов не доказывает правильный маршру�
 
 ## Получение проверяемой сборки
 
-Для модульного кандидата `v1.2.9-lab.24` одна команда загружает проверяемый
+Для модульного кандидата `v1.2.9-lab.25` одна команда загружает проверяемый
 пакет и запускает установку. Запускайте её от root.
 
 ```bash
-bash <(curl -fsSL https://github.com/fLex0id/reverse-proxy/releases/download/v1.2.9-lab.24/rp.sh)
+bash <(curl -fsSL https://github.com/fLex0id/reverse-proxy/releases/download/v1.2.9-lab.25/rp.sh)
 ```
 
 Загрузчик проверяет SHA-256 архива по значению, зашитому при сборке.
@@ -84,7 +84,7 @@ bash <(curl -fsSL https://github.com/fLex0id/reverse-proxy/releases/download/v1.
 `bash rp.sh migrate` или из установленного `lab.23` одной командой:
 
 ```bash
-RP_URL=https://github.com/fLex0id/reverse-proxy/releases/download/v1.2.9-lab.24/rp-legacy-update.sh rp update
+RP_URL=https://github.com/fLex0id/reverse-proxy/releases/download/v1.2.9-lab.25/rp-legacy-update.sh rp update
 ```
 
 Для дальнейшего обновления модульной версии указывайте в `RP_URL` обычный

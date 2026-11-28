@@ -2,9 +2,9 @@
 # rp — загрузчик релизной сборки.
 # rp-distribution: bootstrap
 set -uo pipefail
-SELF_VERSION="1.2.9-lab.24"
-RP_RELEASE_ID="6f02c9c8e235cab17662ffcb45c525087d96306edf97048c5bf21eb73cb91470"
-RP_BUNDLE_SHA256="8723a22afd7273b9d06acf825f131b1442cbafa3b39380023b96c0e7b121878f"
+SELF_VERSION="1.2.9-lab.25"
+RP_RELEASE_ID="7810bad7bd2e37ce4f69db20fab6a213a7d74b74665d665d4cadf20099120282"
+RP_BUNDLE_SHA256="caad3c1edb7ce94dca0f3a03142190de9fb38569105faad9610a3c9aa4018170"
 
 bootstrap_fetch() {
   local url=$1 out=$2 attempt delay=2 rc=0
