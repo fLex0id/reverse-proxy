@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT = Path(__file__).resolve().parents[1]
 QUESTION = b'\x07example\x03com\0' + struct.pack('!HH', 1, 1)
 ANSWER = b'\xc0\x0c' + struct.pack('!HHIH', 1, 1, 30, 4) + b'\xc0\x00\x02\x01'
@@ -16,7 +18,7 @@ class DoHProbe(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'body').write_bytes(body)
-            (root / 'functions').write_text((ROOT / 'rp.sh').read_text().rsplit('main "$@"', 1)[0])
+            (root / 'functions').write_text(SINGLE.read_text().rsplit('main "$@"', 1)[0])
             script = '''source "$TEST_DIR/functions"
 STATE=$TEST_DIR
 sx() {
@@ -49,7 +51,7 @@ class DNSCommandStatus(unittest.TestCase):
     def run_command(self, servers, generator_rc=0):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'functions'
-            path.write_text((ROOT / 'rp.sh').read_text().rsplit('main "$@"', 1)[0])
+            path.write_text(SINGLE.read_text().rsplit('main "$@"', 1)[0])
             script = '''source "$TEST_FUNCTIONS"
 need_vps1() { :; }
 py() { printf '%s\\n' "$TEST_SERVERS"; return "$TEST_GENERATOR_RC"; }

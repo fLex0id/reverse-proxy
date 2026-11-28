@@ -4,12 +4,14 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from rp_fixture import SINGLE
+
 ROOT=Path(__file__).resolve().parents[1]
 
 class Reinstall(unittest.TestCase):
     def test_existing_client_and_server_keys_preserved(self):
         with tempfile.TemporaryDirectory() as d:
-            source=(ROOT/'rp.sh').read_text().rsplit('main "$@"',1)[0]
+            source=SINGLE.read_text().rsplit('main "$@"',1)[0]
             Path(d,'functions.sh').write_text(source)
             conf=Path(d,'rp.conf')
             keys='WG_PRIV WG_PUB EXIT_PRIV1 EXIT_PUB1 EXIT_PRIV2 EXIT_PUB2 EXIT_PSK RL_PRIV RL_PUB RL_SID RL_UUID_X RL_UUID_T RL_UUID_PX RL_UUID_PT HY2_PASS'.split()

@@ -5,13 +5,15 @@ import subprocess
 import tempfile
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT = Path(__file__).resolve().parents[1]
 
 class DiagnosticStatus(unittest.TestCase):
     def run_diag(self, failure='', fix=False, repairs=True, args=None):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / 'functions'
-            path.write_text((ROOT / 'rp.sh').read_text().rsplit('main "$@"', 1)[0])
+            path.write_text(SINGLE.read_text().rsplit('main "$@"', 1)[0])
             script = r'''source "$TEST_DIR/functions"
 need_vps1() { :; }
 banner() { :; }

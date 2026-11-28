@@ -7,6 +7,8 @@ import tempfile
 import time
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -17,7 +19,7 @@ class UpdateLock(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.lock = self.root / 'rp.lock'
         self.functions = self.root / 'functions'
-        self.functions.write_text((ROOT / 'rp.sh').read_text().rsplit('main "$@"', 1)[0]
+        self.functions.write_text(SINGLE.read_text().rsplit('main "$@"', 1)[0]
                                   .replace('/run/rp.lock', str(self.lock)))
         self.env = dict(os.environ, TEST_DIR=str(self.root), RP_ASCII='1')
 
@@ -58,7 +60,7 @@ printf 'LOCKED\n'
     def pending_migration(self):
         tx = self.root / 'state/migration'
         tx.mkdir(parents=True)
-        helper = (ROOT / 'src/migration.py').read_text()
+        helper = (ROOT / 'src/py/migration.py').read_text()
         helper = helper.replace('/run/rp.lock', str(self.lock)).replace('/var/lib/rp/migration', str(tx))
         (tx / 'runner.py').write_text(helper)
         (tx / 'state.json').write_text(json.dumps(dict(phase='MIGRATING', token='fixture')))

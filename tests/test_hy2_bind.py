@@ -6,7 +6,9 @@ import types
 import unittest
 from unittest.mock import patch
 
-SOURCE=(Path(__file__).resolve().parents[1]/'rp.sh').read_text()
+from rp_fixture import SINGLE
+
+SOURCE=SINGLE.read_text()
 PYTHON=SOURCE.split("py_source() { cat <<'RP_PY_EOF'\n",1)[1].split('\nRP_PY_EOF',1)[0]
 rp=types.ModuleType('rp_generated');exec(compile(PYTHON,'rp_generated','exec'),rp.__dict__)
 

@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT = Path(__file__).resolve().parents[1]
 OLD = 'KEEP="preserved"\nCHANGE="old"\n'
 
@@ -17,7 +19,7 @@ class ConfigWrite(unittest.TestCase):
             if original is not None:
                 conf.write_text(original)
                 conf.chmod(0o600)
-            (root / 'functions').write_text((ROOT / 'rp.sh').read_text().rsplit('main "$@"', 1)[0])
+            (root / 'functions').write_text(SINGLE.read_text().rsplit('main "$@"', 1)[0])
             script = r'''
 source "$TEST_DIR/functions"
 ETC=$TEST_DIR; CONF=$ETC/rp.conf

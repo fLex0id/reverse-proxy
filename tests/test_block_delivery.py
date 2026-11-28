@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -15,7 +17,7 @@ class BlockDelivery(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        source = (ROOT / 'rp.sh').read_text().rsplit('main "$@"', 1)[0]
+        source = SINGLE.read_text().rsplit('main "$@"', 1)[0]
         source = source.replace('/root/.rp', str(self.root / 'received'))
         (self.root / 'functions').write_text(source)
         rng = random.Random(17)

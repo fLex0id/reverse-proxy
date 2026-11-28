@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -16,7 +18,7 @@ class ApplyStorage(unittest.TestCase):
         self.target = self.root / 'installed'
         self.target.write_text('original\n')
         self.target.chmod(0o600)
-        (self.root / 'functions').write_text((ROOT / 'rp.sh').read_text().rsplit('main "$@"', 1)[0])
+        (self.root / 'functions').write_text(SINGLE.read_text().rsplit('main "$@"', 1)[0])
         script = r'''
 source "$TEST_DIR/functions"
 STATE=$TEST_DIR; BK_DIR=$STATE/backups; ASSETS=$STATE; XRAY_BIN=/bin/true

@@ -4,7 +4,9 @@ from pathlib import Path
 import subprocess
 import unittest
 
-SOURCE = (Path(__file__).resolve().parents[1] / 'rp.sh').read_text()
+from rp_fixture import SINGLE
+
+SOURCE = SINGLE.read_text()
 HELPER = 'fw_egress_state() {' + SOURCE.split('fw_egress_state() {', 1)[1].split('\ncmd_egress() {', 1)[0]
 
 class EgressFirewall(unittest.TestCase):

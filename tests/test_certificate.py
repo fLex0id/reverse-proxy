@@ -5,13 +5,15 @@ import subprocess
 import tempfile
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT=Path(__file__).resolve().parents[1]
 
 class CertificateIdentity(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name)
-        (self.root/'functions').write_text((ROOT/'rp.sh').read_text().rsplit('main "$@"',1)[0])
+        (self.root/'functions').write_text(SINGLE.read_text().rsplit('main "$@"',1)[0])
         self.assertEqual(self.cert().returncode,0)
         self.original={n:(self.root/n).read_bytes() for n in ('hy2.crt','hy2.key','rp.conf')}
 

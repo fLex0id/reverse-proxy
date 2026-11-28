@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT = Path(__file__).resolve().parents[1]
 OLD = 'old\tprivate-fixture\tpub-old\tpsk-fixture\t10.77.0.2\n'
 
@@ -14,7 +16,7 @@ class ClientWrites(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        source = (ROOT / 'rp.sh').read_text()
+        source = SINGLE.read_text()
         body = source.split('client_names() {', 1)[1].split('# ── Блок для VPS-2', 1)[0]
         body = 'client_names() {' + body.replace('/root/rp-clients', str(self.root / 'export'))
         self.clients = self.root / 'clients.tsv'

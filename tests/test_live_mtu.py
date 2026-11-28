@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -12,7 +14,7 @@ class LiveMTU(unittest.TestCase):
     def test_apply_and_rollback_use_installed_mtu_not_new_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = (ROOT / 'rp.sh').read_text().rsplit('main "$@"', 1)[0]
+            source = SINGLE.read_text().rsplit('main "$@"', 1)[0]
             source = source.replace('/etc/wireguard/', tmp + '/')
             (root / 'functions').write_text(source)
             script = '''source "$TEST_DIR/functions"

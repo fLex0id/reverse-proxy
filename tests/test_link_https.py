@@ -8,6 +8,8 @@ import tempfile
 import time
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -16,7 +18,7 @@ class LinkHTTPS(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        source = (ROOT / 'rp.sh').read_text()
+        source = SINGLE.read_text()
         embedded = source.split("py_source() { cat <<'RP_PY_EOF'\n", 1)[1].split('\nRP_PY_EOF', 1)[0]
         (self.root / 'server.py').write_text(embedded)
         self.body = b'#!/bin/bash\necho fixture-only\n'

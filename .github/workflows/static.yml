@@ -5,11 +5,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - run: sudo apt-get update && sudo apt-get install -y shellcheck pyflakes3 shfmt
       - run: python3 tools/static-check.py
       - run: python3 -m unittest discover -s tests -v
       - name: Formatting audit (legacy style; report only)
-        run: shfmt -d rp.sh > shfmt.diff || test -s shfmt.diff
+        run: |
+          tools/build.sh --output /tmp/rp-format
+          shfmt -d /tmp/rp-format/rp-single.sh > shfmt.diff || test -s shfmt.diff
       - uses: actions/upload-artifact@v4
         with:
           name: formatting-audit

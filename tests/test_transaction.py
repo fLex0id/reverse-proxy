@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch, Mock
 
-spec=importlib.util.spec_from_file_location('transaction',Path(__file__).resolve().parents[1]/'src/transaction.py')
+spec=importlib.util.spec_from_file_location('transaction',Path(__file__).resolve().parents[1]/'src/py/transaction.py')
 tx=importlib.util.module_from_spec(spec);spec.loader.exec_module(tx)
 
 class TransactionValidation(unittest.TestCase):

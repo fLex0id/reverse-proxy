@@ -19,7 +19,7 @@ below `lab/private` (both ignored, mode 0700).
   working client, arm independent restoration, then stop only rp-xray. Record
   blocked requests and recovery with valid streamed captures on all three hosts.
 - `transaction_e2e.py`: run on LAB-2 with `/root/rp-lab/transaction-current.py` from
-  `src/transaction.py`. Exercises real backup, corruption rejection, rollback,
+  `src/py/transaction.py`. Exercises real backup, corruption rejection, rollback,
   preservation of unrelated SSH changes and confirm/rollback races. Requires an
   already healthy candidate and independent SSH. Never run concurrently with
   other mutation/fault suites.
@@ -149,7 +149,7 @@ and publish only sanitized evidence summaries.
 
 - `migration_reboot.py --lab1 ALIAS --client ALIAS --candidate REMOTE_FILE
   --helper REMOTE_FILE --fixture REMOTE_MIGRATION_FAULT --output NEW_DIR`:
-  upload the candidate, `src/migration.py` and `migration_fault.py` first. The
+  upload the candidate, `src/py/migration.py` and `migration_fault.py` first. The
   controller pauses the fixture after real mutation, kills its exact supervisor
   and reboots VPS-1. Require a changed boot ID, installed boot recovery, baseline
   hashes/runtime/unit states and client HTTPS. Independent management SSH and
@@ -157,9 +157,10 @@ and publish only sanitized evidence summaries.
 
 ## Development validation
 
-Run `python3 tools/embed-transaction.py` after modifying `src/transaction.py`.
-Run `python3 tools/embed-migration.py` after modifying `src/migration.py`.
-The deployed artifact remains a single `rp.sh`; src/ is not needed to install it.
+Use `tools/build.sh --output DIR` after modifying `src/`. For a modular
+installation pass `--bundle DIR/rp-VERSION.tar.gz` to the full regression
+runner. It verifies each deployed module and the installed dispatcher against
+the local build before running the original checks.
 Run `python3 tools/static-check.py` and `python3 -m unittest discover -s tests -v`.
 Static checks require ShellCheck and pyflakes. CI also stores a formatting audit;
 legacy formatting is not silently rewritten.

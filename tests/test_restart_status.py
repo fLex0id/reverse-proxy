@@ -4,7 +4,9 @@ from pathlib import Path
 import subprocess
 import unittest
 
-SOURCE = (Path(__file__).resolve().parents[1] / 'rp.sh').read_text()
+from rp_fixture import SINGLE
+
+SOURCE = SINGLE.read_text()
 RESTARTS = ['cmd_restart() {' + part.split('\ncmd_', 1)[0]
             for part in SOURCE.split('\ncmd_restart() {')[1:]]
 

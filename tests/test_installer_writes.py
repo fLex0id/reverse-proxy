@@ -5,11 +5,13 @@ import subprocess
 import tempfile
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT = Path(__file__).resolve().parents[1]
 
 class InstallerWrites(unittest.TestCase):
     def attempt(self, failure):
-        source = (ROOT / 'rp.sh').read_text()
+        source = SINGLE.read_text()
         body = source.split('  rp_msg "Xray и Hysteria2"\n', 1)[1].split('  # 4. files:', 1)[0]
         script = r'''rp_msg() { :; }
 rp_fail() { echo "FAILED: $*" >&2; exit 1; }

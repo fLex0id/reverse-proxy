@@ -6,12 +6,14 @@ import subprocess
 import tempfile
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT = Path(__file__).resolve().parents[1]
 
 class RouteReadback(unittest.TestCase):
     def run_override(self, target, response):
         with tempfile.TemporaryDirectory() as d:
-            Path(d, 'functions.sh').write_text((ROOT/'rp.sh').read_text().rsplit('main "$@"',1)[0])
+            Path(d, 'functions.sh').write_text(SINGLE.read_text().rsplit('main "$@"',1)[0])
             fake=Path(d,'xray')
             fake.write_text('#!/bin/bash\ncase "$2" in bo) exit 0;; bi) printf "%s\\n" "$API_RESPONSE";; *) exit 1;; esac\n')
             fake.chmod(0o700)

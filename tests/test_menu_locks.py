@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT=Path(__file__).resolve().parents[1]
 CASES={'menu_clients':[1,3], 'menu_ru':[1,2,3,4,5], 'menu_dns':[1,2,3,4,5],
        'menu_upd':[1,2,3,4], 'menu_tunnel':[1,2,3,6,9,10], 'menu_main':[5,6,11,12,13,14]}
@@ -13,7 +15,7 @@ class MenuLocks(unittest.TestCase):
     def check_case(self,menu,choice):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); lock=root/'rp.lock'
-            source=(ROOT/'rp.sh').read_text().rsplit('main "$@"',1)[0]
+            source=SINGLE.read_text().rsplit('main "$@"',1)[0]
             (root/'functions').write_text(source.replace('/run/rp.lock',str(lock)))
             script=r'''
 source "$TEST_DIR/functions"

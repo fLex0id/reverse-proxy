@@ -9,13 +9,15 @@ import subprocess
 import tempfile
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT = Path(__file__).resolve().parents[1]
 ORDER = 'reality-xhttp2 reality-xhttp hy2-wg hy2o-wg'
 GOOD = '\n'.join(t + '=ok' for t in ORDER.split())
 
 class PushAcceptance(unittest.TestCase):
     def run_wait(self, results, install_rc='0', sync_rc='0'):
-        source = (ROOT / 'rp.sh').read_text()
+        source = SINGLE.read_text()
         self.assertTrue(source.endswith('main "$@"\n'))
         with tempfile.TemporaryDirectory() as d:
             Path(d, 'functions.sh').write_text(source.rsplit('main "$@"', 1)[0])

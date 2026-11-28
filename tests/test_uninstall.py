@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -13,7 +15,7 @@ class UninstallOwnership(unittest.TestCase):
     def check_role(self, role, pending_link=False, close_failure=False):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = (ROOT / 'rp.sh').read_text()
+            source = SINGLE.read_text()
             name = 'cmd_uninstall' if role == 1 else 'cmd_remove'
             body = source.split(name + '() {\n', 1)[1].split('\n}\n', 1)[0]
             body = re.sub(r'/(etc|usr|var|root)/', str(root) + r'/\1/', body)

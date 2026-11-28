@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import time
 import unittest
+from rp_fixture import SINGLE
+
 ROOT=Path(__file__).resolve().parents[1]
 
 class WatchdogPolicy(unittest.TestCase):
@@ -13,7 +15,7 @@ class WatchdogPolicy(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             d=Path(tmp);state=d/'state';state.mkdir();(state/'active').write_text('reality-xhttp2\n')
             conf=d/'rp2.conf';conf.write_text('TRANSPORT_ORDER="reality-xhttp2 reality-xhttp"\nWATCH_MIN=10\nWATCH_MAX=15\n')
-            source=d/'functions';source.write_text((ROOT/'rp.sh').read_text().rsplit('main "$@"',1)[0])
+            source=d/'functions';source.write_text(SINGLE.read_text().rsplit('main "$@"',1)[0])
             subprocess.run(['bash','-c','source "$1"; vps2_files "$2"','bash',str(source),str(d/'generated')],check=True)
             bin_dir=d/'bin';bin_dir.mkdir()
             mock=bin_dir/'rp';mock.write_text('''#!/bin/bash

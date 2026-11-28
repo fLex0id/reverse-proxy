@@ -5,7 +5,9 @@ import subprocess
 import tempfile
 import unittest
 
-SOURCE = (Path(__file__).resolve().parents[1] / 'rp.sh').read_text()
+from rp_fixture import SINGLE
+
+SOURCE = SINGLE.read_text()
 HELPER = SOURCE.split('rp_pkg_install() {', 1)[1].split('\nrp_main() {', 1)[0]
 
 class Packages(unittest.TestCase):

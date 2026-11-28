@@ -12,30 +12,46 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import tarfile
 import time
 
 p=argparse.ArgumentParser()
 for name in ['lab1','lab2','client','output']:p.add_argument('--'+name,required=True)
+p.add_argument('--bundle', type=Path, help='Verify every installed file against a modular release archive')
 p.add_argument('--continue-from', type=Path, help='Reuse passed checks from the same candidate; retain the original evidence')
 a=p.parse_args();out=Path(a.output).resolve();out.mkdir(parents=True,exist_ok=True);out.chmod(0o700)
 root=Path(__file__).resolve().parents[1];records=[]
 prior = {}
+bundle_hash = None
+if a.bundle:
+    bundle_hash = hashlib.sha256(a.bundle.read_bytes()).hexdigest()
+    with tarfile.open(a.bundle, 'r:gz') as package:
+        payload = {item.name: hashlib.sha256(package.extractfile(item).read()).hexdigest()
+                   for item in package.getmembers() if item.isfile()}
+        dispatcher = package.extractfile('dispatch.sh').read().decode()
+    release_id, = [line.split('"')[1] for line in dispatcher.splitlines()
+                   if line.startswith('RP_RELEASE_ID=')]
+    if len(release_id) != 64 or any(c not in '0123456789abcdef' for c in release_id):
+        raise SystemExit('Invalid modular release identity')
+    local_hash = payload['dispatch.sh']
+else:
+    local_hash = hashlib.sha256((root / 'rp.sh').read_bytes()).hexdigest()
 if a.continue_from:
     if a.continue_from.resolve() == out:
         raise SystemExit('Continuation must use a new output directory')
     candidate = json.loads((a.continue_from / 'candidate.json').read_text())
-    if candidate['rp_sha256'] != hashlib.sha256((root / 'rp.sh').read_bytes()).hexdigest():
+    if candidate['rp_sha256'] != local_hash or candidate.get('bundle_sha256') != bundle_hash:
         raise SystemExit('Prior evidence belongs to a different candidate')
     prior = {row['id']: row for row in json.loads((a.continue_from / 'results.json').read_text())}
 def record(name,result,detail,started):
     row=dict(id=name,result=result,detail=detail,started=started,seconds=time.time()-started)
     records.append(row);(out/'results.json').write_text(json.dumps(records,indent=2)+'\n')
     print(json.dumps(row),flush=True)
-def remote(host,command,name,timeout=600,allow_skips=False):
+def remote(host,command,name,timeout=600,allow_skips=False,input_text=None):
     started=time.time()
     try:
         r=subprocess.run(['ssh','-o','BatchMode=yes','-o','ConnectTimeout=8',host,command],
-                         capture_output=True,text=True,timeout=timeout)
+                         capture_output=True,text=True,timeout=timeout,input=input_text)
     except subprocess.TimeoutExpired:
         record(name,'UNKNOWN','SSH timeout: remote process may still run',started)
         raise RuntimeError('Inspect remote state before continuing')
@@ -52,12 +68,16 @@ def checked_remote(host, command, name, **kwargs):
         return None
     return remote(host, command, name, **kwargs)
 
-local_hash=hashlib.sha256((root/'rp.sh').read_bytes()).hexdigest()
 r=remote(a.lab1,'sha256sum /usr/local/bin/rp','candidate-sha')
 if r.returncode or r.stdout.split()[0]!=local_hash:raise SystemExit('Local/deployed candidate differ')
+if a.bundle:
+    checksums = ''.join(f'{value}  {name}\n' for name, value in sorted(payload.items()))
+    if remote(a.lab1, f'cd /usr/local/lib/rp/releases/{release_id} && sha256sum -c --strict -',
+              'candidate-module-shas', input_text=checksums).returncode:
+        raise SystemExit('Local/deployed modules differ')
 if remote(a.client, 'ip netns exec rp-lab-client ip link show wg0', 'client-namespace-preflight').returncode:
     raise SystemExit('Client fixture is absent; no transport mutation performed')
-(out/'candidate.json').write_text(json.dumps({'rp_sha256':local_hash,
+(out/'candidate.json').write_text(json.dumps({'rp_sha256':local_hash, 'bundle_sha256':bundle_hash,
     'runner_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
     'commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=root,text=True).strip()},indent=2))
 for transport in ['reality-xhttp2','reality-xhttp','hy2-wg','hy2o-wg']:

@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -14,7 +16,7 @@ class MigrationFailures(unittest.TestCase):
             root = Path(tmp)
             for name in ['lib', 'systemd', 'sysctl', 'state', 'backup']:
                 (root / name).mkdir()
-            source = (ROOT / 'rp.sh').read_text().rsplit('main "$@"', 1)[0]
+            source = SINGLE.read_text().rsplit('main "$@"', 1)[0]
             source = source.replace('/etc/systemd/system/', tmp + '/systemd/').replace('/etc/sysctl.d/', tmp + '/sysctl/')
             (root / 'functions').write_text(source)
             (root / 'rp.conf').write_text('ROLE="vps1"\nCONF_VER="2"\nTRANSPORT_ORDER="reality-xhttp2"\n')

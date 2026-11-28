@@ -5,6 +5,8 @@ import subprocess
 import tempfile
 import unittest
 
+from rp_fixture import SINGLE
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -13,7 +15,7 @@ class LinkCleanup(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.root = Path(temp.name)
-        (self.root / 'functions').write_text((ROOT / 'rp.sh').read_text().rsplit('main "$@"', 1)[0])
+        (self.root / 'functions').write_text(SINGLE.read_text().rsplit('main "$@"', 1)[0])
         serve = self.root / 'serve'
         serve.mkdir(mode=0o700)
         (serve / 'result').write_text('ok\n')
