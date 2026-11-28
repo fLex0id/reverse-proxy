@@ -1,0 +1,25 @@
+{
+  "result": "PASS",
+  "cases": [
+    {
+      "id": "client",
+      "rc": 1,
+      "enospc_observed": true,
+      "original_preserved": true,
+      "mode_preserved": true,
+      "application_not_reached": true,
+      "staging_removed": true,
+      "result": "PASS"
+    },
+    {
+      "id": "apply",
+      "rc": 1,
+      "enospc_observed": true,
+      "original_preserved": true,
+      "mode_preserved": true,
+      "application_not_reached": true,
+      "staging_removed": true,
+      "result": "PASS"
+    }
+  ]
+}

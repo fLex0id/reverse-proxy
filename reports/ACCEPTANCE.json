@@ -1,0 +1,86 @@
+{
+  "verdict": "NOT_READY",
+  "baseline": "3d3077d8940ac136b25cae4a6667a26531843a11",
+  "soak_required_hours": 6,
+  "rocky9": "NOT_TESTED",
+  "items": [
+    {
+      "id": "F01",
+      "result": "NOT_TESTED",
+      "reason": "Full acceptance coverage pending; partial evidence tracked separately"
+    },
+    {
+      "id": "F02",
+      "result": "UNKNOWN",
+      "reason": "Lab.23 file and process-substitution migrations commit; unavailable/garbage/syntax-error updates return 1 and preserve measured state. Full 1800-second rollback restores measured files/services, blocks six concurrent commands and uses no fallback. Earlier SIGKILL/reboot recovery passes; earlier interrupted deadline remains UNKNOWN. Remaining crash/disk/concurrency/platform variants and clean acceptance remain pending."
+    },
+    {
+      "id": "F03",
+      "result": "UNKNOWN",
+      "reason": "Generated multipart error propagation and isolated execution pass. Installed lab.23 link download/pin/reuse, expiry and interruption pass with service/file/listener/firewall cleanup. Spare-port firewall ownership/failure/retry pass. Actual standalone multipart installation on a clean host remains pending."
+    },
+    {
+      "id": "F04",
+      "result": "UNKNOWN",
+      "reason": "Scoped pushes, unchanged 30-minute rollback, SIGKILL/ENOSPC preparation and races pass. Eighteen installer write/download/checksum/extraction/network command failures automatically restore files/watch/client; three actual installer SIGKILL/reboot points pass boot recovery. Both pair 4-to-2-to-4 cycles pass stale-config, client and identity checks. Full interruption/SSH/concurrency acceptance remains pending Lab.23 full four-transport push passes. Initial confirmation correctly rejects a stale lab exit-IP expectation; after independent VPS-2 verification and lab expectation refresh, unchanged confirmation and a separate ordinary repeat push both commit. This external address change is not hidden."
+    },
+    {
+      "id": "F05",
+      "result": "UNKNOWN",
+      "reason": "Lab.23 manual selection and both-role restart across all four transports pass; auto restored. Complete split-brain and failure matrix remains pending."
+    },
+    {
+      "id": "F06",
+      "result": "UNKNOWN",
+      "reason": "Lab.23 all four full T1-T3, T1-T8 with restart and 120 additional T3 pass. Short sustained Xray outage blocks tested HTTPS/DNS/disabled IPv6; HTTPS restores in 6.897 seconds. Complete watchdog/fault/load matrix remains pending. Scoped primary TCP block restores HTTPS in 48.822 seconds; both sides report stream-up and the temporary rule is removed. Remaining combinations/failback/netem are not accepted."
+    },
+    {
+      "id": "F07",
+      "result": "UNKNOWN",
+      "reason": "Diagnostic false-success and firewalld false-negative corrected; actual stopped-network-service comparison and four healthy transport diagnostics pass. Full repair/failure/UNKNOWN semantics and CLI coverage pending"
+    },
+    {
+      "id": "F08",
+      "result": "UNKNOWN",
+      "reason": "Client file/error handling and bounded real ENOSPC preserve measured state. Ten live lifecycle checks pass, including two simultaneous isolated WG clients, unique identities, no unrelated service restarts and original-state restoration. Broader acceptance remains incomplete."
+    },
+    {
+      "id": "F09",
+      "result": "UNKNOWN",
+      "reason": "Lab.21 preserves RU source lists on read/publication/apply failures, validates literal deletion and propagates off/timer errors. Eight isolated tests pass locally and on Rocky; live policy/download matrix remains pending."
+    },
+    {
+      "id": "F10",
+      "result": "UNKNOWN",
+      "reason": "Lab.23 passes 768 DNS behaviors and 360 same-source-port cases. Scoped packet review finds no tested foreign/blocked plaintext DNS on VPS-1; configured RU names remain direct. Full resolver-outage/policy/reboot acceptance remains pending.",
+      "evidence": [
+        "reports/DEFECTS.md#rp-013-p1-dns-reply-source-reused-across-resolver-destinations",
+        "lab/dns_source_reuse.py"
+      ]
+    },
+    {
+      "id": "F11",
+      "result": "UNKNOWN",
+      "reason": "All 38 SNI candidates checked again on November 27; four TLS1.3/X25519 failures retained. Complete doors/rotation/prune live acceptance remains pending."
+    },
+    {
+      "id": "F12",
+      "result": "UNKNOWN",
+      "reason": "Restart false-success reproduced and corrected on both hosts, including actual inactive WG/echo and immediate process-start failure. Scoped restoration/client checks pass; full upgrade/uninstall/restart-dependency and coexistence acceptance remains pending"
+    },
+    {
+      "id": "F13",
+      "result": "UNKNOWN",
+      "reason": "28 menu branch lock fixtures plus six real SSH-terminal cases (restart/save/update in Unicode/ASCII) pass under an active migration lock. Complete interactive behavior remains pending."
+    }
+  ],
+  "soak_status": "DEFERRED_BY_OPERATOR",
+  "soak_blocks_current_release_stage": false,
+  "soak_note": "Operator deferred the six-hour soak until after the release and subsequent requested changes. Functional and failure acceptance remain required; 24/7 endurance is not claimed.",
+  "candidate_version": "1.2.9-lab.23",
+  "candidate_sha256": "2d6e6d7962c4d02a9c8f0b39a463265efd8419d29dec9a2accf00b6e722a5095",
+  "release_channel": "PRE_RELEASE",
+  "release_tag": "v1.2.9-lab.23",
+  "latest_regression": "reports/results/REGRESSION_LAB23.json",
+  "release_note": "Downloadable preliminary release only. Stable acceptance remains NOT_READY; the deferred soak is not counted as completed."
+}

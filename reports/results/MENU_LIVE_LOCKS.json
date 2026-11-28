@@ -1,0 +1,32 @@
+[
+  {
+    "mode": "unicode",
+    "option": 11,
+    "result": "PASS"
+  },
+  {
+    "mode": "unicode",
+    "option": 13,
+    "result": "PASS"
+  },
+  {
+    "mode": "unicode",
+    "option": 14,
+    "result": "PASS"
+  },
+  {
+    "mode": "ascii",
+    "option": 11,
+    "result": "PASS"
+  },
+  {
+    "mode": "ascii",
+    "option": 13,
+    "result": "PASS"
+  },
+  {
+    "mode": "ascii",
+    "option": 14,
+    "result": "PASS"
+  }
+]

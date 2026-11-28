@@ -1,0 +1,26 @@
+[
+  {
+    "id": "download",
+    "result": "PASS",
+    "rc": 0,
+    "cleanup_ok": true,
+    "detail": {
+      "download_matches": true,
+      "reuse_rejected": true
+    }
+  },
+  {
+    "id": "timeout",
+    "result": "PASS",
+    "rc": 1,
+    "cleanup_ok": true,
+    "detail": {}
+  },
+  {
+    "id": "interrupt",
+    "result": "PASS",
+    "rc": 130,
+    "cleanup_ok": true,
+    "detail": {}
+  }
+]

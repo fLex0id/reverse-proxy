@@ -1,0 +1,31 @@
+{
+  "result": "PASS",
+  "cases": [
+    {
+      "id": "owned",
+      "result": "PASS",
+      "rc": 0,
+      "port_open_after": false,
+      "cleanup_result": "ok"
+    },
+    {
+      "id": "preexisting",
+      "result": "PASS",
+      "rc": 0,
+      "port_open_after": true,
+      "cleanup_result": "ok"
+    },
+    {
+      "id": "close-failure",
+      "result": "PASS",
+      "rc": 1,
+      "port_open_after": true,
+      "cleanup_result": "cleanup-failed"
+    },
+    {
+      "id": "retry-cleanup",
+      "result": "PASS",
+      "rc": 0
+    }
+  ]
+}

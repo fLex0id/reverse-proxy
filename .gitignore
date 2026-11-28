@@ -1,0 +1,6 @@
+lab/private/
+lab/artifacts/
+__pycache__/
+*.pyc
+lab/CODEX_RP_LAB_TECHNICAL_SPEC.md
+lab/TZ_Codex_rp.md

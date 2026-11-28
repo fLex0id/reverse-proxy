@@ -1,0 +1,11 @@
+{
+  "source_commit": "d2d4e67a19b731e4fdd2f2d68cce0a390ef7fcac",
+  "update_repeat_rc": 0,
+  "repeat_did_not_restart_transaction": true,
+  "phase": "COMMITTED",
+  "installed_sha256": "0d869c19726b3914985a8fd646ad75a00205504b3537bb9e7e891b113f221ba9",
+  "helper_sha256": "0de7049c163a9ba2c42600a58f73f93d9745e0c2f82daf20c5de97780da9be7f",
+  "configuration_preserved": true,
+  "clients_preserved": true,
+  "post_update_client_https_rc": 0
+}

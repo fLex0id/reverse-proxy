@@ -1,0 +1,227 @@
+# rp laboratory status
+
+Baseline: 3d3077d8940ac136b25cae4a6667a26531843a11, version 1.2.8-audit-fixes.
+Branch: codex/rp-24x7-lab.
+
+User amendments: use two Rocky 10.2 machines; Rocky 9 remains NOT_TESTED.
+Final soak: six hours on an unchanged final commit (replaces 72 hours).
+Latest operator amendment: defer this soak until after the release and the
+operator's subsequent requested changes. Do not run it in this stage; absence
+of endurance evidence must remain explicit in the release verdict.
+Cleanup gate: notify the user BEFORE final clean-install preparation and
+wait for their machine cleanup to be completed. Then install the corrected script
+from scratch and run the required complete regressions/leak checks. The deferred
+six-hour soak requires the operator's later instruction. Current short fault tests
+use the existing installations.
+Recovery objective: <=60 seconds with a healthy available alternative; start
+counting after connectivity is restored for total outages. Manual pin remains fail-closed.
+
+Lab: LAB-1=hy2-rpm, LAB-2=hy2-rpm2; hy2-deb available as auxiliary client/endpoint.
+Snapshots exist. Preserve independent management SSH. Do not modify the router
+or other hosts. Whole-disk/memory exhaustion must not endanger management access.
+On 2026-11-13 all three machines briefly stopped answering ARP; the user restored
+availability. Both rp endpoints started after boot and the isolated client was rebuilt.
+
+Read both supplied specifications in full. Implementation must preserve all four
+transports, full SNI coverage, T1-T3, and the F01-F13 acceptance matrix.
+Final verdict: NOT_READY (work in progress; no acceptance or soak claimed).
+
+## Current candidate (2026-11-27)
+
+VPS-1 runs lab.23, source c8ba2c74caee60bb19e6b778c5416c1457c7c5d9,
+rp.sh SHA256 2d6e6d7962c4d02a9c8f0b39a463265efd8419d29dec9a2accf00b6e722a5095.
+VPS-2 was rebuilt by the lab.23 installer. Both update transactions are COMMITTED.
+193 local tests and static checks pass. Main and the backup branch are unchanged.
+
+Completed evidence since lab.18:
+- Full unchanged 1800-second VPS-1 migration deadline: restored measured files,
+  runtime and services, rejected six concurrent commands, no fallback used.
+  The earlier interrupted run remains UNKNOWN. See DEADLINE-2026-11-27.md.
+- Client file/publication and apply/RU-list error handling; real bounded ENOSPC.
+  Ten live client checks include two simultaneous WG clients and no unrelated
+  service restarts. See CLIENT-WRITES, APPLY-RU-STORAGE and LIVE-CLI reports.
+- Generated block errors, real TLS pin/one-use/expiry, firewalld ownership,
+  installed link download/expiry/interruption. Lab.22 bind-mount cleanup failure
+  was reproduced and fixed in lab.23. All original failures remain recorded.
+- File and streamed migrations, three installed invalid/unavailable updater
+  cases, full four-transport T1-T3 and repeat ordinary FULL_OK push. A changed
+  external lab IP required independently verifying and refreshing the saved
+  expectation; the production IP guard was not changed. See UPDATE-PUSH report.
+- All 38 SNI candidates rechecked; four TLS1.3/X25519 failures retained. Six live
+  Unicode/ASCII menu lock cases supplement the 28 existing menu branch fixtures.
+
+## Preliminary release (2026-11-28)
+
+Tag: `v1.2.9-lab.23`, GitHub channel Pre-release. The tested script bytes are
+unchanged. See RELEASE_NOTES_RU.md for download, checksums, scope and remaining
+work. Publishing this artifact does not change the stable verdict NOT_READY.
+
+The autonomous four-transport regression finished on November 27. Its results
+were collected and all eight LAB-1 application/DNS captures reviewed on November 28,
+alongside positive client/LAB-2 captures. All four full T1-T3/T1-T8 runs, 120 extra
+T3 checks, 768 DNS behaviors and 360 same-port cases pass. HTTP/HTTPS/DoH/DoT and
+Cloudflare STUN pass on all four. HTTP/3 passes only on Salamander; the other
+three time out. Google STUN times out on all four. Direct numeric-address controls
+also time out; an external contribution is possible but not proven for each failure.
+Failures remain recorded. See REGRESSION-2026-11-28.md and results/REGRESSION_LAB23.json.
+
+The original run stopped after a reboot removed the temporary client namespace.
+Only matching-candidate successful packet-up restart/T1-T8/T1-T3/T3 evidence was
+reused; client readiness was rechecked and missing tests ran in a separate tree.
+All raw attempts are retained privately. A new November 28 reboot required
+rebuilding the client again before fault testing; the first preflight failure is
+retained and no fault was injected in that attempt.
+
+Lab.23 sustained Xray outage: HTTPS/foreign DNS/disabled IPv6 blocked; no matching
+LAB-1 direct control traffic. Restored HTTPS in 6.897 seconds and returned to auto.
+Scoped primary TCP block: observed outages followed by successful HTTPS in
+48.822 seconds, watcher switched to stream-up, 39 packets hit the temporary rule.
+Rule removed; both roles report stream-up, VPS-1 Xray reports r-xhttp, supervisors
+active. These are two scoped fault scenarios, not the complete fault matrix.
+
+The auxiliary controller's original private tree remains at
+`/root/rp-lab/controller-20261127`; collected evidence is also under ignored
+`lab/artifacts/release-20261128`. Its dedicated lab-only SSH key remains available
+for later acceptance; remove its authorized-key entries and private credential
+when controller-driven acceptance ends. No long test is running.
+
+Remaining before stable acceptance: final clean installation/uninstall/reinstall
+and actual standalone multipart installation; remaining CLI/menu, RU/DNS policy,
+doors/rotation/prune, split-brain, watchdog/failback, TCP/UDP/netem/load/resolver
+fault and native-IPv6 coverage. F01-F13 remain explicit in ACCEPTANCE.json.
+The user must perform the agreed cleanup before final clean installation.
+The six-hour soak is deferred by the operator and not counted as completed.
+Main and the backup branch have not been modified by this release work.
+
+## Earlier resumed work (2026-11-21)
+
+The working branch fast-forwarded to backup commit 0cb36b4 without rewriting
+history. Lab.13 closes the self-update lock handover gap: 128 local tests and
+static checks pass; four real-process lock tests also pass on Rocky 10.2. The
+installed endpoints still run lab.12. Full migration rollback remains open.
+See UPDATE-LOCK-2026-11-21.md. Lab.14 also fixes false success and configuration
+loss on write failure. Actual ENOSPC reproduced in a private Rocky tmpfs; the
+candidate preserved the original config and returned rc=1. See
+CONFIG-WRITE-2026-11-21.md. Lab.15 propagates unit-generation and migration-stage
+errors and checks local readiness before success. All 137 local tests and static
+checks pass; all 13 newly added test methods pass on Rocky in isolated fixtures.
+See MIGRATE-ERRORS-2026-11-21.md. The installed endpoints remain lab.12, and full
+migration-state rollback is still the next priority. Final cleanup/soak has not started.
+
+## Previous installed checkpoint (2026-11-21)
+
+Both endpoints now run source 29f65ed, 1.2.9-lab.12. Migration and ordinary push
+passed complete T1–T3 on all four transports and reached COMMITTED, with auto mode
+and watcher active. Actual failed/inactive-service restart tests pass on both
+roles, including immediate Type=simple process exit; see RESTART-2026-11-20.md.
+124 local tests and generated-code static checks pass. The lab.12 NAT-failure
+and kill/reboot recovery repeat and full four-transport regression completed
+under `lab/artifacts/lab12-validation-20261121`. All complete T1–T3, 120 extra
+T3 checks, 768 DNS behaviors, 360 same-source DNS checks, HTTP/HTTPS/DoH/DoT/HTTP3
+and Cloudflare STUN passed. Google STUN failed on all four transports; its direct
+controls and external-path limitations remain documented. Auto mode was restored.
+The lab.12 boot rollback completed in 33.416 seconds; original hashes, watcher,
+staging cleanup and client HTTPS passed. See WORK_SUMMARY_RU.md and the sanitized
+snapshots in reports/results. These observations are not final acceptance.
+
+Lab.11 completed XHTTP-pair and Hysteria-pair 4-to-2-to-4 deployment cycles.
+Lab.9 push passed all four complete T1–T3 and reached COMMITTED. Its installed
+`rp diag` passed on each of four transports after fixing both false-success
+statuses and the incorrect firewalld intra-zone check. A real stopped-rp-net
+test reproduced lab.7 rc=0 versus candidate lab.8 rc=1, with client recovery.
+
+Lab.7's expanded regression completed: all four T1–T3, 120 additional T3,
+768 ordinary DNS behaviors, 360 same-source DNS checks, HTTP/3 and Cloudflare
+STUN passed. Both Hysteria kernel-reset probes passed. Quad9 failed one built-in
+T6; Google STUN failed on all four. Complete scoped results and capture review:
+REGRESSION-2026-11-20.md. Final policy/fault/native-IPv6 coverage remains open.
+
+RP-019: a real scoped Xray staging-write failure on lab.9
+still returned rc=0 and READY. The fixture explicitly rolled it back and verified
+old hashes/watch/client recovery. Lab.10 adds checked writes/permissions/services
+and durable cleanup of owned staging files. All nine real command-failure cases
+passed with automatic rollback, old hashes/watch/client and staging cleanup.
+See INSTALLER-FAULTS-2026-11-20.md; ordinary lab.10 push then passed all four
+complete T1–T3 and committed. RP-020's baseline cycle exposed retained unused
+WG secrets and a legacy TCP configuration. Lab.11 removes them correctly; both
+repeat pair cycles passed 39 checks each, including client HTTPS/DNS/HTTP3,
+identity/settings preservation, full four-transport restoration and auto mode.
+See TRANSPORT-CLEANUP-2026-11-20.md. That checkpoint passed 118 local tests.
+Nine additional lab.11 download/checksum/extraction/network faults all caused
+automatic rollback and restored hashes/watch/client. Three actual installer
+SIGKILL/reboot points passed installed boot recovery in approximately 30 seconds.
+The first download fixture had an invalid sysctl passthrough and required explicit
+recovery; its failure is retained separately from the corrected passing repeat.
+Final clean installation and six-hour soak have NOT started.
+
+All three machines became available again on 2026-11-20; their clocks were
+checked and the isolated WG namespace rebuilt. The operator confirms that the
+lab and controller use VPN under TSPU conditions. Independently reproduced
+external failures must be documented without blocking unrelated engineering
+indefinitely; they remain failures/limitations, never silently converted to PASS.
+
+Quad9: 120 paired direct/proxied probes produced 17 TLS failures (7 through rp,
+10 direct LAB-2); all 40 Cloudflare probes passed. Incoming Quad9-source resets
+are visible on LAB-2. Exact origin is unproven; an external cause is probable.
+RP-015, a separate local reset leak, reproduced without any external endpoint:
+unmarked kernel RST escaped LAB-1 underlay. Source routing plus an independent
+output guard passed both normal and deliberately missing-rule tests. See
+DOH-2026-11-20.md for counts, captures, limitations and exact test scope.
+
+New commits since dcee312:
+- 4650bdd: serialize mutating menu/installer/save/bundle entry points.
+- 7e2905f: inner WG MTU 1280 with explicit factory migration and validation;
+  actual ENOSPC/MTU comparison and four-transport regression tooling.
+- a1f7ba6: update live WG MTU on apply and restore it from rollback files.
+- 61dbdf5: preserve intercepted DNS reply addresses across reused UDP ports.
+- 65b3fed: reject malformed/partial DoH replies and propagate DNS test failures.
+- 87f4f3a: prevent unmarked kernel resets escaping through LAB-1 underlay.
+- 9fdb646: request only missing OS dependencies during repeated VPS-2 installs.
+- cf9ab6f: propagate diagnostic errors and revalidate after --fix.
+- 171a2c7: inspect the actual active inter-zone firewalld policy.
+- 7471fb3: fail and roll back on installer write/permission/service errors;
+  include binary staging files in durable restoration.
+- e50929e: omit unused inner-WG credentials and remove obsolete VPS-2 configs;
+  cover every nonempty transport subset and real pair round trips.
+- 67e289b: record diagnostic, installer, packet and transport-cleanup evidence.
+- 7a72456: exercise download/integrity/extraction/network and installer kill/reboot faults.
+- 29f65ed: restart inactive client WG/echo, propagate errors and verify readiness
+  before reporting successful restart on both roles.
+
+Actual ENOSPC during transaction preparation: 6/6 checks PASS, cleanup complete.
+HTTP/3 with each Hysteria variant: FAIL at MTU 1080, PASS at 1280, with simultaneous
+client/LAB-1/LAB-2 PCAPs; no direct LAB-1 packets to the control destination.
+Expanded lab.3 regression completed: all four HTTP/3 cases, 120 additional T3
+checks, 768 ordinary DNS behaviors and Cloudflare STUN passed. Google STUN failed.
+See REGRESSION-2026-11-14.md for packet attribution and limits. Earlier lab.2 run passed 120 consecutive
+T3 payload checks (30 per transport), but exposed HY2 HTTP/3 and a DNS reply-source
+defect. DoH/Quad9 remained intermittent. Google numeric STUN also fails directly
+from LAB-2; an additional independent Cloudflare STUN case is now retained.
+
+RP-013 candidate fix is installed: conntrack-backed DNS redirect preserves the
+queried resolver address without changing general UDP behavior or split-DNS policy.
+The prototype passed 90 same-port and 192 ordinary DNS checks after startup;
+four initial timeout probes remain recorded. Full lab.4 regression subsequently
+passed 360 same-port and 768 ordinary DNS cases, all four HTTP/3 and Cloudflare
+STUN probes and 120 additional T3 checks. Quad9 and Google STUN failures remain
+recorded separately; complete packet attribution and fault coverage are pending.
+
+Lab.4 sustained-Xray-outage test: HTTPS/IPv6 blocked, DNS refused with no answer,
+no direct control-destination flow or foreign control-name DNS on LAB-1; HTTPS
+restored in 6.914 seconds. Route-sync supervision was paused during the sustained
+fault and independently restored. The first unpaused attempt is UNKNOWN because
+the timer automatically restarted Xray about three seconds into the probe window.
+The new DNS port is blocked from underlay over TCP and UDP.
+
+Real LAB-2 reboot in INSTALLING: seven scoped checks PASS. Boot changed, automatic
+rollback completed in 30.365 seconds, old config hash restored, new owned file and
+backup/pending removed, watch/live tunnel healthy, manual pin preserved, client
+HTTPS working. This used controlled owned-file mutation, not every installer
+failure point. Full clean/reboot/load/concurrency acceptance is still pending.
+
+Next priorities: remaining installer
+interruption/SSH/concurrent-operation coverage; complete self-update
+rollback (the current self-updater restores only its executable on migration
+failure; the lock handover gap is fixed in lab.13); full CLI/menu,
+policy, load and failover coverage. Installer writes that are not explicitly
+checked require fault reproduction before any broader atomicity claim.

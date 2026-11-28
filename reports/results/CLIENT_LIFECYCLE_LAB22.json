@@ -1,0 +1,59 @@
+[
+  {
+    "id": "add-live-peer-and-export",
+    "result": "PASS",
+    "detail": {
+      "rc": 0
+    }
+  },
+  {
+    "id": "client-only-services-preserved",
+    "result": "PASS",
+    "detail": null
+  },
+  {
+    "id": "duplicate-rejected-without-mutation",
+    "result": "PASS",
+    "detail": null
+  },
+  {
+    "id": "show-existing-client",
+    "result": "PASS",
+    "detail": null
+  },
+  {
+    "id": "unique-client-identities-and-private-export",
+    "result": "PASS",
+    "detail": null
+  },
+  {
+    "id": "simultaneous-two-client-https",
+    "result": "PASS",
+    "detail": {
+      "return_codes": [
+        0,
+        0
+      ]
+    }
+  },
+  {
+    "id": "delete-live-peer",
+    "result": "PASS",
+    "detail": null
+  },
+  {
+    "id": "original-clients-and-services-restored",
+    "result": "PASS",
+    "detail": null
+  },
+  {
+    "id": "missing-client-rejected",
+    "result": "PASS",
+    "detail": null
+  },
+  {
+    "id": "existing-client-still-works",
+    "result": "PASS",
+    "detail": null
+  }
+]

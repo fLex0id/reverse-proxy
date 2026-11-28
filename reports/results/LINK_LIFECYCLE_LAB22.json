@@ -1,0 +1,12 @@
+[
+  {
+    "id": "download",
+    "result": "FAIL",
+    "rc": 1,
+    "cleanup_ok": false,
+    "detail": {
+      "download_matches": true,
+      "reuse_rejected": true
+    }
+  }
+]

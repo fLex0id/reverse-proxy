@@ -1,0 +1,52 @@
+{
+  "date": "2026-11-28",
+  "result": "PASS",
+  "release_url": "https://github.com/fLex0id/reverse-proxy/releases/tag/v1.2.9-lab.23",
+  "tag": "v1.2.9-lab.23",
+  "source_commit": "8aebd7d6a41b5ff30f305d4e835d728489b9cdda",
+  "target_metadata": "codex/rp-24x7-lab",
+  "is_draft": false,
+  "is_prerelease": true,
+  "downloaded_assets": [
+    {
+      "name": "ACCEPTANCE.json",
+      "size": 5614,
+      "sha256": "f3bc5d785ff9de4597d22c745594759946298fa6d8cab02a4a6892b7833fb288",
+      "download_url": "https://github.com/fLex0id/reverse-proxy/releases/download/v1.2.9-lab.23/ACCEPTANCE.json"
+    },
+    {
+      "name": "BUILD.json",
+      "size": 332,
+      "sha256": "1510d7b92f63b44d17e8ec4cc58d8c25a7d79cd46d3856ff38b2a7a9ac1b91bf",
+      "download_url": "https://github.com/fLex0id/reverse-proxy/releases/download/v1.2.9-lab.23/BUILD.json"
+    },
+    {
+      "name": "RELEASE_NOTES_RU.md",
+      "size": 9456,
+      "sha256": "1e9f73f6e56b0fe38d031d4b74ed7766d737ee741dd18611d91427cd10d2eb51",
+      "download_url": "https://github.com/fLex0id/reverse-proxy/releases/download/v1.2.9-lab.23/RELEASE_NOTES_RU.md"
+    },
+    {
+      "name": "rp.sh",
+      "size": 367221,
+      "sha256": "2d6e6d7962c4d02a9c8f0b39a463265efd8419d29dec9a2accf00b6e722a5095",
+      "download_url": "https://github.com/fLex0id/reverse-proxy/releases/download/v1.2.9-lab.23/rp.sh"
+    },
+    {
+      "name": "SHA256SUMS",
+      "size": 317,
+      "sha256": "10e73824583e0228c75a5db3a8feda1e736b29ce947445329f9955cd395f5286",
+      "download_url": "https://github.com/fLex0id/reverse-proxy/releases/download/v1.2.9-lab.23/SHA256SUMS"
+    }
+  ],
+  "verification": [
+    "Downloaded all five attachments from GitHub",
+    "All SHA256SUMS entries pass",
+    "Downloaded rp.sh byte-identical to tested local candidate",
+    "Two independent local package directories byte-identical by file checksums",
+    "Remote annotated tag resolves to recorded source commit",
+    "Main and backup refs unchanged during this publication"
+  ],
+  "stable_acceptance": "NOT_READY",
+  "soak": "DEFERRED_BY_OPERATOR"
+}
