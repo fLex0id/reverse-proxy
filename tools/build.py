@@ -34,7 +34,7 @@ def expand_shell(text):
             raise ValueError(f'missing final newline in {path}')
         return substituted.removesuffix('\n')
 
-    return re.sub(r'^@(PY|VPS2):([a-z_]+)@$', expand, text, flags=re.M)
+    return re.sub(r'^@(PY|VPS2):([a-z][a-z0-9_]*)@$', expand, text, flags=re.M)
 
 
 def python_functions(single):

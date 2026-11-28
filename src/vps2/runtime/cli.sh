@@ -599,6 +599,11 @@ cmd_restart() {
 }
 cmd_remove() {
   read -rp "Удалить rp с VPS-2 (туннель, конфиги, ключ SSH)? [y/N] " a; [[ ${a,,} == y ]] || return 0
+  # BEGIN VPS2 SSH22 REMOVE
+  if [[ -x /usr/local/lib/rp/ssh22.sh ]]; then
+    /usr/local/lib/rp/ssh22.sh disable || return 1
+  fi
+  # END VPS2 SSH22 REMOVE
   # Exact owned units only: another application may also use the rp- prefix.
   # Stop timers before removing the runner and handle absent legacy units singly.
   local u
@@ -651,24 +656,31 @@ cmd_rollback() {
   rm -f /root/.rp-push.sh
   say "Возврат к прежним параметрам выполнен"
 }
+# BEGIN VPS2 SSH22 MENU
+ssh22_menu() {
+  say "TCP/22: loopback и rp-wg только от VPS-1. Подтвердите через туннель."
+  say "rp ssh22 status | enable | confirm | disable"
+  /usr/local/lib/rp/ssh22.sh status
+}
+# END VPS2 SSH22 MENU
 menu() {
   while :; do
     if rp_plain_console; then
       say ""
       say "== rp VPS-2 | transport: $(active) =="
-      say "1 Status | 2 Restart | 3 Logs | 4 Retest | 5 Repair NAT | 6 Remove | 0 Exit"
+      say "1 Status | 2 Restart | 3 Logs | 4 Retest | 5 Repair NAT | 6 Remove | 7 SSH 22 | 0 Exit"
       printf '> '
     else
-      printf '\n◆ rp · VPS-2   транспорт: %s\n  1 Статус\n  2 Перезапуск\n  3 Журнал\n  4 Проверить все транспорты заново\n  5 Починить NAT и пересылку\n  6 Удалить\n  0 Выход\n› ' "$(active)"
+      printf '\n◆ rp · VPS-2   транспорт: %s\n  1 Статус\n  2 Перезапуск\n  3 Журнал\n  4 Проверить все транспорты заново\n  5 Починить NAT и пересылку\n  6 Удалить\n  7 SSH TCP/22\n  0 Выход\n› ' "$(active)"
     fi
     read -r c || exit 0
-    case $c in 1) cmd_status ;; 2) /usr/local/bin/rp restart ;; 3) cmd_logs 60 ;; 4) /usr/local/bin/rp select ;; 5) /usr/local/bin/rp fixnet ;; 6) /usr/local/bin/rp remove ;; 0) exit 0 ;; *) say "Введите число от 0 до 6" ;; esac
+    case $c in 1) cmd_status ;; 2) /usr/local/bin/rp restart ;; 3) cmd_logs 60 ;; 4) /usr/local/bin/rp select ;; 5) /usr/local/bin/rp fixnet ;; 6) /usr/local/bin/rp remove ;; 7) ssh22_menu ;; 0) exit 0 ;; *) say "Введите число от 0 до 7" ;; esac
   done
 }
 if [[ ${1:-} == --ascii ]]; then RP_ASCII=1; export RP_ASCII; shift; fi
 case "${1:-menu}:${2:-}" in
-  mode:status|mode:result|mode:) : ;;
-  select:*|restart:*|remove:*|fixnet:*|mode:*|failback:*|_setorder:*)
+  mode:status|mode:result|mode:|ssh22:status|ssh22:) : ;;
+  select:*|restart:*|remove:*|fixnet:*|mode:*|failback:*|_setorder:*|ssh22:*)
     if [[ ${RP_TX_INTERNAL:-0} != 1 ]]; then
       exec 8>/run/rp-vps2-mutation.lock
       flock -n 8 || { say "Другая операция VPS-2 выполняется" >&2; exit 1; }
@@ -682,6 +694,7 @@ case ${1:-menu} in
   test) t=$(active); t1_check "$t" && t2_check "$t" && t3_check "$t" && say "T1–T3: ок" ;;
   remove) cmd_remove ;; version) cmd_version ;; confirm) cmd_confirm ;; rollback) cmd_rollback ;;
   results) cmd_results ;; egress) cmd_egress ;; fixnet) cmd_fixnet ;; mode) shift; cmd_mode "$@" ;; failback) shift; cmd_failback "$@" ;; _setorder) shift; cmd_setorder "$@" ;;
+  ssh22) /usr/local/lib/rp/ssh22.sh "${2:-status}" ;;
   _func) func_ok "$(active)" ;;
   _fn) shift; "$@" ;;
   *) say "rp: status | restart | logs [N] | select | test | results | egress | fixnet | version | remove (без аргументов — меню)"; say "Заменить параметры: вставьте новый блок из VPS-1." ;;

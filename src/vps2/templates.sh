@@ -4,6 +4,12 @@
 vps2_files() { # vps2_files КАТАЛОГ — раскладывает CLI, сторож и юниты в дерево пакета
   local d=$1; mkdir -p "$d/usr/local/bin" "$d/usr/local/lib/rp" "$d/etc/systemd/system" "$d/etc/rp"
   transaction_source >"$d/usr/local/lib/rp/transaction.py"
+  # BEGIN VPS2 SSH22 FILE
+  cat >"$d/usr/local/lib/rp/ssh22.sh" <<'EOS_SSH22'
+@VPS2:ssh22@
+EOS_SSH22
+  chmod 755 "$d/usr/local/lib/rp/ssh22.sh" || return 1
+  # END VPS2 SSH22 FILE
   # NAT как файл nft: загрузка идемпотентна (delete + create), счётчики для диагностики
   cat >"$d/etc/rp/nat.nft" <<'EOS'
 table ip rp_nat

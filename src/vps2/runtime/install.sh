@@ -136,6 +136,11 @@ rp_main() {
   rp_mutated=0
   # При ошибке после начала изменений (RP_SAFE=1) откатываемся сразу, не дожидаясь таймера.
   trap 'rc=$?; rm -rf "$tmp"; if [[ $rc -ne 0 && $RP_SAFE == 1 && $rp_mutated == 1 ]]; then python3 /var/lib/rp/transaction/runner.py rollback --from-installer || true; fi; printf "%s\n" "$rc" >/var/lib/rp/push.rc' EXIT
+  # BEGIN VPS2 SSH22 PUSH GUARD
+  if [[ $RP_SAFE == 1 && -e /run/rp-ssh22.pending ]]; then
+    rp_fail "Сначала подтвердите или отключите пробное ограничение TCP/22: rp ssh22"
+  fi
+  # END VPS2 SSH22 PUSH GUARD
   # Validate and extract ONLY the transaction helper before mutation. Its hash
   # is covered by the generated bundle digest. The backup runner is immutable.
   rp_bundle | base64 -d >"$tmp/b.tgz" 2>/dev/null || rp_fail "Бандл повреждён (base64)"
@@ -259,6 +264,18 @@ rp_main() {
   echo
   rp_msg "Отпечаток host key (сверьте при первом rp ssh):"
   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub 2>/dev/null || ssh-keygen -lf /etc/ssh/ssh_host_ecdsa_key.pub 2>/dev/null
-  rp_msg "SSH снаружи можно закрыть: доступ с VPS-1 по туннелю сохранится (правило для 10.77.0.1)."
+  # BEGIN VPS2 SSH22 OFFER
+  if [[ $RP_SAFE != 1 && $rc == 0 ]] && { : </dev/tty; } 2>/dev/null; then
+    local answer
+    rp_msg "Ограничить TCP/22: loopback и rp-wg только от VPS-1? [Y/n]"
+    if read -r answer </dev/tty; then
+      case ${answer,,} in
+        ''|y|yes|д|да)
+          /usr/local/lib/rp/ssh22.sh enable || rp_msg "! Не удалось включить ограничение TCP/22. Проверьте rp ssh22 status."
+          ;;
+      esac
+    fi
+  fi
+  # END VPS2 SSH22 OFFER
   return $rc
 }

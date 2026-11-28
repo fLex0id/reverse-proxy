@@ -31,7 +31,8 @@ with tempfile.TemporaryDirectory(prefix='rp-static-') as work:
     library.write_text((dist / 'rp-single.sh').read_text().rsplit('main "$@"', 1)[0])
     generated = work / 'generated'
     run('bash', '-c', 'source "$1" && vps2_files "$2"', 'static', str(library), str(generated))
-    generated_shells = [generated / 'usr/local/bin/rp', generated / 'usr/local/lib/rp/watch.sh']
+    generated_shells = [generated / 'usr/local/bin/rp', generated / 'usr/local/lib/rp/watch.sh',
+                        generated / 'usr/local/lib/rp/ssh22.sh']
     bash_files = [*dist.glob('*.sh'), *bundle.rglob('*.sh'), *generated_shells,
                   *(ROOT / 'tools').glob('*.sh')]
     for path in bash_files:
@@ -58,7 +59,7 @@ with tempfile.TemporaryDirectory(prefix='rp-static-') as work:
     for index, path in enumerate(python_paths):
         py_compile.compile(str(path), cfile=str(work / f'check-{index}.pyc'), doraise=True)
     run(flake, *map(str, python_paths))
-    run(str(ROOT / 'tools/compare-functions.sh'), '--dist', str(dist))
+    run(str(ROOT / 'tools/compare-functions.sh'), '--dist', str(dist), '--allow-vps2-ssh22')
 
     module_names = (ROOT / 'src/modules.list').read_text().splitlines()
     module_names += ['main/distribution.sh', 'lib/python-sources.sh']

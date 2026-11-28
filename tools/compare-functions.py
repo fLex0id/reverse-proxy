@@ -14,6 +14,10 @@ DISTRIBUTION_CHANGES = {
     'self_upgrade', 'maybe_save_launched_build', 'cmd_uninstall',
 }
 PYTHON_FUNCTIONS = {'migration_source', 'transaction_source', 'py_source'}
+SSH22_FUNCTIONS = {'vps2_files', 'vps2_installer'}
+SSH22_PATH = 'usr/local/lib/rp/ssh22.sh'
+OLD_SSH22_NOTICE = ('  rp_msg "SSH снаружи можно закрыть: доступ с VPS-1 по туннелю '
+                    'сохранится (правило для 10.77.0.1)."\n').encode()
 
 
 def run_shell(body, *args, extra_env=None):
@@ -97,6 +101,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--baseline', default='v1.2.9-lab.23')
     parser.add_argument('--dist', required=True, type=Path)
+    parser.add_argument('--allow-vps2-ssh22', action='store_true',
+                        help='Expect the separately reviewed VPS-2 TCP/22 policy change')
     args = parser.parse_args()
     baseline = subprocess.check_output(['git', 'show', args.baseline + ':rp.sh'],
                                        cwd=ROOT, text=True)
@@ -118,9 +124,10 @@ def main():
         legacy = args.dist / 'rp-legacy-update.sh'
         run_shell('source "$1" && self_ok "$2" && grep -qxF "migrate_apply() {" "$2"', old, legacy)
         print('lab.23 self_ok and migration marker (compatibility entry): PASS')
+        differences = DISTRIBUTION_CHANGES | (SSH22_FUNCTIONS if args.allow_vps2_ssh22 else set())
         results = [
-            compare('rp-single.sh Bash', old_defs, single_defs, DISTRIBUTION_CHANGES),
-            compare('Bundle Bash', old_defs, mod_defs, DISTRIBUTION_CHANGES | PYTHON_FUNCTIONS),
+            compare('rp-single.sh Bash', old_defs, single_defs, differences),
+            compare('Bundle Bash', old_defs, mod_defs, differences | PYTHON_FUNCTIONS),
             compare('rp-single.sh Python', old_python, python_payloads(single_defs, single), set()),
             compare('Bundle Python', old_python, python_payloads(mod_defs, module, **env), set()),
         ]
@@ -129,18 +136,42 @@ def main():
         for name, script, settings in [('old', old, {}), ('single', single, {}),
                                        ('modular', module, env)]:
             run_shell('source "$1" && vps2_files "$2"', script, work / name, extra_env=settings)
+        original = {p.relative_to(work / 'old'): p for p in (work / 'old').rglob('*') if p.is_file()}
         for name in ('single', 'modular'):
-            same = subprocess.run(['diff', '-qr', str(work / 'old'), str(work / name)]).returncode == 0
-            files = (work / 'old').rglob('*')
-            same &= all(item.stat().st_mode == (work / name / item.relative_to(work / 'old')).stat().st_mode
-                        for item in files)
+            generated = {p.relative_to(work / name): p for p in (work / name).rglob('*') if p.is_file()}
+            additions = {Path(SSH22_PATH)} if args.allow_vps2_ssh22 else set()
+            permitted = {Path('usr/local/bin/rp')} if args.allow_vps2_ssh22 else set()
+            same = generated.keys() == original.keys() | additions
+            if same:
+                same = all(path.stat().st_mode == generated[rel].stat().st_mode and
+                           (rel in permitted or path.read_bytes() == generated[rel].read_bytes())
+                           for rel, path in original.items())
+            old_dirs = {p.relative_to(work / 'old'): p.stat().st_mode
+                        for p in (work / 'old').rglob('*') if p.is_dir()}
+            new_dirs = {p.relative_to(work / name): p.stat().st_mode
+                        for p in (work / name).rglob('*') if p.is_dir()}
+            same &= old_dirs == new_dirs
+            if same and additions:
+                helper = generated[Path(SSH22_PATH)]
+                same = helper.read_bytes() == (ROOT / 'src/vps2/runtime/ssh22.sh').read_bytes()
+                same &= helper.stat().st_mode & 0o777 == 0o755
             print(f'VPS-2 generated files and modes ({name}): {"PASS" if same else "FAIL"}')
             results.append(same)
         fixture = work / 'fixture.tgz'
         fixture.write_bytes(b'deterministic fixture for vps2_installer\n')
         old_installer = installer(old, fixture)
         for name, script, settings in [('single', single, {}), ('modular', module, env)]:
-            same = old_installer == installer(script, fixture, **settings)
+            generated = installer(script, fixture, **settings)
+            if args.allow_vps2_ssh22:
+                generated, guard = re.subn(
+                    rb'^  # BEGIN VPS2 SSH22 PUSH GUARD\n.*?^  # END VPS2 SSH22 PUSH GUARD\n',
+                    b'', generated, flags=re.M | re.S)
+                generated, offer = re.subn(
+                    rb'^  # BEGIN VPS2 SSH22 OFFER\n.*?^  # END VPS2 SSH22 OFFER\n',
+                    OLD_SSH22_NOTICE, generated, flags=re.M | re.S)
+                same = guard == offer == 1 and old_installer == generated
+            else:
+                same = old_installer == generated
             print(f'VPS-2 installer with fixed payload ({name}): {"PASS" if same else "FAIL"}')
             results.append(same)
     raise SystemExit(0 if all(results) else 1)
