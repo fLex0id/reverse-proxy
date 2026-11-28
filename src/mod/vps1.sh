@@ -523,7 +523,7 @@ vps1_install() {
   mkdir -p "$ETC" "$LIB" "$STATE" "$ASSETS" "$BK_DIR"; chown root:rp "$ETC"; chmod 750 "$ETC"; chmod 755 "$STATE" "$ASSETS"
   conf_set ROLE vps1 PUBLIC_IP "$PUBLIC_IP" WG_PORT "$WG_PORT" WG_NET "$(cf WG_NET '10.66.0.0/24')" WG_NET_GW "$(cf WG_NET_GW '10.66.0.1')" WG_MTU "$(cf WG_MTU 1380)" \
     TRANSPORT_ORDER "$order" TRANSPORT_FORCE "$(cf TRANSPORT_FORCE)" HY2_PORT "$HY2_PORT" HY2O_PORT "$HY2O_PORT" RXH_PORT "$RXH_PORT" RXH2_PORT "$RXH2_PORT" \
-    RXH_SNI "${RXH_SNI:-www.microsoft.com}" RXH2_SNI "${RXH2_SNI:-www.asus.com}" XHTTP_PATH "$(cf XHTTP_PATH "/$(rand_hex 4)")" XHTTP2_PATH "$(cf XHTTP2_PATH "/$(rand_hex 4)")" \
+    RXH_SNI "${RXH_SNI:-${SNI_STREAM_PREFERRED[0]}}" RXH2_SNI "${RXH2_SNI:-www.asus.com}" XHTTP_PATH "$(cf XHTTP_PATH "/$(rand_hex 4)")" XHTTP2_PATH "$(cf XHTTP2_PATH "/$(rand_hex 4)")" \
     HY2_MASQ "$(cf HY2_MASQ "https://${HY2_MASQ_HOST:-www.microsoft.com}")" EXIT_MTU "$(cf EXIT_MTU 1280)" DOORS "$(cf DOORS 'ssh=2222=127.0.0.1:22')" \
     RU_DIRECT "$([[ $ru == y ]] && echo 1 || echo 0)" RU_GUARD "$(cf RU_GUARD 1)" RU_GEOIP "$(cf RU_GEOIP 1)" DNS_RU "$(cf DNS_RU '77.88.8.8')" DNS_REMOTE "$(cf DNS_REMOTE 'quad9 cloudflare')" \
     DISABLE_IPV6 "$(cf DISABLE_IPV6 1)" SNIFF "$(cf SNIFF 1)" RL_FP "$(cf RL_FP chrome)" WATCH_MIN "$(cf WATCH_MIN 10)" WATCH_MAX "$(cf WATCH_MAX 15)" CONF_VER 2

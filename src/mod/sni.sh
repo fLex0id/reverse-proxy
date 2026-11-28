@@ -78,9 +78,21 @@ sni_choose() { # sni_choose ПЕРЕМЕННАЯ «Заголовок» reality|
     sni_scan "$SNI_CACHE" all || { warn "Полная проверка SNI не завершилась; результаты не считаются достоверными"; : >"$SNI_CACHE"; }
   fi
   local -a items=() good=() unchecked=()
+  if [[ $kind == stream-up ]]; then
+    for h in "${SNI_STREAM_PREFERRED[@]}"; do
+      [[ $h != "$skip" ]] || continue
+      chk=$(sni_check "$h")
+      if [[ $chk == *"TLS1.3 +"*"h2 +"*"X25519 +"* ]]; then
+        items+=("$h|$h|$chk")
+      fi
+    done
+  fi
   while IFS= read -r line; do
     h=${line%%|*}; chk=${line#*|}; ru=${chk##*|}; chk=${chk%|*}
     [[ $h == "$skip" ]] && continue
+    if [[ $kind == stream-up ]]; then
+      [[ " ${SNI_STREAM_PREFERRED[*]} www.microsoft.com " == *" $h "* ]] && continue
+    fi
     if [[ $kind == reality || $kind == stream-up ]]; then
       if [[ $chk == *"TLS1.3 +"*"X25519 +"* ]] &&
         { [[ $kind != stream-up ]] || [[ $chk == *"h2 +"* ]]; }; then

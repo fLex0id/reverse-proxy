@@ -71,6 +71,7 @@ SNI_WORLD=(www.lovelive-anime.jp www.msi.com www.asus.com www.gigabyte.com www.l
   www.corsair.com www.synology.com www.mikrotik.com www.jetbrains.com www.sap.com www.cisco.com www.lenovo.com
   www.canon.com www.nikon.com www.philips.com www.bosch.com www.siemens.com www.decathlon.com www.ikea.com
   www.zalando.com dl.google.com www.microsoft.com)
+SNI_STREAM_PREFERRED=(www.asus.com www.iana.org dl.google.com)
 SNI_CACHE=""
 # Приоритет для этой инсталляции: XHTTP packet-up, затем XHTTP stream-up,
 # затем HY2/QUIC и HY2+Salamander. Это политика, а не гарантия невидимости DPI.
