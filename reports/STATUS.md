@@ -50,23 +50,48 @@ Completed evidence since lab.18:
 - All 38 SNI candidates rechecked; four TLS1.3/X25519 failures retained. Six live
   Unicode/ASCII menu lock cases supplement the 28 existing menu branch fixtures.
 
-Current live regression controller: auxiliary hy2-deb,
-`rp-lab-regression-lab23-resume-20261127.service`. Private tree:
-`/root/rp-lab/controller-20261127/results-resumed`; earlier attempt: `results`.
-The earlier attempt stopped because the temporary client namespace was absent
-following a Debian reboot. Its packet-up T1-T8/T1-T3/30 T3 repetitions passed;
-client readiness failed and DNS capture was UNKNOWN. The namespace was restored
-and real client HTTPS passed. Continuation reuses only matching-candidate PASS
-evidence, writes a separate tree and rechecks the current pin/client readiness.
-The controller has a dedicated lab-only SSH key; remove its authorized-key entries
-and private credential after the remaining controller-driven acceptance work.
-Do not overlap mutations, start another regression, or clean hosts during this run.
+## Preliminary release (2026-11-28)
 
-Release verdict remains NOT_READY pending the remaining functional/fault/leak
-acceptance and final clean installation. The six-hour soak is explicitly deferred
-by the operator and is not a blocker for this release stage. No 24/7 endurance
-claim is made. README now provides deployment/update/recovery instructions for
-the exact candidate, with immutable source URL and SHA256.
+Tag: `v1.2.9-lab.23`, GitHub channel Pre-release. The tested script bytes are
+unchanged. See RELEASE_NOTES_RU.md for download, checksums, scope and remaining
+work. Publishing this artifact does not change the stable verdict NOT_READY.
+
+The autonomous four-transport regression finished on November 27. Its results
+were collected and all eight LAB-1 application/DNS captures reviewed on November 28,
+alongside positive client/LAB-2 captures. All four full T1-T3/T1-T8 runs, 120 extra
+T3 checks, 768 DNS behaviors and 360 same-port cases pass. HTTP/HTTPS/DoH/DoT and
+Cloudflare STUN pass on all four. HTTP/3 passes only on Salamander; the other
+three time out. Google STUN times out on all four. Direct numeric-address controls
+also time out; an external contribution is possible but not proven for each failure.
+Failures remain recorded. See REGRESSION-2026-11-28.md and results/REGRESSION_LAB23.json.
+
+The original run stopped after a reboot removed the temporary client namespace.
+Only matching-candidate successful packet-up restart/T1-T8/T1-T3/T3 evidence was
+reused; client readiness was rechecked and missing tests ran in a separate tree.
+All raw attempts are retained privately. A new November 28 reboot required
+rebuilding the client again before fault testing; the first preflight failure is
+retained and no fault was injected in that attempt.
+
+Lab.23 sustained Xray outage: HTTPS/foreign DNS/disabled IPv6 blocked; no matching
+LAB-1 direct control traffic. Restored HTTPS in 6.897 seconds and returned to auto.
+Scoped primary TCP block: observed outages followed by successful HTTPS in
+48.822 seconds, watcher switched to stream-up, 39 packets hit the temporary rule.
+Rule removed; both roles report stream-up, VPS-1 Xray reports r-xhttp, supervisors
+active. These are two scoped fault scenarios, not the complete fault matrix.
+
+The auxiliary controller's original private tree remains at
+`/root/rp-lab/controller-20261127`; collected evidence is also under ignored
+`lab/artifacts/release-20261128`. Its dedicated lab-only SSH key remains available
+for later acceptance; remove its authorized-key entries and private credential
+when controller-driven acceptance ends. No long test is running.
+
+Remaining before stable acceptance: final clean installation/uninstall/reinstall
+and actual standalone multipart installation; remaining CLI/menu, RU/DNS policy,
+doors/rotation/prune, split-brain, watchdog/failback, TCP/UDP/netem/load/resolver
+fault and native-IPv6 coverage. F01-F13 remain explicit in ACCEPTANCE.json.
+The user must perform the agreed cleanup before final clean installation.
+The six-hour soak is deferred by the operator and not counted as completed.
+Main and the backup branch have not been modified by this release work.
 
 ## Earlier resumed work (2026-11-21)
 

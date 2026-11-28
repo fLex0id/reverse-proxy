@@ -12,12 +12,12 @@
     {
       "id": "F02",
       "result": "UNKNOWN",
-      "reason": "Lab.16/lab.18 immutable-URL updates commit, preserve configuration/clients and repeat idempotently. Lab.18 failed rp update selects its candidate helper and restores measured state with nonzero status; subsequent client HTTPS and VPS-2/Xray exit/rev readback pass. Actual supervisor SIGKILL and reboot after unit mutation also restore baseline; first post-reboot HTTPS times out then passes. 155 local tests/static checks pass. Real deadline, other crash/disk/concurrency/stream/native-IPv6 and full candidate transport acceptance remain pending The independent November 27 full 1800-second deadline passes with original measured state restored, all six concurrent commands blocked and fallback unused; post-recovery client HTTPS passes. Earlier interrupted deadline run remains UNKNOWN. Lab.23 file and process-substitution migrations commit; installed unavailable/garbage/syntax-error update attempts return 1 and preserve measured state."
+      "reason": "Lab.23 file and process-substitution migrations commit; unavailable/garbage/syntax-error updates return 1 and preserve measured state. Full 1800-second rollback restores measured files/services, blocks six concurrent commands and uses no fallback. Earlier SIGKILL/reboot recovery passes; earlier interrupted deadline remains UNKNOWN. Remaining crash/disk/concurrency/platform variants and clean acceptance remain pending."
     },
     {
       "id": "F03",
       "result": "UNKNOWN",
-      "reason": "Lab.20 fixes ignored block generation failures, masked multipart installer status and TTL grace acceptance. Seven tests pass locally and on Rocky: real local TLS pin/token/reuse/concurrency/expiry and harmless generated multipart execution. Final live block/link installation and firewall cleanup remain pending. Lab.22 real spare-port firewalld ownership, failure and retry checks pass. Whole installed link service lifecycle remains pending. Real installed lab.22 link cleanup failed on a systemd bind mount; lab.23 fixes it. Installed download/pin/reuse, expiry and interruption cases now pass with file/listener/firewall cleanup. Actual standalone block installation remains pending."
+      "reason": "Generated multipart error propagation and isolated execution pass. Installed lab.23 link download/pin/reuse, expiry and interruption pass with service/file/listener/firewall cleanup. Spare-port firewall ownership/failure/retry pass. Actual standalone multipart installation on a clean host remains pending."
     },
     {
       "id": "F04",
@@ -27,12 +27,12 @@
     {
       "id": "F05",
       "result": "UNKNOWN",
-      "reason": "Four transport pins, auto, sync and routing readback exercised; complete split-brain and failure matrix pending"
+      "reason": "Lab.23 manual selection and both-role restart across all four transports pass; auto restored. Complete split-brain and failure matrix remains pending."
     },
     {
       "id": "F06",
       "result": "UNKNOWN",
-      "reason": "Four full transport checks plus repeated T3 pass; one failover scenario measured; complete watchdog/fault/load matrix pending"
+      "reason": "Lab.23 all four full T1-T3, T1-T8 with restart and 120 additional T3 pass. Short sustained Xray outage blocks tested HTTPS/DNS/disabled IPv6; HTTPS restores in 6.897 seconds. Complete watchdog/fault/load matrix remains pending. Scoped primary TCP block restores HTTPS in 48.822 seconds; both sides report stream-up and the temporary rule is removed. Remaining combinations/failback/netem are not accepted."
     },
     {
       "id": "F07",
@@ -42,7 +42,7 @@
     {
       "id": "F08",
       "result": "UNKNOWN",
-      "reason": "Lab.19 fixes client list/export write failures and truthful rollback diagnostics. Eleven isolated tests pass locally and on Rocky 10.2; full suite 166 tests/static checks pass. Live multiple-client, storage failure and final candidate network acceptance remain pending. Lab.21 real 96-KiB tmpfs ENOSPC in client staging preserves the original and stops before apply. Ten installed client lifecycle checks pass, including simultaneous HTTPS from two isolated WG clients, unique identities, no unrelated service restarts and original-state restoration."
+      "reason": "Client file/error handling and bounded real ENOSPC preserve measured state. Ten live lifecycle checks pass, including two simultaneous isolated WG clients, unique identities, no unrelated service restarts and original-state restoration. Broader acceptance remains incomplete."
     },
     {
       "id": "F09",
@@ -52,7 +52,7 @@
     {
       "id": "F10",
       "result": "UNKNOWN",
-      "reason": "Lab.4 passed 360 same-source and 768 ordinary DNS behaviors across four transports; strict DoH validation added. Paired Quad9 failures reproduced directly outside rp. Full resolver-outage/policy/reboot acceptance pending",
+      "reason": "Lab.23 passes 768 DNS behaviors and 360 same-source-port cases. Scoped packet review finds no tested foreign/blocked plaintext DNS on VPS-1; configured RU names remain direct. Full resolver-outage/policy/reboot acceptance remains pending.",
       "evidence": [
         "reports/DEFECTS.md#rp-013-p1-dns-reply-source-reused-across-resolver-destinations",
         "lab/dns_source_reuse.py"
@@ -76,5 +76,11 @@
   ],
   "soak_status": "DEFERRED_BY_OPERATOR",
   "soak_blocks_current_release_stage": false,
-  "soak_note": "Operator deferred the six-hour soak until after the release and subsequent requested changes. Functional and failure acceptance remain required; 24/7 endurance is not claimed."
+  "soak_note": "Operator deferred the six-hour soak until after the release and subsequent requested changes. Functional and failure acceptance remain required; 24/7 endurance is not claimed.",
+  "candidate_version": "1.2.9-lab.23",
+  "candidate_sha256": "2d6e6d7962c4d02a9c8f0b39a463265efd8419d29dec9a2accf00b6e722a5095",
+  "release_channel": "PRE_RELEASE",
+  "release_tag": "v1.2.9-lab.23",
+  "latest_regression": "reports/results/REGRESSION_LAB23.json",
+  "release_note": "Downloadable preliminary release only. Stable acceptance remains NOT_READY; the deferred soak is not counted as completed."
 }

@@ -1,0 +1,766 @@
+{
+  "candidate": {
+    "rp_sha256": "2d6e6d7962c4d02a9c8f0b39a463265efd8419d29dec9a2accf00b6e722a5095",
+    "runner_sha256": "c7a6a579f839a564caadccb624cb47db4c3a59519dad1521f807db079cc3bfe1",
+    "commit": "c8ba2c74caee60bb19e6b778c5416c1457c7c5d9"
+  },
+  "completed_run_date": "2026-11-27",
+  "review_date": "2026-11-28",
+  "stage_results": {
+    "PASS": 41,
+    "FAIL": 4
+  },
+  "checks": [
+    {
+      "id": "candidate-sha",
+      "result": "PASS",
+      "seconds": 0.5169799327850342,
+      "evidence_reused": false
+    },
+    {
+      "id": "client-namespace-preflight",
+      "result": "PASS",
+      "seconds": 0.1571645736694336,
+      "evidence_reused": false
+    },
+    {
+      "id": "reality-xhttp2-pin",
+      "result": "PASS",
+      "seconds": 10.6815185546875,
+      "evidence_reused": false
+    },
+    {
+      "id": "reality-xhttp2-restart-vps1",
+      "result": "PASS",
+      "seconds": 9.5367431640625e-07,
+      "evidence_reused": true
+    },
+    {
+      "id": "reality-xhttp2-restart-vps2",
+      "result": "PASS",
+      "seconds": 1.6689300537109375e-06,
+      "evidence_reused": true
+    },
+    {
+      "id": "reality-xhttp2-restart-client-readiness",
+      "result": "PASS",
+      "seconds": 0.6838300228118896,
+      "evidence_reused": false
+    },
+    {
+      "id": "reality-xhttp2-T1-T8-restart",
+      "result": "PASS",
+      "seconds": 9.5367431640625e-07,
+      "evidence_reused": true
+    },
+    {
+      "id": "reality-xhttp2-T1-T3",
+      "result": "PASS",
+      "seconds": 9.5367431640625e-07,
+      "evidence_reused": true
+    },
+    {
+      "id": "reality-xhttp2-T3-repeat30",
+      "result": "PASS",
+      "seconds": 9.5367431640625e-07,
+      "evidence_reused": true
+    },
+    {
+      "id": "reality-xhttp2-dns_matrix",
+      "result": "PASS",
+      "seconds": 95.9298210144043,
+      "evidence_reused": false,
+      "nonpassing": []
+    },
+    {
+      "id": "reality-xhttp2-dns-source-reuse",
+      "result": "PASS",
+      "seconds": 0.32352209091186523,
+      "evidence_reused": false
+    },
+    {
+      "id": "reality-xhttp2-application_matrix",
+      "result": "FAIL",
+      "seconds": 16.254711389541626,
+      "evidence_reused": false,
+      "nonpassing": [
+        "http3",
+        "stun"
+      ]
+    },
+    {
+      "id": "reality-xhttp-pin",
+      "result": "PASS",
+      "seconds": 21.987778425216675,
+      "evidence_reused": false
+    },
+    {
+      "id": "reality-xhttp-restart-vps1",
+      "result": "PASS",
+      "seconds": 24.680670022964478,
+      "evidence_reused": false
+    },
+    {
+      "id": "reality-xhttp-restart-vps2",
+      "result": "PASS",
+      "seconds": 2.7512001991271973,
+      "evidence_reused": false
+    },
+    {
+      "id": "reality-xhttp-restart-client-readiness",
+      "result": "PASS",
+      "seconds": 15.791380405426025,
+      "evidence_reused": false
+    },
+    {
+      "id": "reality-xhttp-T1-T8-restart",
+      "result": "PASS",
+      "seconds": 14.791887760162354,
+      "evidence_reused": false
+    },
+    {
+      "id": "reality-xhttp-T1-T3",
+      "result": "PASS",
+      "seconds": 0.32003140449523926,
+      "evidence_reused": false
+    },
+    {
+      "id": "reality-xhttp-T3-repeat30",
+      "result": "PASS",
+      "seconds": 1.9741792678833008,
+      "evidence_reused": false
+    },
+    {
+      "id": "reality-xhttp-dns_matrix",
+      "result": "PASS",
+      "seconds": 95.14517283439636,
+      "evidence_reused": false,
+      "nonpassing": []
+    },
+    {
+      "id": "reality-xhttp-dns-source-reuse",
+      "result": "PASS",
+      "seconds": 0.26347994804382324,
+      "evidence_reused": false
+    },
+    {
+      "id": "reality-xhttp-application_matrix",
+      "result": "FAIL",
+      "seconds": 16.29345464706421,
+      "evidence_reused": false,
+      "nonpassing": [
+        "http3",
+        "stun"
+      ]
+    },
+    {
+      "id": "hy2-wg-pin",
+      "result": "PASS",
+      "seconds": 8.890080451965332,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2-wg-restart-vps1",
+      "result": "PASS",
+      "seconds": 24.9048330783844,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2-wg-restart-vps2",
+      "result": "PASS",
+      "seconds": 1.8424787521362305,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2-wg-restart-client-readiness",
+      "result": "PASS",
+      "seconds": 17.76632285118103,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2-wg-T1-T8-restart",
+      "result": "PASS",
+      "seconds": 44.44598913192749,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2-wg-T1-T3",
+      "result": "PASS",
+      "seconds": 0.2964818477630615,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2-wg-T3-repeat30",
+      "result": "PASS",
+      "seconds": 1.8038105964660645,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2-wg-dns_matrix",
+      "result": "PASS",
+      "seconds": 95.52738165855408,
+      "evidence_reused": false,
+      "nonpassing": []
+    },
+    {
+      "id": "hy2-wg-dns-source-reuse",
+      "result": "PASS",
+      "seconds": 0.31081128120422363,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2-wg-application_matrix",
+      "result": "FAIL",
+      "seconds": 16.393359184265137,
+      "evidence_reused": false,
+      "nonpassing": [
+        "http3",
+        "stun"
+      ]
+    },
+    {
+      "id": "hy2-wg-kernel-reset",
+      "result": "PASS",
+      "seconds": 6.337938547134399,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2o-wg-pin",
+      "result": "PASS",
+      "seconds": 8.748525619506836,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2o-wg-restart-vps1",
+      "result": "PASS",
+      "seconds": 24.843971967697144,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2o-wg-restart-vps2",
+      "result": "PASS",
+      "seconds": 3.913769006729126,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2o-wg-restart-client-readiness",
+      "result": "PASS",
+      "seconds": 17.747404098510742,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2o-wg-T1-T8-restart",
+      "result": "PASS",
+      "seconds": 30.737102508544922,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2o-wg-T1-T3",
+      "result": "PASS",
+      "seconds": 0.3170783519744873,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2o-wg-T3-repeat30",
+      "result": "PASS",
+      "seconds": 1.8418347835540771,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2o-wg-dns_matrix",
+      "result": "PASS",
+      "seconds": 95.27036714553833,
+      "evidence_reused": false,
+      "nonpassing": []
+    },
+    {
+      "id": "hy2o-wg-dns-source-reuse",
+      "result": "PASS",
+      "seconds": 0.31036949157714844,
+      "evidence_reused": false
+    },
+    {
+      "id": "hy2o-wg-application_matrix",
+      "result": "FAIL",
+      "seconds": 16.20232105255127,
+      "evidence_reused": false,
+      "nonpassing": [
+        "stun"
+      ]
+    },
+    {
+      "id": "hy2o-wg-kernel-reset",
+      "result": "PASS",
+      "seconds": 6.390016555786133,
+      "evidence_reused": false
+    },
+    {
+      "id": "restore-auto",
+      "result": "PASS",
+      "seconds": 5.500229835510254,
+      "evidence_reused": false
+    }
+  ],
+  "transports": [
+    {
+      "id": "reality-xhttp2",
+      "dns_cases": 192,
+      "dns_nonpassing": 0,
+      "same_port_cases": 90,
+      "same_port_nonpassing": 0,
+      "applications": [
+        {
+          "id": "http",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "https",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "doh",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "http3",
+          "result": "FAIL",
+          "rc": 28
+        },
+        {
+          "id": "dot",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "stun",
+          "result": "FAIL",
+          "rc": 1
+        },
+        {
+          "id": "stun-cloudflare",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "ipv6",
+          "result": "PASS",
+          "rc": 28
+        }
+      ],
+      "application_capture_counts": {
+        "lab1": {
+          "packets": 0,
+          "quic_control_packets": 0,
+          "cloudflare_stun_packets": 0
+        },
+        "lab2": {
+          "packets": 87,
+          "quic_control_packets": 5,
+          "cloudflare_stun_packets": 2
+        },
+        "client": {
+          "packets": 97,
+          "quic_control_packets": 5,
+          "cloudflare_stun_packets": 2
+        }
+      }
+    },
+    {
+      "id": "reality-xhttp",
+      "dns_cases": 192,
+      "dns_nonpassing": 0,
+      "same_port_cases": 90,
+      "same_port_nonpassing": 0,
+      "applications": [
+        {
+          "id": "http",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "https",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "doh",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "http3",
+          "result": "FAIL",
+          "rc": 28
+        },
+        {
+          "id": "dot",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "stun",
+          "result": "FAIL",
+          "rc": 1
+        },
+        {
+          "id": "stun-cloudflare",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "ipv6",
+          "result": "PASS",
+          "rc": 28
+        }
+      ],
+      "application_capture_counts": {
+        "lab1": {
+          "packets": 4,
+          "quic_control_packets": 0,
+          "cloudflare_stun_packets": 0
+        },
+        "lab2": {
+          "packets": 81,
+          "quic_control_packets": 5,
+          "cloudflare_stun_packets": 2
+        },
+        "client": {
+          "packets": 88,
+          "quic_control_packets": 5,
+          "cloudflare_stun_packets": 2
+        }
+      }
+    },
+    {
+      "id": "hy2-wg",
+      "dns_cases": 192,
+      "dns_nonpassing": 0,
+      "same_port_cases": 90,
+      "same_port_nonpassing": 0,
+      "applications": [
+        {
+          "id": "http",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "https",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "doh",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "http3",
+          "result": "FAIL",
+          "rc": 28
+        },
+        {
+          "id": "dot",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "stun",
+          "result": "FAIL",
+          "rc": 1
+        },
+        {
+          "id": "stun-cloudflare",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "ipv6",
+          "result": "PASS",
+          "rc": 28
+        }
+      ],
+      "application_capture_counts": {
+        "lab1": {
+          "packets": 12,
+          "quic_control_packets": 0,
+          "cloudflare_stun_packets": 0
+        },
+        "lab2": {
+          "packets": 78,
+          "quic_control_packets": 5,
+          "cloudflare_stun_packets": 2
+        },
+        "client": {
+          "packets": 96,
+          "quic_control_packets": 5,
+          "cloudflare_stun_packets": 2
+        }
+      }
+    },
+    {
+      "id": "hy2o-wg",
+      "dns_cases": 192,
+      "dns_nonpassing": 0,
+      "same_port_cases": 90,
+      "same_port_nonpassing": 0,
+      "applications": [
+        {
+          "id": "http",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "https",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "doh",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "http3",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "dot",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "stun",
+          "result": "FAIL",
+          "rc": 1
+        },
+        {
+          "id": "stun-cloudflare",
+          "result": "PASS",
+          "rc": 0
+        },
+        {
+          "id": "ipv6",
+          "result": "PASS",
+          "rc": 28
+        }
+      ],
+      "application_capture_counts": {
+        "lab1": {
+          "packets": 0,
+          "quic_control_packets": 0,
+          "cloudflare_stun_packets": 0
+        },
+        "lab2": {
+          "packets": 101,
+          "quic_control_packets": 27,
+          "cloudflare_stun_packets": 2
+        },
+        "client": {
+          "packets": 117,
+          "quic_control_packets": 27,
+          "cloudflare_stun_packets": 2
+        }
+      }
+    }
+  ],
+  "lab1_review": [
+    {
+      "capture": "hy2-wg-application_matrix/lab1.pcap",
+      "packets": 12,
+      "dns_questions": {
+        "A mirror.yandex.ru.": 3,
+        "AAAA mirror.yandex.ru.": 3
+      },
+      "unparsed": []
+    },
+    {
+      "capture": "hy2-wg-dns_matrix/lab1.pcap",
+      "packets": 6,
+      "dns_questions": {
+        "A sberbank.ru.": 1,
+        "A gosuslugi.ru.": 1,
+        "A ozon.ru.": 1
+      },
+      "unparsed": []
+    },
+    {
+      "capture": "hy2o-wg-application_matrix/lab1.pcap",
+      "packets": 0,
+      "dns_questions": {},
+      "unparsed": []
+    },
+    {
+      "capture": "hy2o-wg-dns_matrix/lab1.pcap",
+      "packets": 6,
+      "dns_questions": {
+        "A sberbank.ru.": 1,
+        "A gosuslugi.ru.": 1,
+        "A ozon.ru.": 1
+      },
+      "unparsed": []
+    },
+    {
+      "capture": "reality-xhttp-application_matrix/lab1.pcap",
+      "packets": 4,
+      "dns_questions": {
+        "AAAA www.mos.ru.": 1,
+        "A www.mos.ru.": 1
+      },
+      "unparsed": []
+    },
+    {
+      "capture": "reality-xhttp-dns_matrix/lab1.pcap",
+      "packets": 6,
+      "dns_questions": {
+        "A sberbank.ru.": 1,
+        "A gosuslugi.ru.": 1,
+        "A ozon.ru.": 1
+      },
+      "unparsed": []
+    },
+    {
+      "capture": "reality-xhttp2-application_matrix/lab1.pcap",
+      "packets": 0,
+      "dns_questions": {},
+      "unparsed": []
+    },
+    {
+      "capture": "reality-xhttp2-dns_matrix/lab1.pcap",
+      "packets": 6,
+      "dns_questions": {
+        "A sberbank.ru.": 1,
+        "A gosuslugi.ru.": 1,
+        "A ozon.ru.": 1
+      },
+      "unparsed": []
+    }
+  ],
+  "capture_scope": "Exact filters, intervals, endpoints and configured policy only; no general leak acceptance or native IPv6 claim.",
+  "external_controls": {
+    "http3_exact_numeric_destination_direct": "FAIL: curl rc=28",
+    "google_stun_same_numeric_destination_direct": "FAIL: timeout",
+    "interpretation": "External contribution possible; individual failures remain FAIL."
+  },
+  "failclosed": {
+    "https": {
+      "rc": 28,
+      "result": "PASS",
+      "expectation": "network timeout/refusal while Xray is stopped; no answer"
+    },
+    "dns": {
+      "rc": 1,
+      "result": "PASS",
+      "expectation": "network timeout/refusal while Xray is stopped; no answer"
+    },
+    "ipv6": {
+      "rc": 28,
+      "result": "PASS",
+      "expectation": "network timeout/refusal while Xray is stopped; no answer"
+    },
+    "restored": {
+      "rc": 0,
+      "result": "PASS",
+      "seconds": 6.897033416000113
+    }
+  },
+  "prior_attempts_retained": [
+    "Regression: client namespace absent after reboot; only matching-candidate PASS results reused",
+    "Failclosed: client preflight failed after reboot, no fault injected; namespace rebuilt and separate repeat passed"
+  ],
+  "verdict": "NOT_READY",
+  "private_evidence_sha256": {
+    "capture-review/summary.json": "3f3a9ac732b1c8a4911de384f6a6a63a20f2939efae98e10dc2fd5818c840d2d",
+    "failclosed-resumed/client.pcap": "a2cc98bbbc90bcc41e1eb102549a7f3903dc03049edc6f7d5a5d07b53d3e9ddc",
+    "failclosed-resumed/fault-end.json": "f7f479cac8884af928bdc1efc13e8890a0628f1ceec01437df214320605e6ad4",
+    "failclosed-resumed/fault-start.json": "2d025f878d5b22782f7a5c23115c3505d4f1905a3c5956772267dd2a9d46e774",
+    "failclosed-resumed/lab1.pcap": "1ac82cc2ac6134495367166c0e77148534d324c1c7504a87c87b0167a11d3864",
+    "failclosed-resumed/lab2.pcap": "791e900c7d96ecc45ebdc265a026ed7567b45401010f2ae0547bbbc427f90231",
+    "failclosed-resumed/results.json": "82bb25db739333bdd18deafd9043a9c36a476d643d0d9eb07fad0fb790310055",
+    "failover/probes.json": "4c2170a90a3b063d44a78bfdfbdedeb6f7b3f9c360a8665e0e8890b6acb9a09c",
+    "failover/result.json": "0e2802cf05603d771579ac5c4a1ec6b2837a029126b3e4615c488724de227620",
+    "original-attempt/candidate.json": "dd5a649a77379cf3eb630f1f6ce4c4bee2f62d4c91deb7501a92544bcc28a5f0",
+    "original-attempt/reality-xhttp2-dns_matrix/client.pcap": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "original-attempt/reality-xhttp2-dns_matrix/lab1.pcap": "704e5e5b3234433c01fcfd1b20a306e77e985038120492dc53965c3edd38a4ea",
+    "original-attempt/reality-xhttp2-dns_matrix/lab2.pcap": "704e5e5b3234433c01fcfd1b20a306e77e985038120492dc53965c3edd38a4ea",
+    "original-attempt/results.json": "0a834a990f2843707b98cb6a315759e4d0cd1b6715d5de0fcfa3fae28a196c7e",
+    "results-resumed/candidate.json": "72072341ec77112687cf1e51f7382a573856b2f53eae98b1c279fa96225281d5",
+    "results-resumed/hy2-wg-application_matrix/client.pcap": "b0af110a10aa456dc931f702e76ada9302bed1216c7e79e040fd8f05f190baac",
+    "results-resumed/hy2-wg-application_matrix/lab1.pcap": "e254bcc8c37a941c82fc18e4a338a668c505ebbb0fb9d0b9f9b08fe815e706aa",
+    "results-resumed/hy2-wg-application_matrix/lab2.pcap": "e48775ece0aa34b366c2c34000e5826cec3f4c7323ec66871369a301c3d22175",
+    "results-resumed/hy2-wg-application_matrix/results.json": "b9c827376d4ecc8cae6bd897e17b9ed097cbb5327db949156ca30c796a8ae6c6",
+    "results-resumed/hy2-wg-dns_matrix/client.pcap": "e7c35d81906d2a84aab8412fb9974add816d3a682671108382d6fd1cbbaf3a15",
+    "results-resumed/hy2-wg-dns_matrix/lab1.pcap": "9129d5bdfc27c58449294ed3ec09376842748effa04f00fdc392dd1a5652b783",
+    "results-resumed/hy2-wg-dns_matrix/lab2.pcap": "704e5e5b3234433c01fcfd1b20a306e77e985038120492dc53965c3edd38a4ea",
+    "results-resumed/hy2-wg-dns_matrix/results.json": "439b33a9d1b8307963d8d86f23f09dbf88ce025e0ba4f709b4fa6ab294bed0de",
+    "results-resumed/hy2-wg-kernel-reset/inner.pcap": "ffe927914560526322f2ee9ec850b9a01362d9c7c7f5e0e3f61fbacc0995eee7",
+    "results-resumed/hy2-wg-kernel-reset/results.json": "5e6384bed4b45ab60d2f20448a9af98ff579b825ad22932a77bd366d0186a56a",
+    "results-resumed/hy2-wg-kernel-reset/underlay.pcap": "704e5e5b3234433c01fcfd1b20a306e77e985038120492dc53965c3edd38a4ea",
+    "results-resumed/hy2o-wg-application_matrix/client.pcap": "8db38ac64f0e9f8611e8b2bbad4f58e62741edd30c2bca6595085d2b2eda93d1",
+    "results-resumed/hy2o-wg-application_matrix/lab1.pcap": "704e5e5b3234433c01fcfd1b20a306e77e985038120492dc53965c3edd38a4ea",
+    "results-resumed/hy2o-wg-application_matrix/lab2.pcap": "7ea45210117b89be032decd071d0abbd430a203c0f26fd5d0d9f6d0e5070ea02",
+    "results-resumed/hy2o-wg-application_matrix/results.json": "0e84c720f714b9ec090346eac6a748112c4adcb416776ff79777e608fc36deaf",
+    "results-resumed/hy2o-wg-dns_matrix/client.pcap": "34a2e8cdebaf18e79f7721cb925ba5eaf37d9001fbc4ba61ae8a378a08594690",
+    "results-resumed/hy2o-wg-dns_matrix/lab1.pcap": "7a9277a360f8d94beba977f7a62484cfa4857140772ccd4b5c1203a1dcbefbe6",
+    "results-resumed/hy2o-wg-dns_matrix/lab2.pcap": "704e5e5b3234433c01fcfd1b20a306e77e985038120492dc53965c3edd38a4ea",
+    "results-resumed/hy2o-wg-dns_matrix/results.json": "c0d8cc8418b4e41cf2f3bc357dce5402c1384eef31eb318a1347739ed935f87f",
+    "results-resumed/hy2o-wg-kernel-reset/inner.pcap": "965e06d7f271d9cbfd5826e52bd129d176c434dda57486cf1c3ca6ae0ae7d05f",
+    "results-resumed/hy2o-wg-kernel-reset/results.json": "5e6384bed4b45ab60d2f20448a9af98ff579b825ad22932a77bd366d0186a56a",
+    "results-resumed/hy2o-wg-kernel-reset/underlay.pcap": "704e5e5b3234433c01fcfd1b20a306e77e985038120492dc53965c3edd38a4ea",
+    "results-resumed/reality-xhttp-application_matrix/client.pcap": "6b1d9dc32ebba5cb79c339d2d8062cd5aee36da37fa94c2d4aef19c615cf23b9",
+    "results-resumed/reality-xhttp-application_matrix/lab1.pcap": "d9f5da417ee55274686117e3c43b26b8f23b771d6c83a9ecd6a0f97d95d16ce4",
+    "results-resumed/reality-xhttp-application_matrix/lab2.pcap": "48e16052efb45277c57533765403f240bad82190a35de2b8aa4a47633e43fe59",
+    "results-resumed/reality-xhttp-application_matrix/results.json": "9059145f4da613765bcf88d7e315b670625fe685ccb4e85bf33499627dd5bdd4",
+    "results-resumed/reality-xhttp-dns_matrix/client.pcap": "af404e73ca9a55e0f7b418b514e81595e6532ad3c8dddb90cfdde2b0be2571b9",
+    "results-resumed/reality-xhttp-dns_matrix/lab1.pcap": "0588ff7c8f3194f6b00cd7af0bc30019789775c847fa23b637a9668ffe6b6bcf",
+    "results-resumed/reality-xhttp-dns_matrix/lab2.pcap": "04ba27ca87ea5dd4e9ff4fc358cfee5669e3fcb6c2e4c3afe2936ae2f6adba6f",
+    "results-resumed/reality-xhttp-dns_matrix/results.json": "4f5c8f3efadc2ca3bcdc9caba572c632f997a1620f0ba8e2db180e5e73e668e1",
+    "results-resumed/reality-xhttp2-application_matrix/client.pcap": "e3cf8296a2359dd0f45eaf0408cc33b5c643ff56c6408a717f7e70da62304997",
+    "results-resumed/reality-xhttp2-application_matrix/lab1.pcap": "704e5e5b3234433c01fcfd1b20a306e77e985038120492dc53965c3edd38a4ea",
+    "results-resumed/reality-xhttp2-application_matrix/lab2.pcap": "14914e718bef4a676954a002a9d7c8932c95efd7aa41c80b2f475502fa035f7d",
+    "results-resumed/reality-xhttp2-application_matrix/results.json": "5e1b1b6b11cfb6dc275c8852dc9311cde286eab876ab96e12727eb12bceeddf8",
+    "results-resumed/reality-xhttp2-dns_matrix/client.pcap": "3128946007510a21754cb39e1de76481c7c842d1afbc001ffe07e465f54cbbbb",
+    "results-resumed/reality-xhttp2-dns_matrix/lab1.pcap": "17a2bc877347e8dc7fee9d3043d718c52aaba3ad67bee6822f551a30ac419fb9",
+    "results-resumed/reality-xhttp2-dns_matrix/lab2.pcap": "cd821a6aecf07281e09beafb917d7b2cff0b376dff6e10988acc24b72e39764f",
+    "results-resumed/reality-xhttp2-dns_matrix/results.json": "876261991b5e8d3f87f7390f2ca891cce73a4ff15b84e27276169586f6c123dd",
+    "results-resumed/results.json": "cb12e17202c6fe7c775586dc4f7ebad646a8ff63c3194a72acff6a7e550983dd",
+    "failover/mode-auto.log": "b9590edd6c740188597eb8bde4f0791e6611d89d3fabd660cc5977a1ac0ac63b",
+    "failover/mode-reality-xhttp2.log": "480bcb3bf81feb16fd551dc9809e0f6afb54e6f880d5d5d914e5fe572bfa9a14",
+    "failover/watch-and-rule.log": "eb82c3f3930b17ea2fb71623293bbf8a35c94ae9c12d94d72b499ce3b481cbc5"
+  },
+  "failover": {
+    "recovery_seconds": 48.82219294200013,
+    "sla_seconds": 60,
+    "result": "PASS",
+    "rule_dropped_packets": 39,
+    "restored_mode": "auto",
+    "vps1_active": "reality-xhttp",
+    "vps2_active": "reality-xhttp",
+    "vps1_xray": "r-xhttp",
+    "fault_rule_removed": true,
+    "xray_readback": {
+      "exit": {
+        "override": "r-xhttp",
+        "principleTarget": [
+          "r-xhttp"
+        ]
+      },
+      "rev": {
+        "override": null,
+        "principleTarget": [
+          "r-xhttp"
+        ]
+      }
+    }
+  },
+  "local_validation": {
+    "total": 193,
+    "result": "PASS",
+    "source_commit": "c8ba2c74caee60bb19e6b778c5416c1457c7c5d9",
+    "log_sha256": "f97d29fc854f013add1db155a21a82e4abf83fc4711ea36087e17d23567821a0",
+    "note": "Previously completed verification of unchanged script; no additional full-suite run claimed."
+  }
+}
